@@ -96,6 +96,12 @@ mod tests {
                     name: "ripgrep".into(),
                     version: "14.1.0".into(),
                 },
+                Action::Upgrade {
+                    backend: "winget".into(),
+                    name: "Brave.Brave".into(),
+                    from: "1.85".into(),
+                    to: "1.86".into(),
+                },
                 Action::Downgrade {
                     backend: SCOOP.into(),
                     name: "fzf".into(),
@@ -121,11 +127,12 @@ mod tests {
         };
         let out = render(&plan);
         assert!(out.contains("+ scoop  ripgrep"));
+        assert!(out.contains("^ winget Brave.Brave"));
         assert!(out.contains("v scoop  fzf"));
         assert!(out.contains("- scoop  aichat"));
         assert!(out.contains("! scoop  kanata"));
         assert!(out.contains("? scoop  antigravity"));
-        assert!(out.contains("3 change(s), 1 skipped"));
+        assert!(out.contains("4 change(s), 1 skipped"));
     }
 
     #[test]

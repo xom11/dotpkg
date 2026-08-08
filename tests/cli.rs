@@ -52,6 +52,14 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        // A `#!/bin/sh` file at this path would buy a green "end-to-end" test
+        // on macOS, where `execve` ignores the `.cmd`, that means something
+        // entirely different on a Windows runner. Checked here rather than by
+        // scanning the test sources, which cannot tell a comment from a call.
+        assert!(
+            !self.scoop.path().join("shims").join("scoop.cmd").exists(),
+            "no test may provide a fake scoop binary"
+        );
         Command::new(env!("CARGO_BIN_EXE_dotpkg"))
             .args(args)
             .current_dir(self.work.path())
@@ -77,22 +85,41 @@ impl Fixture {
     }
 }
 
-/// Every path under the scoop root and the state directory, sorted. Crude on
-/// purpose: an install, an uninstall or a written state file all show up as a
-/// change in this list.
+/// Every path under the scoop root and the state directory, each paired with
+/// a hash of its content, sorted. An install, an uninstall, or an in-place
+/// rewrite of an existing file all show up as a change in this list.
+///
+/// The content hash is the point. Recording path names alone was measured to
+/// miss a full rewrite of `state.json` -- the exact write the executor adds.
+/// `DefaultHasher` is not cryptographic and does not need to be: this detects
+/// an accidental write, not an adversarial one, and it adds no dependency.
 #[derive(Debug, PartialEq, Eq)]
-struct Snapshot(Vec<String>);
+struct Snapshot(Vec<(String, u64)>);
 
 impl Snapshot {
     fn of(scoop: &Path, local: &Path) -> Snapshot {
-        fn walk(dir: &Path, out: &mut Vec<String>) {
+        use std::hash::{Hash, Hasher};
+
+        fn digest(path: &Path) -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            match fs::read(path) {
+                Ok(bytes) => bytes.hash(&mut h),
+                // A directory, or a file we cannot read: the path itself is
+                // still recorded above, so this only has to be stable.
+                Err(e) => e.kind().hash(&mut h),
+            }
+            h.finish()
+        }
+
+        fn walk(dir: &Path, out: &mut Vec<(String, u64)>) {
             let Ok(entries) = fs::read_dir(dir) else {
                 return;
             };
             for e in entries.flatten() {
-                out.push(e.path().to_string_lossy().into_owned());
-                if e.path().is_dir() {
-                    walk(&e.path(), out);
+                let p = e.path();
+                out.push((p.to_string_lossy().into_owned(), digest(&p)));
+                if p.is_dir() {
+                    walk(&p, out);
                 }
             }
         }
@@ -106,6 +133,27 @@ impl Snapshot {
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[test]
+fn the_snapshot_notices_a_file_whose_content_changed_under_the_same_name() {
+    // The property the whole "nothing was touched" assertion rests on.
+    // Measured before this fix: Snapshot recorded path strings only, so an
+    // in-place rewrite of state.json -- exactly what the executor adds -- was
+    // invisible and the suite stayed green.
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let f = dir.path().join("state.json");
+    fs::write(&f, r#"{"scoop":{"fzf":"installed"}}"#).unwrap();
+    let before = Snapshot::of(dir.path(), other.path());
+
+    fs::write(&f, r#"{"scoop":{"PWNED":"adopted"}}"#).unwrap();
+    let after = Snapshot::of(dir.path(), other.path());
+
+    assert_ne!(
+        before, after,
+        "a rewrite of an existing file must show up as a change"
+    );
 }
 
 #[test]

@@ -1051,26 +1051,26 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
     #[test]
     fn every_scoop_argv_is_built_by_a_named_function() {
         // The argv tests above are only honest if there is exactly one
-        // construction site per command. An inline `.args([...])` would slip
-        // past all of them.
+        // construction site per command. An inline scoop invocation would
+        // slip past all of them.
         //
         // `git` argv are exempt: they are built inline on purpose in
         // `git_show` and `resolve_spelling`, and neither is a scoop
         // invocation. Verified at plan time: exactly two such sites exist
         // (`git_ok` takes a slice variable, so it does not match).
         //
-        // Asserted below as 5, not 2: `include_str!` pulls in this very test,
-        // and the two comments above plus this test's own needle each quote
-        // the pattern being searched for, so this function contributes three
-        // self-matches on top of the two real ones. Measured against the
-        // tree with this test present, not assumed.
+        // Assembled rather than written out, so this test's own source does
+        // not contain the needle and inflate the count. Patching the expected
+        // number instead of the mechanism was tried first and is fragile: any
+        // future comment mentioning the literal changes the answer, and two
+        // such edits can cancel a real regression out.
+        let needle: String = [".args", "(["].concat();
         let src = include_str!("scoop.rs");
-        let inline = src.matches(".args([").count();
+        let inline = src.matches(needle.as_str()).count();
         assert_eq!(
-            inline, 5,
-            "the two real inline .args([..]) sites belong to git (git_show, \
-             resolve_spelling) plus three self-matches from this test's own wording; \
-             build every SCOOP argv in a *_argv function so the tests above cover it"
+            inline, 2,
+            "the two inline argv belong to git (git_show, resolve_spelling); \
+             build every SCOOP argv in a *_argv function so the argv tests cover it"
         );
     }
 }

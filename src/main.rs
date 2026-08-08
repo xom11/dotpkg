@@ -36,10 +36,7 @@ fn main() -> Result<()> {
             let scoop = Scoop::discover();
             let scan = scoop.scan()?;
             let procs = dotpkg::sys::running_processes();
-            let running = dotpkg::model::Running::new(
-                procs.iter().map(|p| p.name.clone()).collect(),
-                scoop.running_apps(&procs),
-            );
+            let running = scoop.running_set(&procs);
 
             // Before the plan, not after: a package missing from the plan
             // because dotpkg could not read it is the one thing the plan

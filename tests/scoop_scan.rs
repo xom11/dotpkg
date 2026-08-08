@@ -395,3 +395,73 @@ fn a_manifest_that_is_not_a_file_warns_rather_than_vanishing() {
         scan.warnings
     );
 }
+
+use dotpkg::model::{Installed, SCOOP};
+
+fn installed_pkg(name: &str, bins: &[&str]) -> Installed {
+    Installed {
+        backend: SCOOP.to_string(),
+        name: Name::new(name),
+        version: "0".to_string(),
+        arch: None,
+        bucket: None,
+        bins: bins.iter().map(|b| b.to_string()).collect(),
+    }
+}
+
+// `running_set` unions name matching and path matching -- the design's central
+// claim is that the two have non-overlapping blind spots and only their union
+// covers every package. It used to be assembled inline in `main.rs`, which no
+// test could reach; these three exercise the union itself, with fabricated
+// `Process` values, on any OS.
+
+#[test]
+fn the_running_set_detects_a_package_reachable_only_by_path() {
+    // nodejs's manifest names no executable at all; the live path under
+    // apps/nodejs/current/ is the only signal there is.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let scoop = Scoop::new(root.clone());
+    let procs = [proc(
+        "node",
+        Some(root.join("apps/nodejs/current/node.exe")),
+    )];
+
+    let running = scoop.running_set(&procs);
+
+    assert!(running.covers(&installed_pkg("nodejs", &[])));
+}
+
+#[test]
+fn the_running_set_detects_a_package_reachable_only_by_name() {
+    // An elevated kanata: sysinfo cannot read its exe path (`exe: None`), so
+    // the only signal is the live process name matching one of the
+    // manifest's declared executables.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let scoop = Scoop::new(root);
+    let procs = [proc("kanata_windows_tty_winiov2_arm64", None)];
+
+    let running = scoop.running_set(&procs);
+
+    assert!(running.covers(&installed_pkg(
+        "kanata",
+        &["kanata_windows_tty_winiov2_arm64"]
+    )));
+}
+
+#[test]
+fn the_running_set_detects_both_signals_at_once() {
+    let root = PathBuf::from("/tmp/dpk-root");
+    let scoop = Scoop::new(root.clone());
+    let procs = [
+        proc("node", Some(root.join("apps/nodejs/current/node.exe"))),
+        proc("kanata_windows_tty_winiov2_arm64", None),
+    ];
+
+    let running = scoop.running_set(&procs);
+
+    assert!(running.covers(&installed_pkg("nodejs", &[])));
+    assert!(running.covers(&installed_pkg(
+        "kanata",
+        &["kanata_windows_tty_winiov2_arm64"]
+    )));
+}

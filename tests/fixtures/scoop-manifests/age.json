@@ -1,0 +1,5 @@
+{
+  "version": "1.3.1",
+  "bin": ["age.exe", "age-inspect.exe", "age-keygen.exe", "age-plugin-batchpass.exe"],
+  "architecture": { "64bit": {} }
+}

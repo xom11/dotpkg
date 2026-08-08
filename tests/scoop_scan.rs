@@ -141,3 +141,100 @@ fn a_mixed_case_app_directory_keeps_its_exact_name_on_display() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].name.to_string(), "RipGrep");
 }
+
+/// Install a real manifest from `tests/fixtures/scoop-manifests` as an app.
+fn app_from_fixture(root: &Path, name: &str, arch: &str) {
+    let dir = root.join("apps").join(name).join("current");
+    fs::create_dir_all(&dir).unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/scoop-manifests")
+        .join(format!("{name}.json"));
+    fs::copy(&src, dir.join("manifest.json"))
+        .unwrap_or_else(|e| panic!("copying {}: {e}", src.display()));
+    fs::write(
+        dir.join("install.json"),
+        format!(r#"{{"bucket":"main","architecture":"{arch}"}}"#),
+    )
+    .unwrap();
+}
+
+fn bins_of(root: &Path, name: &str) -> Vec<String> {
+    let scan = Scoop::new(root.to_path_buf()).scan().unwrap();
+    assert!(scan.warnings.is_empty(), "got {:?}", scan.warnings);
+    let inst = scan
+        .installed
+        .into_iter()
+        .find(|i| i.name == name)
+        .unwrap_or_else(|| panic!("{name} not scanned"));
+    inst.bins
+}
+
+#[test]
+fn a_bare_string_bin_yields_one_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "fzf", "arm64");
+    assert_eq!(bins_of(dir.path(), "fzf"), vec!["fzf"]);
+}
+
+#[test]
+fn a_list_of_strings_yields_all_of_them() {
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "age", "64bit");
+    assert_eq!(
+        bins_of(dir.path(), "age"),
+        vec!["age", "age-inspect", "age-keygen", "age-plugin-batchpass"]
+    );
+}
+
+#[test]
+fn a_path_is_reduced_to_its_basename_and_the_package_name_is_not_assumed() {
+    // The finding: the package is `neovim`, the process is `nvim.exe`.
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "neovim", "arm64");
+    assert_eq!(bins_of(dir.path(), "neovim"), vec!["nvim", "xxd"]);
+}
+
+#[test]
+fn a_mixed_list_of_strings_and_alias_pairs_yields_both_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "python", "64bit");
+    assert_eq!(
+        bins_of(dir.path(), "python"),
+        vec!["idle", "idle3", "python", "python3"]
+    );
+}
+
+#[test]
+fn bins_under_every_architecture_and_shortcuts_are_all_collected() {
+    // kanata is why this matters. It declares no top-level bin; its executable
+    // is kanata_windows_tty_winIOv2_arm64.exe and only the shim alias is
+    // `Kanata`. Reading just the installed architecture, or just `bin`, leaves
+    // the keyboard remapper unprotected -- and losing it costs the keyboard on
+    // the machine you would need to fix it.
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "kanata", "arm64");
+    assert_eq!(
+        bins_of(dir.path(), "kanata"),
+        vec![
+            "kanata",
+            "kanata-cmd",
+            "kanata_windows_gui_winiov2_arm64",
+            "kanata_windows_gui_winiov2_cmd_allowed_arm64",
+            "kanata_windows_gui_winiov2_cmd_allowed_x64",
+            "kanata_windows_gui_winiov2_x64",
+            "kanata_windows_tty_winiov2_arm64",
+            "kanata_windows_tty_winiov2_cmd_allowed_arm64",
+            "kanata_windows_tty_winiov2_cmd_allowed_x64",
+            "kanata_windows_tty_winiov2_x64",
+        ]
+    );
+}
+
+#[test]
+fn a_manifest_naming_no_executable_yields_none_rather_than_guessing() {
+    // nodejs uses env_add_path. Inventing `nodejs` here would be a guess that
+    // never matches the real process, which is `node`.
+    let dir = tempfile::tempdir().unwrap();
+    app_from_fixture(dir.path(), "nodejs", "arm64");
+    assert_eq!(bins_of(dir.path(), "nodejs"), Vec::<String>::new());
+}

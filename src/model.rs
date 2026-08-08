@@ -152,6 +152,10 @@ impl Running {
     ///
     /// Over-matching is deliberate. A false positive costs one `!` line the
     /// user clears by closing an app; a false negative costs the app.
+    ///
+    /// `bins` entries must already be lowercased with any known extension
+    /// stripped, matching `names` above -- `declared_executables` in
+    /// `backend::scoop` is what produces them in that form.
     pub fn covers(&self, name: &Name, bins: &[String]) -> bool {
         self.dirs.contains(name)
             || self.names.contains(name.key())

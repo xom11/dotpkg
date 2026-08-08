@@ -4,9 +4,71 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    version: String,
+/// Every executable this manifest declares, normalised to the form
+/// `sysinfo` reports a process under: basename, known extension removed,
+/// lowercased.
+///
+/// This walks for the keys instead of modelling the schema. Measured across
+/// the author's thirty installed manifests, `bin` appears as a bare string, a
+/// list of strings, a mixed list of strings and `[path, alias]` pairs, and
+/// nested under `architecture.<arch>`. A depth-first collect handles all four
+/// and cannot be broken by a fifth shape nobody has seen.
+///
+/// Every architecture branch is collected, not just the installed one:
+/// `kanata` declares its executables per architecture, and reading only one
+/// branch is how the app that costs you the keyboard goes unguarded.
+///
+/// `shortcuts` is collected alongside `bin` because for `antigravity` it is
+/// the only field in the manifest that names an executable at all.
+///
+/// Over-collection is the safe direction: a spurious entry can only ever
+/// cause a package to be skipped.
+fn declared_executables(manifest: &serde_json::Value) -> Vec<String> {
+    const EXECUTABLE_SUFFIXES: &[&str] = &["exe", "cmd", "bat", "ps1", "com"];
+
+    fn add(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                // Later elements of a bin tuple can be arguments, not names.
+                if s.starts_with('-') {
+                    return;
+                }
+                let base = s.rsplit(['\\', '/']).next().unwrap_or(s);
+                let stem = base
+                    .rsplit_once('.')
+                    .filter(|(_, ext)| {
+                        EXECUTABLE_SUFFIXES.contains(&ext.to_ascii_lowercase().as_str())
+                    })
+                    .map(|(stem, _)| stem)
+                    .unwrap_or(base);
+                if !stem.is_empty() {
+                    out.insert(stem.to_ascii_lowercase());
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|e| add(e, out)),
+            _ => {}
+        }
+    }
+
+    fn walk(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, val) in m {
+                    if k == "bin" || k == "shortcuts" {
+                        add(val, out);
+                    } else {
+                        walk(val, out);
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|e| walk(e, out)),
+            _ => {}
+        }
+    }
+
+    let mut out = std::collections::BTreeSet::new();
+    walk(manifest, &mut out);
+    out.into_iter().collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -81,7 +143,7 @@ impl Backend for Scoop {
                     continue;
                 }
             };
-            let manifest = match serde_json::from_str::<Manifest>(&manifest_text) {
+            let manifest: serde_json::Value = match serde_json::from_str(&manifest_text) {
                 Ok(m) => m,
                 Err(e) => {
                     out.warnings
@@ -89,6 +151,12 @@ impl Backend for Scoop {
                     continue;
                 }
             };
+            let Some(version) = manifest.get("version").and_then(|v| v.as_str()) else {
+                out.warnings
+                    .push(format!("{name}: manifest.json has no version"));
+                continue;
+            };
+            let bins = declared_executables(&manifest);
 
             // install.json is absent on apps installed by older scoop versions.
             let install: Install = std::fs::read_to_string(current.join("install.json"))
@@ -99,10 +167,10 @@ impl Backend for Scoop {
             out.installed.push(Installed {
                 backend: SCOOP.to_string(),
                 name: Name::new(name),
-                version: manifest.version,
+                version: version.to_string(),
                 arch: install.architecture,
                 bucket: install.bucket,
-                bins: Vec::new(),
+                bins,
             });
         }
         Ok(out)

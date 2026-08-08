@@ -1,0 +1,5 @@
+{
+  "version": "26.5.1",
+  "architecture": { "64bit": {}, "arm64": {} },
+  "env_add_path": ["bin", "."]
+}

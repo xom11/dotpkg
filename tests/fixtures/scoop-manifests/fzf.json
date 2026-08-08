@@ -1,0 +1,5 @@
+{
+  "version": "0.74.2",
+  "bin": "fzf.exe",
+  "architecture": { "64bit": {}, "arm64": {} }
+}

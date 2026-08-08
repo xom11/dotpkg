@@ -1,0 +1,10 @@
+{
+  "version": "3.14.5",
+  "bin": [
+    ["python.exe", "python3"],
+    "Lib\\idlelib\\idle.bat",
+    ["Lib\\idlelib\\idle.bat", "idle3"]
+  ],
+  "architecture": { "64bit": {}, "32bit": {}, "arm64": {} },
+  "env_add_path": ["Scripts", "."]
+}

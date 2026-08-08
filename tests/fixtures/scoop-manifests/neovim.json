@@ -1,0 +1,5 @@
+{
+  "version": "0.12.4",
+  "bin": ["bin\\nvim.exe", "bin\\xxd.exe"],
+  "architecture": { "64bit": {}, "arm64": {} }
+}

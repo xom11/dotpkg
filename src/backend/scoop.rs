@@ -4,6 +4,7 @@ use crate::model::{Installed, Name, Running, SCOOP};
 use crate::sys::{Process, EXECUTABLE_SUFFIXES};
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,15 +82,29 @@ struct Install {
     architecture: Option<String>,
 }
 
-/// Strip the extended-length `\\?\` prefix Windows' `canonicalize` adds.
+/// Strip the extended-length prefix Windows' `canonicalize` adds, in the two
+/// forms it comes in.
 ///
 /// Per Microsoft's own documentation this form comes back for essentially
 /// any existing directory, not only an aliased one, so this is what keeps
 /// `running_apps` matching for a plain, unaliased `$SCOOP` on every real
 /// Windows machine -- not just the aliased-root case this task set out to
 /// fix.
-fn strip_extended_prefix(path: &str) -> &str {
-    path.strip_prefix(r"\\?\").unwrap_or(path)
+///
+/// The UNC form is the one that bites. A network root canonicalises to
+/// `\\?\UNC\server\share\scoop`, and dropping only `\\?\` leaves
+/// `UNC\server\share\scoop` -- a **relative** path. Every later read then
+/// resolves against the process's CWD, `scan()` gets `NotFound`, and
+/// `NotFound` is deliberately swallowed as "this machine has no scoop": zero
+/// installed packages reported, in silence, on a machine full of software.
+/// `\\?\UNC\<rest>` is `\\<rest>`, so the two leading backslashes go back on.
+fn strip_extended_prefix(path: &str) -> Cow<'_, str> {
+    // Exactly the spelling `canonicalize` emits. A drive path can never
+    // collide with it: it would have to be `\\?\UNC` with no colon.
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    Cow::Borrowed(path.strip_prefix(r"\\?\").unwrap_or(path))
 }
 
 /// Resolve aliases so path matching compares the string `sysinfo` reports.
@@ -100,12 +115,19 @@ fn resolve_root(root: PathBuf) -> PathBuf {
     let Ok(canon) = std::fs::canonicalize(&root) else {
         return root;
     };
-    let s = canon.to_string_lossy();
-    let stripped = strip_extended_prefix(&s);
-    if stripped.len() < s.len() {
-        PathBuf::from(stripped)
-    } else {
-        canon
+    // `None` means "nothing was stripped": keep `canon` itself rather than
+    // rebuilding it from a lossy string, which would corrupt a path that is
+    // not valid UTF-8.
+    let stripped = {
+        let s = canon.to_string_lossy();
+        match strip_extended_prefix(&s) {
+            Cow::Borrowed(b) if b.len() == s.len() => None,
+            other => Some(other.into_owned()),
+        }
+    };
+    match stripped {
+        Some(s) => PathBuf::from(s),
+        None => canon,
     }
 }
 
@@ -276,6 +298,40 @@ impl Backend for Scoop {
     }
 }
 
+/// Refuse a lock-controlled string that is about to become one path component.
+///
+/// `stage()` composes three of them into filesystem paths: `$SCOOP/buckets/
+/// <bucket>` and `<staging_root>/<app>/<version>`. All three arrive from
+/// `pkg.lock`, and Phase 3's `update` fills that file in verbatim from a scoop
+/// bucket — an arbitrary third-party git repository. So these are hostile
+/// input in the ordinary case, not only under a hand-edited lock.
+///
+/// `..` is the obvious escape, not the dangerous one. **`Path::join` with an
+/// absolute component discards everything to its left**, so a single
+/// `version = "/tmp/anywhere"` puts the write wherever it likes without a
+/// `..` in sight. Measured before this check: `stage()` returned `Ok` and
+/// wrote the manifest completely outside `staging_root`.
+///
+/// A closed rule — accept only a plain single path component — rather than a
+/// blocklist of the escapes someone thought of. A leading `-` is refused for a
+/// different reason: these strings are also handed to `git` and to `scoop`,
+/// where a leading dash reads as an option rather than a name.
+fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()> {
+    let usable = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.starts_with('-')
+        && !value.contains(['/', '\\', ':'])
+        && !Path::new(value).is_absolute();
+    anyhow::ensure!(
+        usable,
+        "{app}: the lock's {what} {value:?} cannot be used as a path component -- \
+         it must not be empty, `.`, `..`, absolute, start with `-`, or contain \
+         `/`, `\\` or `:`"
+    );
+    Ok(())
+}
+
 impl Scoop {
     /// Recover the exact manifest a lock entry names and write it where scoop
     /// can install from it. Returns the staged path.
@@ -293,6 +349,18 @@ impl Scoop {
         else {
             anyhow::bail!("{app}: the scoop lock holds a winget pin; the lock is inconsistent");
         };
+        // Before the first `join`, and before any directory is created: the
+        // load-bearing property of this whole phase is that the only writes
+        // land inside `staging_root`, and `apply.rs` states it as a comment.
+        // This is the check behind the comment.
+        //
+        // `app.key()` stands in for both spellings `stage_text` may use: the
+        // display form differs from it only by ASCII case, and every rule
+        // above is case-blind.
+        ensure_plain_component(app, "bucket", bucket)?;
+        ensure_plain_component(app, "package name", app.key())?;
+        ensure_plain_component(app, "version", version)?;
+
         let bucket_dir = self.root.join("buckets").join(bucket);
         anyhow::ensure!(
             bucket_dir.join(".git").exists(),
@@ -450,9 +518,43 @@ impl Scoop {
             out.status.success(),
             "scoop download failed for {}: {}",
             manifest.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            download_failure_detail(
+                &String::from_utf8_lossy(&out.stderr),
+                &String::from_utf8_lossy(&out.stdout),
+            )
         );
         Ok(())
+    }
+}
+
+/// What to print when `scoop download` exits non-zero.
+///
+/// A dead URL, a hash mismatch and a network failure all arrive here, and this
+/// text is the entire "here is why" half of the phase's promise that nothing
+/// happened and the user is told why.
+///
+/// **Which stream carries that text is unmeasured.** The dogfood run never
+/// produced a failing download, and scoop is a PowerShell program whose
+/// user-facing output mostly goes to stdout -- so forwarding only stderr risks
+/// forwarding an empty string in exactly the case the promise is about. Both
+/// are read for that reason, and the fallback exists so the message can never
+/// trail off after the colon.
+fn download_failure_detail(stderr: &str, stdout: &str) -> String {
+    /// Enough to carry scoop's error and the line or two of context around
+    /// it, without pasting an entire progress log into one anyhow message.
+    const TAIL_LINES: usize = 20;
+
+    if !stderr.trim().is_empty() {
+        return stderr.trim().to_string();
+    }
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        return "scoop printed nothing on either stream".to_string();
+    }
+    let lines: Vec<&str> = stdout.lines().collect();
+    match lines.len().checked_sub(TAIL_LINES) {
+        Some(skip) if skip > 0 => format!("(last {TAIL_LINES} lines) {}", lines[skip..].join("\n")),
+        _ => stdout.to_string(),
     }
 }
 
@@ -486,5 +588,136 @@ mod tests {
     #[test]
     fn an_empty_string_does_not_panic() {
         assert_eq!(strip_extended_prefix(""), "");
+    }
+
+    #[test]
+    fn a_unc_root_keeps_the_two_backslashes_that_make_it_absolute() {
+        // `canonicalize` on a network root returns this form. Stripping only
+        // `\\?\` left `UNC\server\share\scoop`, which is RELATIVE: scan()
+        // then read it against the CWD, got NotFound, and reported "no scoop
+        // on this machine" -- zero packages, silently, which is strictly
+        // worse than the raw `\\server\share\scoop` this branch replaced.
+        let out = strip_extended_prefix(r"\\?\UNC\server\share\scoop");
+        assert_eq!(out, r"\\server\share\scoop");
+        assert!(
+            out.starts_with(r"\\"),
+            "a UNC path without its leading backslashes is a relative path: {out}"
+        );
+    }
+
+    #[test]
+    fn a_drive_root_still_loses_the_whole_prefix() {
+        // The UNC branch must not fire for the ordinary case, which has no
+        // backslashes to restore.
+        let out = strip_extended_prefix(r"\\?\C:\Users\kln\scoop");
+        assert_eq!(out, r"C:\Users\kln\scoop");
+        assert!(!out.starts_with(r"\\"), "got {out}");
+    }
+
+    #[test]
+    fn a_directory_merely_named_unc_is_not_mistaken_for_a_network_root() {
+        assert_eq!(
+            strip_extended_prefix(r"\\?\C:\UNC\scoop"),
+            r"C:\UNC\scoop",
+            "the UNC branch must match the prefix, not the substring"
+        );
+    }
+
+    // -- download_failure_detail -----------------------------------------
+
+    #[test]
+    fn a_failing_download_reports_stderr_when_scoop_uses_it() {
+        assert_eq!(
+            download_failure_detail("  hash check failed for fzf  \n", "downloading fzf\n"),
+            "hash check failed for fzf"
+        );
+    }
+
+    #[test]
+    fn a_failing_download_falls_back_to_stdout_because_powershell_writes_there() {
+        // The case the promise depends on: scoop exits non-zero having said
+        // everything it had to say on stdout. Forwarding only stderr made the
+        // message read "scoop download failed for <path>: " and stop.
+        let detail = download_failure_detail("   \n", "ERROR Hash check failed for fzf\n");
+        assert!(
+            detail.contains("Hash check failed"),
+            "stdout must be forwarded when stderr is blank: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn a_failing_download_that_said_nothing_at_all_still_says_something() {
+        let detail = download_failure_detail("", "");
+        assert!(
+            !detail.trim().is_empty(),
+            "the message must never trail off after the colon"
+        );
+    }
+
+    #[test]
+    fn a_long_stdout_is_cut_to_its_tail_where_the_error_is() {
+        let noisy: String = (0..500).map(|i| format!("progress {i}\n")).collect();
+        let stdout = format!("{noisy}ERROR the url is gone\n");
+        let detail = download_failure_detail("", &stdout);
+        assert!(detail.contains("ERROR the url is gone"), "got {detail}");
+        assert!(!detail.contains("progress 0\n"), "the head must be cut");
+        assert!(
+            detail.lines().count() <= 21,
+            "got {} lines",
+            detail.lines().count()
+        );
+    }
+
+    // -- ensure_plain_component ------------------------------------------
+
+    #[test]
+    fn the_ordinary_shapes_of_a_bucket_name_and_a_version_are_accepted() {
+        // The guard must not reject a legitimate lock: real versions carry
+        // dots, dashes, plus signs and dates.
+        for good in [
+            "main",
+            "extras",
+            "xom11",
+            "fzf",
+            "Git.Git",
+            "1.0.0",
+            "0.74.1",
+            "1.0.0-beta.1+2",
+            "2026-08-08",
+            "v2_1",
+        ] {
+            ensure_plain_component(&Name::new("tool"), "version", good)
+                .unwrap_or_else(|e| panic!("{good:?} must be accepted: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn every_component_that_could_leave_its_directory_is_refused() {
+        // An absolute component is the one that needs no `..` at all:
+        // `Path::join` throws away everything to the left of it.
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            r"..\escape",
+            "/etc",
+            "/tmp/escape",
+            r"C:\Windows\Temp",
+            r"\\server\share",
+            r"sub\dir",
+            "sub/dir",
+            "c:relative",
+            "-oops",
+            "--upload-pack=touch",
+        ] {
+            let err = ensure_plain_component(&Name::new("tool"), "version", bad)
+                .expect_err("{bad:?} must be refused");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("path component"),
+                "say why it was refused: {msg}"
+            );
+        }
     }
 }

@@ -27,10 +27,19 @@ pub enum Expected {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disagreement {
     NotInstalled,
-    HalfInstalled { leftover: PathBuf },
+    HalfInstalled {
+        leftover: PathBuf,
+    },
     ContentDiffers,
+    /// The manifests match under `normalise`, which folds CRLF to LF *and*
+    /// drops trailing newlines -- so this variant covers a trailing-newline
+    /// difference too, not only CRLF-vs-LF. Either way it is still a
+    /// disagreement: `normalise` is only ever used to name a mismatch more
+    /// precisely, never to wave one through.
     LineEndingsDiffer,
-    StillPresent { leftover: PathBuf },
+    StillPresent {
+        leftover: PathBuf,
+    },
     Unreadable(String),
 }
 
@@ -78,6 +87,13 @@ fn app_dir(root: &Path, app: &Name) -> Result<Option<PathBuf>, String> {
     for entry in entries {
         let entry =
             entry.map_err(|e| format!("cannot read an entry of {}: {e}", apps.display()))?;
+        // Same rule as `Scoop::scan` (src/backend/scoop.rs): a stray file
+        // sharing an app's name is not an app directory. Deliberate, not an
+        // oversight -- a file cannot hold `current/manifest.json`, so treating
+        // it as installed would just relabel the next check's failure.
+        if !entry.path().is_dir() {
+            continue;
+        }
         if Name::new(entry.file_name().to_string_lossy().to_string()) == *app {
             return Ok(Some(entry.path()));
         }
@@ -86,8 +102,11 @@ fn app_dir(root: &Path, app: &Name) -> Result<Option<PathBuf>, String> {
 }
 
 /// Collapse CRLF and drop trailing newlines, for telling a line-ending
-/// difference apart from a content difference. Never used to *accept* a
-/// mismatch — only to describe one.
+/// difference apart from a content difference. Dropping trailing newlines
+/// makes the equivalence class wider than the name `LineEndingsDiffer`
+/// suggests -- `{"a":1}` vs. `{"a":1}\n\n\n` lands here too -- but never
+/// used to *accept* a mismatch, only to describe one: both sides still
+/// report `Err`.
 fn normalise(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -274,6 +293,22 @@ mod tests {
         // `Tool` when asked for `tool`; macOS and Linux do not, so a path join
         // would make this fixture diverge from production. Found by a real
         // failure while prototyping.
+        //
+        // The `Present` half below is NOT a reliable control for that: on the
+        // default (case-insensitive) APFS volume this developer's macOS uses,
+        // and on Windows, `std::fs::read` on `apps/tool/current/manifest.json`
+        // succeeds even under a path-join mutant, because the filesystem
+        // itself folds the case before the join-based path ever gets there.
+        // It only has teeth on the Linux CI leg, and even there a mutant
+        // `app_dir` that returns `Some` unconditionally still slips through
+        // it. The `Absent` half is the one that discriminates everywhere:
+        // `PathBuf` equality is string equality, and `Name::key()` folds to
+        // lowercase, so a path-join mutant produces `apps/tool` while the
+        // real implementation returns the on-disk spelling `apps/Tool` --
+        // an `assert_eq!` on the full leftover catches that on any
+        // filesystem, case-sensitive or not. `assert!(matches!(.., { .. }))`
+        // does not: it throws away the field carrying the evidence and
+        // passes vacuously against a mutant that always returns `Some`.
         let t = Tree::new();
         let staged = t.stage("tool", "1.0.0", BODY_A);
         t.install("Tool", BODY_A);
@@ -281,10 +316,12 @@ mod tests {
             verdict(t.root(), &Name::new("tool"), &Expected::Present { staged }),
             Ok(())
         );
-        assert!(matches!(
+        assert_eq!(
             verdict(t.root(), &Name::new("TOOL"), &Expected::Absent),
-            Err(Disagreement::StillPresent { .. })
-        ));
+            Err(Disagreement::StillPresent {
+                leftover: t.root().join("apps").join("Tool")
+            })
+        );
     }
 
     #[test]
@@ -308,22 +345,58 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_directory_that_cannot_be_read_is_reported_not_treated_as_absent() {
+        // A regular file where `apps/` should be a directory: `read_dir`
+        // fails with `NotADirectory` on macOS and Linux, and Windows maps its
+        // equivalent the same way -- portable without `#[cfg(unix)]`. This
+        // must surface as `Unreadable`, never as "nothing there": an
+        // uninstall verifying itself against an error it never looked past
+        // is exactly the silent success this module exists to catch.
+        let t = Tree::new();
+        std::fs::write(t.root().join("apps"), b"not a directory").unwrap();
+        match verdict(t.root(), &Name::new("fzf"), &Expected::Absent) {
+            Err(Disagreement::Unreadable(msg)) => {
+                let apps = t.root().join("apps");
+                assert!(
+                    msg.contains(&apps.display().to_string()),
+                    "message {msg:?} does not name {}",
+                    apps.display()
+                );
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn every_disagreement_says_something_a_user_can_act_on() {
+        // `s.len() > 10` never fires: the shortest real message is 39
+        // characters, and both path-carrying variants could drop
+        // `leftover.display()` entirely and stay under no bound at all. Assert
+        // the actionable content instead -- the same tightening as commit
+        // 42c8b32, a third instance of the shape that review named twice.
         for d in [
             Disagreement::NotInstalled,
-            Disagreement::HalfInstalled {
-                leftover: PathBuf::from("/a/b"),
-            },
             Disagreement::ContentDiffers,
             Disagreement::LineEndingsDiffer,
-            Disagreement::StillPresent {
-                leftover: PathBuf::from("/a/b"),
-            },
-            Disagreement::Unreadable("boom".into()),
         ] {
             let s = d.to_string();
             assert!(!s.trim().is_empty(), "{d:?} renders empty");
-            assert!(s.len() > 10, "{d:?} renders as {s:?}");
         }
+        for d in [
+            Disagreement::HalfInstalled {
+                leftover: PathBuf::from("/a/b"),
+            },
+            Disagreement::StillPresent {
+                leftover: PathBuf::from("/a/b"),
+            },
+        ] {
+            let s = d.to_string();
+            assert!(
+                s.contains("/a/b"),
+                "{d:?} renders as {s:?} without the path"
+            );
+        }
+        let s = Disagreement::Unreadable("boom".into()).to_string();
+        assert!(s.contains("boom"), "renders as {s:?} without the reason");
     }
 }

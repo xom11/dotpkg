@@ -63,4 +63,26 @@ mod tests {
         assert_eq!(normalize("Kanata.exe"), "kanata");
         assert_eq!(normalize("no-extension"), "no-extension");
     }
+
+    #[test]
+    fn the_real_process_table_yields_at_least_one_readable_executable_path() {
+        // The only test in the crate that touches the OS. Everything else
+        // about the running-process machinery is exercised with fabricated
+        // `Process` values, which means nothing catches this function
+        // returning `exe: None` for every process -- and that single change
+        // silently disables path matching, the *only* running signal that
+        // `nodejs` and `rustup` have, because neither names an executable
+        // anywhere in its manifest. In Phase 2b that is a missed guard on an
+        // uninstall.
+        //
+        // A test process can always read its own image path on macOS, Linux
+        // and Windows, so one readable path is a safe floor to assert; a
+        // stricter count would depend on what else happens to be running.
+        let procs = running_processes();
+        assert!(!procs.is_empty(), "the process table cannot be empty");
+        assert!(
+            procs.iter().any(|p| p.exe.is_some()),
+            "no process reported a readable executable path -- path matching is dead"
+        );
+    }
 }

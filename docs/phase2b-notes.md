@@ -58,17 +58,14 @@ prunable while running. Cheap mitigation: if `scan()` finds apps and
 
 ## Test coverage gaps, in the order they would hurt
 
-**`sys::running_processes()` is the crate's only untested OS boundary.**
-Mutating `exe: p.exe()...` to `exe: None` silently disables the entire path
-signal — the only signal `nodejs` and `rustup` have — and the suite stays green.
-The implementer's stated reason (a real `sysinfo::Process` cannot be
-fabricated) is true and beside the point: covering this needs the real table,
-not a synthetic one. A one-line smoke assertion does it, passes on macOS and
-Linux, and goes red under the mutation:
-
-```rust
-assert!(running_processes().iter().any(|p| p.exe.is_some()));
-```
+~~**`sys::running_processes()` is the crate's only untested OS boundary.**~~
+**Closed before merge.** Mutating `exe: p.exe()...` to `exe: None` silently
+disabled the entire path signal — the only signal `nodejs` and `rustup` have —
+and left the suite green. `the_real_process_table_yields_at_least_one_readable_executable_path`
+in `src/sys.rs` now covers it, and was confirmed to go red under exactly that
+mutation with `no process reported a readable executable path -- path matching
+is dead`. It is the one test in the crate that touches the OS, and it asserts
+only a floor a test process can always meet: it can read its own image path.
 
 **`SCOOP_HELPERS` is compared against `Name::key()`, but every helper fixture is
 already lowercase.** Reverting to a display comparison leaves the suite green.

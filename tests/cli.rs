@@ -394,7 +394,10 @@ fn a_prune_authorised_by_both_flags_runs_and_records_the_release() {
     // a prune -- a prune is the one step that needs no scoop binary to be
     // *planned*, though it still needs one to be *performed*, so the run
     // fails at the uninstall and the assertion is that it failed HONESTLY:
-    // exit 2, aichat still on disk, still owned.
+    // exit 1 (Important 6: a failure is outstanding whether or not it
+    // changed anything -- 2 is reserved for a refusal before anything was
+    // attempted, and this run genuinely tried), aichat still on disk, still
+    // owned.
     let f = Fixture::new(
         "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
         r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
@@ -407,7 +410,11 @@ fn a_prune_authorised_by_both_flags_runs_and_records_the_release() {
     let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
 
     assert!(all.contains("scoop.cmd"), "it must have tried: {all}");
-    assert_eq!(out.status.code(), Some(2), "nothing changed, so 2: {all}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a package failed and needs a look, even though nothing changed: {all}"
+    );
     assert!(
         f.scoop.path().join("apps").join("aichat").exists(),
         "a failed uninstall must leave the app alone"
@@ -417,6 +424,48 @@ fn a_prune_authorised_by_both_flags_runs_and_records_the_release() {
     assert!(
         state.contains("aichat"),
         "and must not release an app that is still installed: {state}"
+    );
+    // Important 3: recover.cmd is the one artifact that exists to survive a
+    // run that dies, and this run failed -- it must not be cleaned up.
+    assert!(
+        f.local.path().join("dotpkg").join("recover.cmd").exists(),
+        "a failed run must leave the recovery script in place"
+    );
+}
+
+// -- Important 3: recover.cmd is only ever removed on a zero-failure run ---
+
+#[test]
+fn a_run_with_no_failures_removes_a_stale_recover_cmd() {
+    // The positive control for the recover.cmd assertion above: without the
+    // `if ex.failed() == 0` guard in main.rs, this file would survive every
+    // run forever, offering to reinstall packages nobody touched tonight.
+    // fzf has no lock entry, so the plan cannot become a step
+    // (`Intent::NotLocked`, no scoop.cmd call anywhere) and `--keep-going`
+    // lets the run proceed instead of refusing outright -- `execute` runs
+    // for real, with zero steps, so `ex.failed()` is genuinely 0 even though
+    // the overall preparation was not ok. `execute` itself overwrites
+    // whatever is already at `recovery_path` the moment it runs (it writes
+    // before the first mutation, unconditionally), so the marker content
+    // seeded here only proves a file genuinely existed there for the
+    // zero-failure guard to remove -- it is not what the assertion below is
+    // checking for.
+    let f = Fixture::new("[scoop]\npackages = [\"fzf\"]\n", "{}");
+    let recover = f.local.path().join("dotpkg").join("recover.cmd");
+    fs::write(&recover, "@echo off\r\nREM marker seeded by the test\r\n").unwrap();
+
+    let out = f.run(&["apply", "--keep-going", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "fzf could not be prepared, so the run is still outstanding: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !recover.exists(),
+        "execute() ran with zero step failures, so the stale recovery script must be removed"
     );
 }
 
@@ -599,6 +648,53 @@ fn a_relative_state_path_is_refused_before_anything_runs() {
     assert!(
         stderr.contains("--state"),
         "name the flag that needs an absolute path: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+// -- whole-branch review fix wave ----------------------------------------
+
+#[test]
+fn a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs() {
+    // Important 2: deleting `!preparation.is_ok() && !keep_going` from
+    // main.rs leaves the whole suite green. Live proof: with the gate
+    // deleted, `apply --yes` with one unpreparable package reaches
+    // `execute()` and writes state.json, where the real code exits 2 having
+    // attempted nothing.
+    //
+    // fzf is declared with no lock entry, so `classify` returns
+    // `Intent::NotLocked` and `prepare` never calls `stage_and_fetch` --
+    // let alone `scoop.download` -- for it. There is nothing in this fixture
+    // that could touch `scoop.cmd` on its own, so its total absence from the
+    // run's output is part of the proof that this refusal fired before
+    // `execute` (and before `prepare`'s download half) ever ran. The other
+    // part is the exit code itself: with the gate deleted, `steps` and
+    // `held` both stay empty (fzf never becomes a `Step`, so there is
+    // nothing for `--keep-going`-without-the-gate to hold or run), `execute`
+    // is reached with zero steps, and `main` still applies the
+    // could-not-be-prepared floor -- exit 1, not 2. `the_scoop_cmd_sentinel_
+    // is_reachable_or_the_assertion_above_proves_nothing` and
+    // `a_prune_authorised_by_both_flags_runs_and_records_the_release` are
+    // this test's positive siblings: both already prove `scoop.cmd` DOES
+    // appear once `prepare` or `execute` genuinely reaches it, so its
+    // absence here is not vacuous.
+    let f = Fixture::new("[scoop]\npackages = [\"fzf\"]\n", "{}");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unpreparable package without --keep-going must refuse before \
+         execute runs, not report it as outstanding: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("scoop.cmd") && !stderr.contains("scoop.cmd"),
+        "execute() -- and prepare()'s download half -- must never have run: \
+         stdout: {stdout} stderr: {stderr}"
     );
     f.assert_nothing_was_touched(before);
 }

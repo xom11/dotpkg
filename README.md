@@ -76,10 +76,15 @@ changes nothing either way.
 
 ### Exit codes
 
-- **0** — every planned action verified on disk.
-- **1** — something changed and something failed. Mixed state; go look.
-- **2** — refused, and nothing changed. A guard fired, the user said no, or
-  no answer was available.
+Defined by what the operator must do next, not by what happened internally.
+
+- **0** — the plan is fully realised on disk and nothing is outstanding.
+- **1** — something is outstanding: a package failed, was held (by the
+  running re-sampler, or because another package in the run could not be
+  prepared), or could not be prepared at all. The machine may or may not
+  have actually changed.
+- **2** — refused before anything was attempted; nothing changed. A guard
+  fired, the user said no, or no answer was available.
 
 ## Not built yet
 

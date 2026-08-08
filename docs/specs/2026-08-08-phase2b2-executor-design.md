@@ -394,12 +394,24 @@ zellij never arrives. Since `update` is Phase 3, every newly typed package name
 is `NotLocked` by construction, which makes that the only swap shape reachable
 today.
 
-Exit codes become three:
+Exit codes become three, defined by what the operator must do next, not by
+what happened internally:
 
-- **0** — every planned action verified on disk.
-- **1** — something changed and something failed. Mixed state; go look.
-- **2** — refused, and nothing changed. A guard fired, the user said no, or no
-  answer was available.
+- **0** — the plan is fully realised on disk and nothing is outstanding.
+- **1** — something is outstanding: a package failed, was held, or could not
+  be prepared. The machine may or may not have actually changed.
+- **2** — refused before anything was attempted; nothing changed. A guard
+  fired, the user said no, or no answer was available.
+
+Revised from the first cut of this section, which read "1 — something changed
+and something failed" and "2 — refused, and nothing changed" without saying
+which of those two nothing-changed shapes 2 covers. Measured against the
+shipped code: a package held by the running re-sampler exited 0 under that
+wording (the same code as a converged machine, wrongly), and a plain
+untouched failure inside `execute` -- `changed() == 0 && touched() == 0` --
+also exited 2, indistinguishable from a refusal that never attempted
+anything. Both are "the operator must look", so both are 1 now; 2 is
+reserved for the one shape that is provably `execute`-never-called.
 
 The closing summary reports only what the re-scan confirms. It never says
 "N upgraded". An empty or implausibly shrunk re-scan is reported as an error

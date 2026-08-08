@@ -329,8 +329,10 @@ Restore `to_ascii_lowercase()`, re-run, confirm green.
 
 Change `Display` to `f.write_str(&self.display)`.
 
-Run: `cargo test --lib model a_name_displays_what_the_user_wrote`
+Run: `cargo test --lib model::tests::a_name_displays_what_the_user_wrote`
 Expected: FAIL — got `fzf|`, wanted `fzf       |`. Paste it in.
+
+(`cargo test` takes one filter, not two: `--lib` selects the target, so the filter must be a single path like `model::tests::<name>`. Elsewhere in this plan `--test planner <name>` and `--test scoop_scan <name>` are correct, because there `--test X` is the target selector and the name is the one filter.)
 
 Restore `f.pad`, re-run, confirm green.
 

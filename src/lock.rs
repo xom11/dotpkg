@@ -1,3 +1,4 @@
+use crate::model::Name;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -29,8 +30,8 @@ impl Pin {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Lock {
-    pub scoop: BTreeMap<String, Pin>,
-    pub winget: BTreeMap<String, Pin>,
+    pub scoop: BTreeMap<Name, Pin>,
+    pub winget: BTreeMap<Name, Pin>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,9 +53,9 @@ struct RawWinget {
 #[serde(deny_unknown_fields)]
 struct RawLock {
     #[serde(default)]
-    scoop: BTreeMap<String, RawScoop>,
+    scoop: BTreeMap<Name, RawScoop>,
     #[serde(default)]
-    winget: BTreeMap<String, RawWinget>,
+    winget: BTreeMap<Name, RawWinget>,
 }
 
 pub fn parse(text: &str) -> Result<Lock> {
@@ -74,7 +75,7 @@ pub fn parse(text: &str) -> Result<Lock> {
     for (name, r) in raw.winget {
         anyhow::ensure!(
             r.pin == "version-only",
-            "winget lock entry {name:?} has pin={:?}; only \"version-only\" is defined",
+            "winget lock entry {name} has pin={:?}; only \"version-only\" is defined",
             r.pin
         );
         lock.winget
@@ -96,6 +97,7 @@ pub fn load_or_empty(path: &Path) -> Result<Lock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Name;
 
     #[test]
     fn parses_both_backends_into_distinct_pin_shapes() {
@@ -114,7 +116,7 @@ pin     = "version-only"
         .unwrap();
 
         assert_eq!(
-            lock.scoop["fzf"],
+            lock.scoop[&Name::new("fzf")],
             Pin::ScoopCommit {
                 bucket: "main".into(),
                 commit: "a28d0c5648f1".into(),
@@ -122,12 +124,12 @@ pin     = "version-only"
             }
         );
         assert_eq!(
-            lock.winget["Git.Git"],
+            lock.winget[&Name::new("Git.Git")],
             Pin::WingetVersion {
                 version: "2.55.0".into()
             }
         );
-        assert_eq!(lock.scoop["fzf"].version(), "0.74.1");
+        assert_eq!(lock.scoop[&Name::new("fzf")].version(), "0.74.1");
     }
 
     #[test]

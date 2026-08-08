@@ -104,19 +104,19 @@ impl fmt::Display for Name {
     }
 }
 
-// `Installed` stays exactly as it is in this task. Task 2 changes its `name`
-// to a `Name` and adds `bins`, together with every call site those two edits
-// break -- doing it here would leave the crate uncompilable at this commit.
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub backend: String,
-    pub name: String,
+    pub name: Name,
     pub version: String,
     /// Scoop records this in install.json; winget does not expose it.
     pub arch: Option<String>,
     /// Scoop only.
     pub bucket: Option<String>,
+    /// Lowercased, extension-stripped basenames of every executable this
+    /// package's manifest names. Populated by the backend's scan in Task 3;
+    /// empty for a package whose manifest names none.
+    pub bins: Vec<String>,
 }
 
 pub const SCOOP: &str = "scoop";

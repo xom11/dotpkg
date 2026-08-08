@@ -1,3 +1,4 @@
+use crate::model::Name;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -18,21 +19,21 @@ pub enum Ownership {
 /// is what makes dotpkg safe to install on a machine full of existing software.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct State(BTreeMap<String, BTreeMap<String, Ownership>>);
+pub struct State(BTreeMap<String, BTreeMap<Name, Ownership>>);
 
 impl State {
-    pub fn owns(&self, backend: &str, name: &str) -> bool {
+    pub fn owns(&self, backend: &str, name: &Name) -> bool {
         self.0
             .get(backend)
             .map(|m| m.contains_key(name))
             .unwrap_or(false)
     }
 
-    pub fn set(&mut self, backend: &str, name: &str, o: Ownership) {
+    pub fn set(&mut self, backend: &str, name: &Name, o: Ownership) {
         self.0
             .entry(backend.to_string())
             .or_default()
-            .insert(name.to_string(), o);
+            .insert(name.clone(), o);
     }
 
     pub fn load_or_empty(path: &Path) -> Result<State> {
@@ -68,12 +69,12 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SCOOP;
+    use crate::model::{Name, SCOOP};
 
     #[test]
     fn an_absent_file_yields_a_state_that_owns_nothing() {
         let s = State::load_or_empty(Path::new("/definitely/not/here/state.json")).unwrap();
-        assert!(!s.owns(SCOOP, "fzf"));
+        assert!(!s.owns(SCOOP, &Name::new("fzf")));
     }
 
     #[test]
@@ -82,14 +83,14 @@ mod tests {
         let path = dir.path().join("nested").join("state.json");
 
         let mut s = State::default();
-        s.set(SCOOP, "fzf", Ownership::Installed);
-        s.set(SCOOP, "aichat", Ownership::Adopted);
+        s.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        s.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
         s.save(&path).unwrap();
 
         let back = State::load_or_empty(&path).unwrap();
         assert_eq!(back, s);
-        assert!(back.owns(SCOOP, "aichat"));
-        assert!(!back.owns(SCOOP, "antigravity"));
+        assert!(back.owns(SCOOP, &Name::new("aichat")));
+        assert!(!back.owns(SCOOP, &Name::new("antigravity")));
     }
 
     #[test]
@@ -103,7 +104,17 @@ mod tests {
         .unwrap();
 
         let s = State::load_or_empty(&path).unwrap();
-        assert!(s.owns("scoop", "fzf"));
-        assert!(s.owns("scoop", "aichat"));
+        assert!(s.owns("scoop", &Name::new("fzf")));
+        assert!(s.owns("scoop", &Name::new("aichat")));
+    }
+
+    #[test]
+    fn ownership_is_case_insensitive_because_the_prune_fence_depends_on_it() {
+        // state.json is written by dotpkg and read back to decide what may be
+        // uninstalled. A case mismatch here reads as "not owned", which is safe,
+        // or as a second entry for the same app, which is not.
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("FZF"), Ownership::Installed);
+        assert!(s.owns(SCOOP, &Name::new("fzf")));
     }
 }

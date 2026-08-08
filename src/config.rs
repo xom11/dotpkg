@@ -1,3 +1,4 @@
+use crate::model::Name;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -18,16 +19,16 @@ pub struct ScoopSection {
     #[serde(default)]
     pub buckets: Vec<String>,
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<Name>,
     #[serde(default)]
-    pub opts: BTreeMap<String, PkgOpts>,
+    pub opts: BTreeMap<Name, PkgOpts>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WingetSection {
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<Name>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -72,8 +73,14 @@ packages = ["Git.Git"]
 
         assert_eq!(cfg.scoop.packages, vec!["fzf", "bat"]);
         assert_eq!(cfg.scoop.buckets.len(), 3);
-        assert_eq!(cfg.scoop.opts["python"].arch.as_deref(), Some("64bit"));
-        assert_eq!(cfg.scoop.opts["kanata"].arch.as_deref(), Some("keep"));
+        assert_eq!(
+            cfg.scoop.opts[&Name::new("python")].arch.as_deref(),
+            Some("64bit")
+        );
+        assert_eq!(
+            cfg.scoop.opts[&Name::new("kanata")].arch.as_deref(),
+            Some("keep")
+        );
         assert_eq!(cfg.winget.packages, vec!["Git.Git"]);
     }
 

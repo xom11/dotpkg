@@ -1,5 +1,5 @@
 use super::{Backend, Scan};
-use crate::model::{Installed, SCOOP};
+use crate::model::{Installed, Name, SCOOP};
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -98,10 +98,11 @@ impl Backend for Scoop {
 
             out.installed.push(Installed {
                 backend: SCOOP.to_string(),
-                name,
+                name: Name::new(name),
                 version: manifest.version,
                 arch: install.architecture,
                 bucket: install.bucket,
+                bins: Vec::new(),
             });
         }
         Ok(out)

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::lock::Lock;
-use crate::model::{Installed, SCOOP, WINGET};
+use crate::model::{Installed, Name, Running, SCOOP, WINGET};
 use crate::state::State;
 use std::collections::BTreeSet;
 
@@ -30,35 +30,35 @@ pub enum SkipReason {
 pub enum Action {
     Install {
         backend: String,
-        name: String,
+        name: Name,
         version: String,
     },
     Upgrade {
         backend: String,
-        name: String,
+        name: Name,
         from: String,
         to: String,
     },
     Downgrade {
         backend: String,
-        name: String,
+        name: Name,
         from: String,
         to: String,
     },
     Prune {
         backend: String,
-        name: String,
+        name: Name,
         version: String,
     },
     Skip {
         backend: String,
-        name: String,
+        name: Name,
         reason: SkipReason,
     },
     /// Installed, undeclared, and not owned by dotpkg. Reported, never touched.
     Unmanaged {
         backend: String,
-        name: String,
+        name: Name,
         version: String,
     },
 }
@@ -99,15 +99,13 @@ pub fn plan(
     lock: &Lock,
     installed: &[Installed],
     state: &State,
-    running: &[String],
+    running: &Running,
 ) -> Plan {
     let mut actions = Vec::new();
     let mut prunes = Vec::new();
     let mut reports = Vec::new();
 
-    let declared_scoop: BTreeSet<&str> =
-        declared.scoop.packages.iter().map(String::as_str).collect();
-    let running: BTreeSet<&str> = running.iter().map(String::as_str).collect();
+    let declared_scoop: BTreeSet<&Name> = declared.scoop.packages.iter().collect();
 
     // Declared packages: install / upgrade / downgrade / skip.
     for name in &declared.scoop.packages {
@@ -135,7 +133,7 @@ pub fn plan(
             Some(cur) => {
                 // Checked only once a change is actually called for, so a
                 // healthy running package produces no line at all.
-                if running.contains(name.as_str()) {
+                if running.covers(&cur.name, &cur.bins) {
                     actions.push(Action::Skip {
                         backend: SCOOP.into(),
                         name: name.clone(),
@@ -174,10 +172,10 @@ pub fn plan(
 
     // Installed but undeclared: prune if owned, report if not, ignore helpers.
     for inst in installed.iter().filter(|i| i.backend == SCOOP) {
-        if declared_scoop.contains(inst.name.as_str()) {
+        if declared_scoop.contains(&inst.name) {
             continue;
         }
-        if SCOOP_HELPERS.contains(&inst.name.as_str()) {
+        if SCOOP_HELPERS.contains(&inst.name.key()) {
             continue;
         }
         if state.owns(SCOOP, &inst.name) {

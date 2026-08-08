@@ -1,6 +1,6 @@
 use dotpkg::config;
 use dotpkg::lock;
-use dotpkg::model::{Installed, SCOOP, WINGET};
+use dotpkg::model::{Installed, Name, Running, SCOOP, WINGET};
 use dotpkg::plan::{plan, Action, SkipReason};
 use dotpkg::state::{Ownership, State};
 
@@ -11,6 +11,7 @@ fn installed(name: &str, version: &str) -> Installed {
         version: version.into(),
         arch: Some("arm64".into()),
         bucket: Some("main".into()),
+        bins: Vec::new(),
     }
 }
 
@@ -25,7 +26,7 @@ fn a_declared_locked_package_that_is_absent_is_an_install() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -44,7 +45,7 @@ fn a_package_already_at_the_locked_version_produces_no_action() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1")],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -56,7 +57,7 @@ fn a_newer_installed_version_is_a_downgrade_because_the_lock_is_authoritative() 
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.2")],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -76,7 +77,7 @@ fn an_older_installed_version_is_an_upgrade() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.0")],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -98,7 +99,7 @@ fn a_declared_package_with_no_lock_entry_is_reported_not_resolved() {
         &lock::Lock::default(),
         &[],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -117,7 +118,10 @@ fn a_running_package_is_skipped_rather_than_changed() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.2")],
         &State::default(),
-        &["fzf".into()],
+        &Running::new(
+            std::collections::BTreeSet::from(["fzf".to_string()]),
+            Default::default(),
+        ),
     );
     assert_eq!(
         p.actions,
@@ -136,7 +140,8 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
     // make. Hoisting it above `match current` -- a refactor anyone might make
     // in good faith -- turns every healthy running app into a spurious `!`
     // line. Nothing else in this file would notice: every other test passes
-    // `running = &[]`, and the one that does not has a version mismatch.
+    // `running = &Running::default()`, and the one that does not has a version
+    // mismatch.
     //
     // On a real machine that is most of the list: kanata, nvim, brave.
     let p = plan(
@@ -144,7 +149,10 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1")],
         &State::default(),
-        &["fzf".into()],
+        &Running::new(
+            std::collections::BTreeSet::from(["fzf".to_string()]),
+            Default::default(),
+        ),
     );
     assert!(
         p.actions.is_empty(),
@@ -164,7 +172,7 @@ fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
         &lock::Lock::default(),
         &[],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -192,7 +200,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -215,14 +223,14 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
 #[test]
 fn an_undeclared_owned_package_is_a_prune() {
     let mut state = State::default();
-    state.set(SCOOP, "aichat", Ownership::Adopted);
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
 
     let p = plan(
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1"), installed("aichat", "0.30.0")],
         &state,
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -245,7 +253,7 @@ fn an_undeclared_unowned_package_is_reported_but_never_pruned() {
             installed("antigravity", "2.0.6"),
         ],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -272,7 +280,7 @@ fn scoop_helpers_are_never_reported_as_strays() {
             installed("lessmsi", "2.1"),
         ],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -287,7 +295,7 @@ fn a_helper_that_the_user_declared_is_managed_normally() {
         .unwrap(),
         &[installed("7zip", "26.01")],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     assert_eq!(
         p.actions,
@@ -305,7 +313,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
     // Install before uninstall: if a run dies partway, an extra package is
     // easier to live with than a missing one.
     let mut state = State::default();
-    state.set(SCOOP, "aichat", Ownership::Adopted);
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
 
     let p = plan(
         &config::parse("[scoop]\npackages = [\"fzf\", \"bat\"]\n").unwrap(),
@@ -319,7 +327,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
             installed("antigravity", "2.0.6"),
         ],
         &state,
-        &[],
+        &Running::default(),
     );
 
     let kinds: Vec<&str> = p
@@ -349,7 +357,7 @@ fn counts_separate_changes_from_skips_and_reports() {
         &lock::parse("[scoop.fzf]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.74.1\"\n").unwrap(),
         &[installed("antigravity", "2.0.6")],
         &State::default(),
-        &[],
+        &Running::default(),
     );
     // fzf install = 1 change; bat unlocked = 1 skip; antigravity = report only.
     assert_eq!(p.change_count(), 1);
@@ -401,4 +409,36 @@ fn the_planner_source_performs_no_io() {
             tail.lines().next().unwrap_or(tail).trim_end()
         );
     }
+}
+
+#[test]
+fn a_case_difference_between_pkg_toml_and_disk_is_not_two_packages() {
+    // Before Name, this planned Install{FZF} then Prune{fzf} -- the same app --
+    // and because prune runs last, apply would have uninstalled what it had
+    // just installed. Verified against the merged Phase 1 planner.
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+
+    let p = plan(
+        &config::parse("[scoop]\npackages = [\"FZF\"]\n").unwrap(),
+        &lock::parse("[scoop.FZF]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.74.1\"\n").unwrap(),
+        &[installed("fzf", "0.74.1")],
+        &state,
+        &Running::default(),
+    );
+    assert!(
+        p.actions.is_empty(),
+        "expected no action, got {:?}",
+        p.actions
+    );
+}
+
+#[test]
+fn a_case_difference_in_scoop_opts_still_finds_the_package() {
+    // Second instance of the same bug, in a different map.
+    let cfg = config::parse(
+        "[scoop]\npackages = [\"python\"]\n\n[scoop.opts]\nPython = { arch = \"64bit\" }\n",
+    )
+    .unwrap();
+    assert!(cfg.scoop.opts.contains_key(&Name::new("python")));
 }

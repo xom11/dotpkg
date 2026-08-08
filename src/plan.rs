@@ -179,11 +179,22 @@ pub fn plan(
             continue;
         }
         if state.owns(SCOOP, &inst.name) {
-            prunes.push(Action::Prune {
-                backend: SCOOP.into(),
-                name: inst.name.clone(),
-                version: inst.version.clone(),
-            });
+            // Prune is the one action with no second chance: an interrupted
+            // upgrade puts the app back, an uninstall does not. So the running
+            // check that guards version changes guards this too.
+            if running.covers(&inst.name, &inst.bins) {
+                actions.push(Action::Skip {
+                    backend: SCOOP.into(),
+                    name: inst.name.clone(),
+                    reason: SkipReason::Running,
+                });
+            } else {
+                prunes.push(Action::Prune {
+                    backend: SCOOP.into(),
+                    name: inst.name.clone(),
+                    version: inst.version.clone(),
+                });
+            }
         } else {
             reports.push(Action::Unmanaged {
                 backend: SCOOP.into(),

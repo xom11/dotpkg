@@ -3,6 +3,7 @@ use dotpkg::lock;
 use dotpkg::model::{Installed, Name, Running, SCOOP, WINGET};
 use dotpkg::plan::{plan, Action, SkipReason};
 use dotpkg::state::{Ownership, State};
+use std::collections::BTreeSet;
 
 fn installed(name: &str, version: &str) -> Installed {
     Installed {
@@ -118,10 +119,7 @@ fn a_running_package_is_skipped_rather_than_changed() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.2")],
         &State::default(),
-        &Running::new(
-            std::collections::BTreeSet::from(["fzf".to_string()]),
-            Default::default(),
-        ),
+        &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
     );
     assert_eq!(
         p.actions,
@@ -149,10 +147,7 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1")],
         &State::default(),
-        &Running::new(
-            std::collections::BTreeSet::from(["fzf".to_string()]),
-            Default::default(),
-        ),
+        &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
     );
     assert!(
         p.actions.is_empty(),
@@ -441,4 +436,89 @@ fn a_case_difference_in_scoop_opts_still_finds_the_package() {
     )
     .unwrap();
     assert!(cfg.scoop.opts.contains_key(&Name::new("python")));
+}
+
+#[test]
+fn a_running_package_is_never_pruned() {
+    // The prune loop did not consult `running` at all -- not a mismatched
+    // comparison, an absent one. Verified against the merged Phase 1 planner
+    // with an exact name match, which had no excuse to miss:
+    //   kanata running + owned + removed from pkg.toml  ->  Prune{kanata}
+    // Prune is worse than the upgrade case it sits beside: an upgrade puts the
+    // app back, a prune does not.
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("kanata"), Ownership::Installed);
+
+    let p = plan(
+        &config::parse("[scoop]\npackages = []\n").unwrap(),
+        &lock::Lock::default(),
+        &[installed("kanata", "1.12.0")],
+        &state,
+        &Running::new(BTreeSet::from(["kanata".to_string()]), Default::default()),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: SCOOP.into(),
+            name: Name::new("kanata"),
+            reason: SkipReason::Running
+        }],
+        "a running package must never turn into a Prune"
+    );
+}
+
+#[test]
+fn a_running_package_is_not_pruned_when_only_its_manifest_names_the_process() {
+    // The realistic kanata: the package is `kanata`, the live process is
+    // kanata_windows_tty_winIOv2_arm64.exe.
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("kanata"), Ownership::Installed);
+
+    let mut inst = installed("kanata", "1.12.0");
+    inst.bins = vec!["kanata_windows_tty_winiov2_arm64".to_string()];
+
+    let p = plan(
+        &config::parse("[scoop]\npackages = []\n").unwrap(),
+        &lock::Lock::default(),
+        &[inst],
+        &state,
+        &Running::new(
+            BTreeSet::from(["kanata_windows_tty_winiov2_arm64".to_string()]),
+            Default::default(),
+        ),
+    );
+    assert!(
+        matches!(
+            p.actions.as_slice(),
+            [Action::Skip {
+                reason: SkipReason::Running,
+                ..
+            }]
+        ),
+        "got {:?}",
+        p.actions
+    );
+}
+
+#[test]
+fn an_idle_owned_undeclared_package_is_still_pruned() {
+    // The guard must not turn the prune off altogether.
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+
+    let p = plan(
+        &config::parse("[scoop]\npackages = []\n").unwrap(),
+        &lock::Lock::default(),
+        &[installed("aichat", "0.30.0")],
+        &state,
+        &Running::default(),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Prune {
+            backend: SCOOP.into(),
+            name: Name::new("aichat"),
+            version: "0.30.0".into()
+        }]
+    );
 }

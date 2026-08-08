@@ -69,13 +69,90 @@ impl State {
         }
     }
 
+    /// Release an entry. Returns whether there was one.
+    ///
+    /// The prune path calls this only **after** `verdict` confirms the package
+    /// is gone from disk. Releasing first would leave a still-installed
+    /// package that dotpkg has disowned — recoverable only with `dotpkg
+    /// adopt`, which does not exist. Releasing last can leave a ghost, and a
+    /// ghost is inert: `plan()` consults `owns` only from inside its loop over
+    /// *installed* packages.
+    pub fn remove(&mut self, backend: &str, name: &Name) -> bool {
+        self.0
+            .get_mut(backend)
+            .map(|m| m.remove(name).is_some())
+            .unwrap_or(false)
+    }
+
+    /// How dotpkg came to own this package, if it does.
+    ///
+    /// Read by the executor so that re-recording a package it upgraded puts
+    /// back the variant that was already there. Without this, one careless
+    /// `set(.., Installed)` in the upgrade path erases every `adopt` decision
+    /// on the machine, with no test, no output and no exit code changing.
+    pub fn ownership(&self, backend: &str, name: &Name) -> Option<Ownership> {
+        self.0.get(backend).and_then(|m| m.get(name)).copied()
+    }
+
+    /// Every package dotpkg owns for one backend.
+    pub fn names(&self, backend: &str) -> Vec<Name> {
+        self.0
+            .get(backend)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drop entries naming a package that is not installed, returning them.
+    pub fn reconcile(&mut self, backend: &str, present: &[Name]) -> Vec<Name> {
+        let Some(m) = self.0.get_mut(backend) else {
+            return Vec::new();
+        };
+        let dropped: Vec<Name> = m.keys().filter(|n| !present.contains(n)).cloned().collect();
+        for n in &dropped {
+            m.remove(n);
+        }
+        dropped
+    }
+
+    /// Write the state so that an interrupted write cannot destroy the old one.
+    ///
+    /// `fs::write` truncates in place: a crash mid-write leaves a truncated
+    /// file, and `load_or_empty` then fails for **every** command, `status`
+    /// included, with no way back. Phase 2b-2 is the first phase that writes
+    /// this file, and it writes it while uninstalling software.
+    ///
+    /// The temp file is created in the destination directory, not in the
+    /// system temp directory, because `rename` is only atomic within one
+    /// filesystem.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
+        let tmp = path.with_extension("json.tmp");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)
+                .with_context(|| format!("cannot create {}", tmp.display()))?;
+            f.write_all(text.as_bytes())
+                .with_context(|| format!("cannot write {}", tmp.display()))?;
+            f.sync_all()
+                .with_context(|| format!("cannot flush {}", tmp.display()))?;
+        }
+        // Keep the displaced file: if the rename below is the thing that goes
+        // wrong, the previous ownership record is still readable by hand.
+        if path.exists() {
+            let bak = path.with_extension("json.bak");
+            let _ = std::fs::copy(path, &bak);
+        }
+        std::fs::rename(&tmp, path).with_context(|| {
+            format!(
+                "cannot move {} into place at {}",
+                tmp.display(),
+                path.display()
+            )
+        })
     }
 
     /// `%LOCALAPPDATA%\dotpkg\state.json` on Windows; the XDG-ish equivalent
@@ -171,5 +248,87 @@ mod tests {
         s.set(SCOOP, &Name::new("bat"), Ownership::Adopted);
         assert_eq!(s.owned_count(SCOOP), 2);
         assert_eq!(s.owned_count("winget"), 0);
+    }
+
+    #[test]
+    fn an_entry_can_be_released_and_the_release_is_reported() {
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+        assert!(s.remove(SCOOP, &Name::new("AICHAT")), "release folds case");
+        assert!(!s.owns(SCOOP, &Name::new("aichat")));
+        assert!(
+            !s.remove(SCOOP, &Name::new("aichat")),
+            "a second release is a no-op"
+        );
+    }
+
+    #[test]
+    fn the_ownership_variant_is_readable_so_an_upgrade_cannot_silently_erase_adopt() {
+        // Ownership was written and never read: making `set` discard its
+        // argument left the whole suite green. The executor re-writes entries
+        // for packages it upgrades, so it must be able to put back what was
+        // there.
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+        s.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        assert_eq!(
+            s.ownership(SCOOP, &Name::new("aichat")),
+            Some(Ownership::Adopted)
+        );
+        assert_eq!(
+            s.ownership(SCOOP, &Name::new("fzf")),
+            Some(Ownership::Installed)
+        );
+        assert_eq!(s.ownership(SCOOP, &Name::new("nope")), None);
+    }
+
+    #[test]
+    fn reconcile_drops_a_ghost_and_leaves_a_live_entry_alone() {
+        // A run interrupted between a verified uninstall and the state write
+        // leaves an entry with no package. It is inert -- plan() consults
+        // `owns` only while iterating installed packages -- but it inflates
+        // owned_count, so it is cleaned up at the end of the run that made it.
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        s.set(SCOOP, &Name::new("ghost"), Ownership::Installed);
+
+        let dropped = s.reconcile(SCOOP, &[Name::new("fzf")]);
+
+        assert_eq!(dropped, vec![Name::new("ghost")]);
+        assert!(s.owns(SCOOP, &Name::new("fzf")));
+        assert_eq!(s.owned_count(SCOOP), 1);
+    }
+
+    #[test]
+    fn a_save_that_replaces_an_existing_file_keeps_the_previous_one_alongside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dotpkg").join("state.json");
+
+        let mut first = State::default();
+        first.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        first.save(&path).unwrap();
+
+        let mut second = State::default();
+        second.set(SCOOP, &Name::new("bat"), Ownership::Adopted);
+        second.save(&path).unwrap();
+
+        assert_eq!(State::load_or_empty(&path).unwrap(), second);
+        let backup = path.with_extension("json.bak");
+        assert!(backup.exists(), "the displaced file is kept as {backup:?}");
+        assert_eq!(State::load_or_empty(&backup).unwrap(), first);
+    }
+
+    #[test]
+    fn a_save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        State::default().save(&path).unwrap();
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "state.json")
+            .collect();
+        assert!(strays.is_empty(), "left behind: {strays:?}");
     }
 }

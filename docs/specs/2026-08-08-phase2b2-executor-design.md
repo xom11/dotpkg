@@ -17,20 +17,17 @@ This is the phase in which the tool starts removing other people's software.
 Measured on a14, scoop **0.5.3** (`b588a06e`), 2026-08-08, in a throwaway
 `$env:SCOOP` root under `%TEMP%`. Exit codes were read from
 `System.Diagnostics.Process.ExitCode`, not from `Start-Process -PassThru`,
-which returns an unpopulated value.
+which returns an unpopulated value. Full raw record, every command and its
+verbatim stdout, machine state before and after, and the two results that are
+contaminated or falsified rather than smoothed over:
+[`docs/measurements-2026-08-08-scoop-exit-codes.md`](../measurements-2026-08-08-scoop-exit-codes.md).
 
 **`scoop` does not report operational failure through its exit code. At all.**
-
-| Invocation | Exit | What scoop printed |
-|---|---|---|
-| `download` a manifest with a wrong hash | **0** | `ERROR Hash check failed!` … then `'badhash' (0.74.1) was downloaded successfully!` |
-| `download` a manifest with a dead URL (404) | **0** | `ERROR URL … is not valid` |
-| `install` a manifest with a wrong hash | **0** | hash failure, and **`apps/badhash/0.74.1/` is created anyway** |
-| `install` a manifest path that does not exist | **0** | `Couldn't find manifest for 'nope' at '…'` |
-| `uninstall` an app that is not installed | **0** | `ERROR 'x' isn't installed.` |
-| `bucket rm` a bucket that does not exist | **0** | — |
-| `bucket add` a bucket already added | **0** | `WARN The 'xom11' bucket already exists.` |
-| `scoop thisisnotacommand` | **1** | the only non-zero result found |
+Eleven invocations were tried in the dedicated exit-code round — a wrong
+hash, a dead URL, installing over a manifest path that does not exist,
+uninstalling an app that was never installed, re-adding an existing bucket —
+and every one exits **0**. The only non-zero result anywhere in this
+measurement effort is `scoop thisisnotacommand`, exit **1**.
 
 This is not the `.cmd` shim swallowing a code. `shims/scoop.cmd` is
 `pwsh -noprofile -ex unrestricted -file …\scoop.ps1 %*`; invoking `scoop.ps1`
@@ -61,55 +58,47 @@ part of that answer that carries weight.
 
 ### Everything else measured the same day
 
+Summary only — the full stdout for every item below is in the linked
+measurement document.
+
 Read-only against the real `~/scoop` (31 apps, 75 cache entries, unchanged
-before and after):
+before and after): `git` on a14 is scoop-managed (`where.exe git` resolves
+first to `scoop\apps\git\current\cmd\git.exe`, confirming the self-reference
+in `docs/specs/2026-08-08-phase2b1-prepare-design.md` is real, not
+hypothetical); **no package declares `depends`** — zero of 30 installed
+manifests, zero of the 25 declared packages' bucket-HEAD manifests, recorded
+as a falsified concern rather than a smoothed-over one; an installed
+`manifest.json` is byte-identical to its bucket blob for every one of the six
+apps where a same-version comparison was possible.
 
-- **`git` on a14 is scoop-managed.** `where.exe git` resolves first to
-  `scoop\apps\git\current\cmd\git.exe`. The self-reference in
-  `docs/specs/2026-08-08-phase2b1-prepare-design.md` is real on this machine,
-  not hypothetical.
-- **No package declares `depends`.** Zero of 30 installed manifests, zero of
-  the 25 declared packages' bucket-HEAD manifests. The hazard of a pinned
-  manifest pulling a dependency at latest, over the network, inside the
-  mutation window is **not live here**. Recorded as a falsified concern.
-- **An installed `manifest.json` is byte-identical to its bucket blob** for
-  every one of the six apps checked. This is what makes byte comparison a
-  usable verification primitive rather than a hope.
+In the throwaway root: `-u` and `-a` are accepted on a manifest path
+(`install.json` records `{"architecture": "arm64", "url": "<the staging
+path>"}`); the installed `manifest.json` is byte-identical to the staged
+file; `scoop download` without `-a` fetches the default architecture's
+artifact, and the probe cache ended with two distinct files for one version —
+so a prefetch that omits `-a` warms the wrong artifact and the install then
+reaches the network **inside the mutation window**; `scoop uninstall` is
+clean, no residue, `persist/` never created; **a failed install leaves
+`apps/<app>/<version>/` containing only the downloaded archive**, no
+`current` junction, no `manifest.json`, so `Scoop::scan()` skips it silently
+(`src/backend/scoop.rs:255`, `continue` on `NotFound`) — invisible to every
+command, but never masquerading as installed; `scoop bucket add` clones in
+full, not shallow (`is-shallow = false`, all 16 commits) — old pins survive a
+clone; warm-cache timing for `fzf` is spawn-dominated, not
+extraction-dominated (full uninstall+install window **11.63 s**); stderr is
+non-empty on success, carrying ANSI colour codes and non-fatal
+`Cannot find path …` noise — no logic may read "stderr said something" as
+"something went wrong".
 
-In the throwaway root:
-
-- **`-u` and `-a` are accepted on a manifest path.**
-  `scoop install -u -a arm64 <path>.json` installs, and `install.json` records
-  `{"architecture": "arm64", "url": "<the staging path>"}`.
-- **The installed `manifest.json` is byte-identical to the staged file.**
-- **`scoop download` without `-a` fetches the default architecture's
-  artifact.** The probe cache ended with two distinct files for one version —
-  `fzf#0.74.1#54d353d.zip` (1 981 965 B) and `fzf#0.74.1#bd3be84.zip`
-  (2 181 266 B). A prefetch that omits `-a` warms the wrong artifact and the
-  install then reaches the network **inside the mutation window**.
-- **`scoop uninstall` is clean.** `apps/<app>` disappears entirely, the cache
-  is kept, and `persist/` was never created. No residue.
-- **A failed install leaves `apps/<app>/<version>/` containing only the
-  downloaded archive** — no `current` junction, no `manifest.json`. So
-  `Scoop::scan()` skips it silently (`src/backend/scoop.rs:255`, `continue` on
-  `NotFound`). A half-install therefore never masquerades as installed, which
-  is the safe direction; but it is invisible to every command.
-- **`scoop bucket add` clones in full**, not shallow (`is-shallow = false`,
-  all 16 commits). Old pins survive a clone.
-- **Timing, warm cache, `fzf`:** install 3.8–3.9 s, uninstall 4.6–5.3 s, the
-  full uninstall+install window **11.63 s**. Spawn-dominated at this size, not
-  extraction-dominated.
-- **stderr is non-empty on success**, carrying ANSI colour codes and non-fatal
-  `Cannot find path …` noise. No logic may read "stderr said something" as
-  "something went wrong".
-
-**Two corrections to `docs/phase2b-notes.md`.** It records `scoop install` over
-an installed app as "exit 0, **no output**, nothing changes". Measured, it
-prints `WARN 'fzf' (0.74.1) is already installed. / Use 'scoop update fzf' to
-install a new version.` on **stdout** — and installing a *different* version's
-manifest prints that same line, naming the version **already installed**, not
-the one requested. The substance of the note holds; the detail does not, and
-the detail is the part an executor would key on.
+**Corrected, not merely contaminated: `scoop install` over an installed
+app.** `docs/phase2b-notes.md` recorded it as "exit 0, **no output**, nothing
+changes". Measured, it prints `WARN 'fzf' (0.74.1) is already installed. /
+Use 'scoop update fzf' to install a new version.` on **stdout** — and
+installing a *different* version's manifest prints that same line, naming
+the version **already installed**, not the one requested. The substance of
+the note holds; the detail does not, and the detail is the part an executor
+would key on. `docs/phase2b-notes.md` now carries the corrected text
+directly.
 
 **One measurement is contaminated and yields nothing.** Shim creation: the
 probe root has no `apps/scoop`, so scoop could not copy `shim.exe` and created

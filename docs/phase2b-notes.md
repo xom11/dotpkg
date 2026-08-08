@@ -43,13 +43,23 @@ What was tried, and what each did:
 | Command | Result |
 |---|---|
 | `scoop install <path>/app.json` (not installed) | works, exit 0 |
-| `scoop install <path>/app.json` (installed, different version) | **exit 0, no output, nothing changes** |
+| `scoop install <path>/app.json` (installed, different version) | exit 0, `WARN` on stdout, nothing changes — corrected below |
 | `scoop install -f …` | `Option -f not recognized` |
 | `scoop install --force …` | `Option --force not recognized` |
 | `scoop update <path>/app.json` | exit 1, no output |
 | `scoop reset app@<version present on disk>` | works, relinks shims |
 | `scoop reset app@<version not on disk>` | **exit 0, no output, nothing changes** |
 | `scoop uninstall app` then install the pin | the only sequence that works |
+
+**Corrected 2026-08-08, remeasured for Phase 2b-2.** The row above originally
+read "exit 0, no output, nothing changes". Remeasured with
+`System.Diagnostics.Process.ExitCode` (`docs/measurements-2026-08-08-scoop-exit-codes.md`,
+tests E4/E5), it is not silent: scoop prints `WARN  '<app>' (<version>) is
+already installed.` / `Use 'scoop update <app>' to install a new version.` on
+**stdout** — and it names the version **already installed**, not the version
+just requested. Installing fzf 0.74.2 over an installed 0.74.1 prints the
+same line naming 0.74.1. "Exit 0, nothing changes" still holds; only "no
+output" was wrong.
 
 **There is no force flag.** The authoritative list from `scoop help install` is
 `-g/--global`, `-i/--independent`, `-k/--no-cache`, `-s/--skip-hash-check`,
@@ -226,41 +236,74 @@ than smoothed over. It may simply mean these particular pins are young.
 
 ## Things that will bite the executor
 
-**`Outcome::ReadyToRemove` is still attachable to an `Install`.** The split from
-`Ready { manifest: Option<PathBuf> }` killed the ambiguity where `None` meant
-both "prune" and a fallback, but the type still does not bind an outcome to an
-action variant. **Branch on `item.action`, never on the outcome alone.**
+~~**`Outcome::ReadyToRemove` is still attachable to an `Install`.**~~ **Closed
+by `626a276`** ("Add the whole-run executor, the recovery file, and the
+running re-check"). The type still does not bind an outcome to an action
+variant — that part of the risk is unchanged — but `plan_to_steps`
+(`src/apply.rs`) now matches on `(&p.action, &p.outcome)` together, with a
+comment quoting this note almost verbatim: "Branch on the ACTION, never on
+the outcome." The split from `Ready { manifest: Option<PathBuf> }` that
+killed the "prune vs. fallback" ambiguity in `None` was already in place
+before this phase.
 
-**Nothing produced by real code is asserted to be `ReadyToFetch`.** The only
-test that stages for real lands in `Failed`, because there is no scoop binary on
-the test platform. The manifest path that variant now guarantees is asserted
-only in hand-built values.
+**Still open.** Nothing produced by real code is asserted to be
+`ReadyToFetch`. `stage_and_fetch` (`src/apply.rs`) calls `scoop.download()`
+directly, not through `Mutator`; `src/execute.rs`'s `Mutator` trait still
+declares only `uninstall` and `install`. The call site says so itself: "a
+later task puts it behind the `Mutator` trait, as `install` and `uninstall`
+already are." No commit in this branch moves it there, so the only test that
+stages for real still lands in `Failed` (no scoop binary on the test
+platform), and every `ReadyToFetch` value asserted in the suite is still
+hand-built rather than produced.
 
-**`tests/cli.rs`'s `Snapshot` records path names, not content.** Its comment
-claims a written state file shows up as a change, but the fixture writes
-`state.json` before the snapshot, so an **in-place rewrite of that exact file is
-invisible** — and writing `state.json` is precisely what 2b-2 adds. Compare
-content or mtime before relying on it.
+~~**`tests/cli.rs`'s `Snapshot` records path names, not content.**~~ **Closed
+by `cd8420f`** ("Make the cli Snapshot compare content, and forbid a fake
+scoop binary"). `Snapshot` now stores `(path, DefaultHasher content hash)`
+pairs instead of bare paths. The commit message records the measurement that
+justified it: injecting the exact `state.json` write this phase adds left
+`cargo test --test cli` at 3/3 green under the old path-only form, while the
+file's content was replaced.
 
-**`main.rs`'s Apply arm is the third inline copy of load → scan → plan.** 2b-2
-makes that arm destructive. Extract a testable driver rather than adding a
-fourth.
+~~**`main.rs`'s Apply arm is the third inline copy of load → scan → plan.**~~
+**Corrected: it was the *second*, not the third** —
+`docs/specs/2026-08-08-phase2b2-executor-design.md` already had the count
+right (`:64`, `:100`); this note did not. **Closed by `0712445`** ("Wire up
+the executor: one driver, one question, three exit codes"), which extracted
+`apply::load_everything` for the Apply arm instead of inlining a second copy
+of load → scan → plan into the newly-destructive version. `main.rs` still has
+two separate assemblies today — Status stays fully inline, and `plan()`
+itself is still called once from each arm — but no third one was ever added.
 
-**`commit` is still unvalidated where it reaches git argv, and the reason it is
-harmless today is not the obvious one.** `git show --output=<file>` *does* write
-a file — measured — so "the subcommands are read-only" is false. What actually
-protects it: `git cat-file -e` runs first and rejects any `-`-leading value, and
-`git show`'s target is forcibly suffixed with `:bucket/<name>.json`, which fails
-to open. Phase 3 writes that field from bucket data, so validate it there rather
-than inheriting this reasoning.
+~~**`commit` is still unvalidated where it reaches git argv, and the reason it
+is harmless today is not the obvious one.**~~ **Closed by `741bf91`** ("Refuse
+a pkg.lock commit that is not a hash"). Verified against a real git
+repository: this note's own reasoning was itself incomplete. `cat-file -e`
+does reject a leading dash, but it also **accepts** `main`, `HEAD`, `@`, and
+`refs/heads/main` — so `commit = "main"` sailed through the exact protection
+this note described, and when the bucket tip happened to carry the same
+version, staged the tip anyway: a lock that looks pinned silently tracking
+latest. `commit` must now be 40 or 64 lowercase hex characters, enforced in
+two places — `lock_coherence_guard` (whole-run, before the plan is built) and
+`Scoop::stage`'s `ensure_commit_hash` (re-checked, because `stage` is a public
+API a later phase calls from elsewhere) — rather than deferred to Phase 3 as
+this note originally proposed. Full reasoning:
+`docs/specs/2026-08-08-phase2b2-executor-design.md`, "Rev-locking: `commit`
+must be a hash".
 
-**`mass_prune_guard` checks scoop only.** `Config` already has a
-`WingetSection`. The function reads like "the fence" and is not one yet; it must
-grow a backend loop in the same commit as the winget backend.
+**Still open.** `mass_prune_guard` checks scoop only. `Config` already has a
+`WingetSection`. The function reads like "the fence" and is not one yet; it
+must grow a backend loop in the same commit as the winget backend. Confirmed
+unchanged in `src/apply.rs`: it still reads only
+`declared.scoop.packages.is_empty()` and `state.owned_count(SCOOP)`. The
+winget backend is out of scope for Phase 2b-2 (design doc, "Non-goals"), so
+this is deferred, not forgotten.
 
-**Staging paths are not content-addressed.** Re-pinning the same version to a
-different commit silently overwrites the file that an installed app's
-`install.json` already points at.
+**Still open.** Staging paths are not content-addressed. Confirmed unchanged:
+`Scoop::stage_text` (`src/backend/scoop.rs`) still writes to
+`staging_root.join(app.key()).join(version)` — keyed on app and version only,
+never on `commit`. Re-pinning the same version to a different commit still
+silently overwrites the file that an installed app's `install.json` already
+points at.
 
 ## Method, for whoever runs the next dogfood
 

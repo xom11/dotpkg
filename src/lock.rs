@@ -42,8 +42,8 @@ pub struct Lock {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawScoop {
-    commit: String,
     bucket: String,
+    commit: String,
     version: String,
 }
 
@@ -148,7 +148,12 @@ pin     = "version-only"
     fn a_scoop_entry_without_a_commit_is_rejected() {
         // The commit IS the lock. An entry carrying only a version would look
         // locked while guaranteeing nothing.
-        let err = parse("[scoop.fzf]\nversion = \"0.74.1\"\n").unwrap_err();
+        //
+        // `bucket` is supplied deliberately: omitting both fields would make this
+        // pass only because serde reports missing fields in struct declaration
+        // order, so a future field reorder would break the test without breaking
+        // the guarantee.
+        let err = parse("[scoop.fzf]\nbucket = \"main\"\nversion = \"0.74.1\"\n").unwrap_err();
         assert!(format!("{err:#}").contains("commit"), "got: {err:#}");
     }
 

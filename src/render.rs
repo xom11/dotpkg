@@ -152,7 +152,7 @@ pub fn render_execution(ex: &Execution) -> String {
     for (name, r) in &ex.results {
         let line = match r {
             ItemResult::Done => format!("  done    scoop  {name:<13}verified on disk"),
-            ItemResult::Failed(why) => format!("  FAILED  scoop  {name:<13}{why}"),
+            ItemResult::Failed { why, .. } => format!("  FAILED  scoop  {name:<13}{why}"),
             ItemResult::Held(why) => format!("  held    scoop  {name:<13}{why}"),
         };
         out.push_str(&line);
@@ -170,7 +170,21 @@ pub fn render_execution(ex: &Execution) -> String {
         ex.held()
     ));
     if ex.failed() > 0 {
-        out.push_str("  Some packages were changed and some were not. Look at the machine.\n");
+        // `changed()` alone would understate this: a `Replace` whose
+        // uninstall really removed the package before its install failed
+        // has `changed() == 0` (no result is `Done`) but has still altered
+        // the machine, and `touched()` is what says so. Without checking it
+        // here too, this sentence would say "nothing was changed" about a
+        // machine that just lost a package -- the same claim-more-than-
+        // verified mistake this function exists to avoid, just moved from
+        // "changed" to "unchanged".
+        if ex.changed() > 0 || ex.touched() > 0 {
+            out.push_str("  Some packages were changed and some were not. Look at the machine.\n");
+        } else {
+            out.push_str(
+                "  Nothing was changed; the failure(s) above are everything that happened.\n",
+            );
+        }
     }
     if let Some(why) = &ex.recovery_write_failed {
         out.push_str(&format!(
@@ -703,7 +717,10 @@ mod tests {
                 (Name::new("bat"), ItemResult::Done),
                 (
                     Name::new("fzf"),
-                    ItemResult::Failed("install did not happen".into()),
+                    ItemResult::Failed {
+                        why: "install did not happen".into(),
+                        touched: false,
+                    },
                 ),
                 (
                     Name::new("kanata"),
@@ -725,6 +742,33 @@ mod tests {
         assert!(
             !out.contains("Nothing has been changed."),
             "that promise belongs to --prepare and must not appear after a mutation: {out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_install_with_nothing_touched_gets_its_own_honest_sentence() {
+        // Important 2's exact shape: 0 done, 1 failed, 0 touched. Before this
+        // fix, `render_execution` printed "Some packages were changed and
+        // some were not" here regardless -- a claim this scenario does not
+        // support, since nothing on the machine changed at all.
+        let ex = Execution {
+            results: vec![(
+                Name::new("fzf"),
+                ItemResult::Failed {
+                    why: "install did not happen".into(),
+                    touched: false,
+                },
+            )],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        assert!(
+            !out.contains("Some packages were changed and some were not"),
+            "nothing changed, so this must not claim otherwise: {out}"
+        );
+        assert!(
+            out.contains("Nothing was changed"),
+            "say plainly that nothing changed: {out}"
         );
     }
 

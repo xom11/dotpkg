@@ -372,7 +372,12 @@ fn yes_alone_does_not_authorise_a_prune() {
     let out = f.run(&["apply", "--yes"]);
     let stderr = text(&out.stderr);
 
-    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    // Tightened from `assert_ne!(.., Some(0))`, which is exactly loose
+    // enough to have missed a real bug: this gate used to `anyhow::bail!`,
+    // which only `main() -> Result<()>` can ever turn into exit 1 -- and
+    // `assert_ne!(Some(1), Some(0))` is also true. 2 is "refused, nothing
+    // changed", which is the whole reason the code exists.
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("--allow-prune"), "{stderr}");
     assert!(
         !stderr.contains("could not be prepared"),
@@ -465,5 +470,72 @@ fn keep_going_holds_a_ready_prune_back_when_another_package_could_not_be_prepare
             .count(),
         scoop_before,
         "nothing under apps/ may change while the confirmation prompt is still unanswered"
+    );
+}
+
+// -- fix round 1 ---------------------------------------------------------
+
+#[test]
+fn apply_on_a_converged_machine_exits_zero_without_asking() {
+    // Important 4. Verified live before this fix: an empty plan still built
+    // the question "0 packages will be uninstalled and reinstalled, 0
+    // installed, 0 removed. Continue?", got an unreadable stdin exactly like
+    // every other unattended run, and exited 2 -- "go look, something's
+    // wrong" -- about a machine with nothing wrong with it, every night.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a converged machine must exit 0, not ask an unanswerable question: \
+         stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Continue?"),
+        "there is nothing to decide, so nothing to ask: {stderr}"
+    );
+    assert!(
+        stdout.contains("already matches"),
+        "say plainly that there was nothing to do: {stdout}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_note() {
+    // Minor 6. Verified live before this fix: under `--keep-going --yes`
+    // the closing table reported "0 held" while a prune really was held --
+    // the `eprintln!` note satisfied "printed as held" at the moment it
+    // happened, but the table a user actually reads at the end of the run
+    // contradicted it minutes later.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+
+    let out = f.run(&["apply", "--keep-going", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert!(
+        stdout.contains("held") && stdout.contains("aichat"),
+        "the closing table must list the held prune, not just say 0 held: \
+         stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("0 verified on disk, 0 failed, 0 held."),
+        "the held count must reflect the real held prune: {stdout}"
     );
 }

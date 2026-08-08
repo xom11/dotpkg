@@ -138,10 +138,14 @@ fn an_install_scoop_silently_did_not_perform_is_reported_and_not_claimed() {
         },
     );
 
-    let StepOutcome::Failed(why) = out else {
+    let StepOutcome::Failed { why, touched } = out else {
         panic!("a silent no-op must be a failure, got {out:?}")
     };
     assert!(why.contains("install did not happen"), "{why}");
+    assert!(
+        !touched,
+        "a plain Install has no uninstall half to have already touched anything"
+    );
     assert!(
         !state.owns(SCOOP, &Name::new("fzf")),
         "a failed install must not be recorded as owned"
@@ -208,7 +212,7 @@ fn a_half_install_earns_no_retry() {
         },
     );
 
-    assert!(matches!(out, StepOutcome::Failed(_)), "{out:?}");
+    assert!(matches!(out, StepOutcome::Failed { .. }), "{out:?}");
     assert_eq!(fake.calls().len(), 1, "{:?}", fake.calls());
 }
 
@@ -232,10 +236,14 @@ fn a_replace_whose_uninstall_did_nothing_never_reaches_the_install() {
         },
     );
 
-    let StepOutcome::Failed(why) = out else {
+    let StepOutcome::Failed { why, touched } = out else {
         panic!("got {out:?}")
     };
     assert!(why.contains("uninstall did not happen"), "{why}");
+    assert!(
+        !touched,
+        "verdict never confirmed the uninstall, so the machine is exactly as it was"
+    );
     assert_eq!(
         fake.calls(),
         vec!["uninstall fzf".to_string()],
@@ -292,7 +300,7 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
             app: Name::new("aichat"),
         },
     );
-    assert!(matches!(out, StepOutcome::Failed(_)), "{out:?}");
+    assert!(matches!(out, StepOutcome::Failed { .. }), "{out:?}");
     assert!(
         state.owns(SCOOP, &Name::new("aichat")),
         "a package still on disk must still be owned -- releasing here leaves it \
@@ -630,7 +638,13 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
     let mixed = Execution {
         results: vec![
             (Name::new("a"), ItemResult::Done),
-            (Name::new("b"), ItemResult::Failed("no".into())),
+            (
+                Name::new("b"),
+                ItemResult::Failed {
+                    why: "no".into(),
+                    touched: false,
+                },
+            ),
         ],
         dropped_ghosts: Vec::new(),
         recovery_write_failed: None,
@@ -639,6 +653,43 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
         mixed.exit_code(false),
         1,
         "something changed and something failed"
+    );
+
+    let untouched_failure = Execution {
+        results: vec![(
+            Name::new("c"),
+            ItemResult::Failed {
+                why: "install did not happen".into(),
+                touched: false,
+            },
+        )],
+        dropped_ghosts: Vec::new(),
+        recovery_write_failed: None,
+    };
+    assert_eq!(
+        untouched_failure.exit_code(false),
+        2,
+        "nothing changed at all, so there is nothing to look at"
+    );
+
+    // Important 3: a `Failed` result can still mean the machine changed, if
+    // its uninstall half really ran before the failure -- `touched` is how
+    // that reaches `exit_code` even though no result is `Done`.
+    let touched_but_not_done = Execution {
+        results: vec![(
+            Name::new("d"),
+            ItemResult::Failed {
+                why: "install did not happen".into(),
+                touched: true,
+            },
+        )],
+        dropped_ghosts: Vec::new(),
+        recovery_write_failed: None,
+    };
+    assert_eq!(
+        touched_but_not_done.exit_code(false),
+        1,
+        "the package is genuinely gone -- 2 would say there is nothing to look at"
     );
 }
 
@@ -690,8 +741,9 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert!(
-        matches!(&ex.results[0].1, ItemResult::Failed(_)),
-        "{:?}",
+        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        "the uninstall really ran before the install failed -- exit_code must \
+         not be able to call this shape untouched: {:?}",
         ex.results
     );
     assert!(
@@ -703,6 +755,21 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
         Some(Ownership::Adopted),
         "still owned, and still its ORIGINAL ownership variant -- so a later run \
          re-installs it instead of treating it as orphaned"
+    );
+
+    // Important 3: the package is genuinely gone from disk, so this must not
+    // report exit 2 -- "refused, nothing changed" -- which would tell an
+    // operator there is nothing to look at when there is exactly one thing
+    // to look at.
+    assert_eq!(
+        ex.exit_code(false),
+        1,
+        "the machine changed even though nothing is Done: 2 would say otherwise"
+    );
+    let rendered = dotpkg::render::render_execution(&ex);
+    assert!(
+        rendered.contains("Some packages were changed and some were not"),
+        "the summary must not call this 'nothing changed' either: {rendered}"
     );
 }
 

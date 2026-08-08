@@ -86,7 +86,16 @@ pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     Done,
-    Failed(String),
+    /// `touched` is true when the machine was already altered before this
+    /// failure happened: today, only a `Step::Replace` whose uninstall
+    /// verified `Absent` before its install then failed. The package is
+    /// genuinely gone from disk at that point -- neither "done" nor "as it
+    /// was" -- and `Execution::exit_code` must not fold that into "nothing
+    /// changed".
+    Failed {
+        why: String,
+        touched: bool,
+    },
 }
 
 /// Perform one step and prove on disk that it happened.
@@ -99,16 +108,31 @@ pub enum StepOutcome {
 pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) -> StepOutcome {
     match step {
         Step::Install { app, staged, arch } | Step::Replace { app, staged, arch } => {
+            // Set true only once `Replace`'s uninstall half is PROVEN by
+            // `verdict`, not merely attempted: a failure at or before that
+            // point leaves the machine exactly as it was, and a failure
+            // after it leaves the package genuinely gone.
+            let mut touched = false;
             if matches!(step, Step::Replace { .. }) {
                 if let Err(e) = m.uninstall(app) {
-                    return StepOutcome::Failed(format!("{app}: could not run uninstall: {e:#}"));
+                    return StepOutcome::Failed {
+                        why: format!("{app}: could not run uninstall: {e:#}"),
+                        touched,
+                    };
                 }
                 if let Err(d) = verdict(root, app, &Expected::Absent) {
-                    return StepOutcome::Failed(format!("{app}: uninstall did not happen -- {d}"));
+                    return StepOutcome::Failed {
+                        why: format!("{app}: uninstall did not happen -- {d}"),
+                        touched,
+                    };
                 }
+                touched = true;
             }
             if let Err(e) = m.install(staged, arch.as_deref()) {
-                return StepOutcome::Failed(format!("{app}: could not run install: {e:#}"));
+                return StepOutcome::Failed {
+                    why: format!("{app}: could not run install: {e:#}"),
+                    touched,
+                };
             }
             let want = Expected::Present {
                 staged: staged.clone(),
@@ -119,15 +143,22 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // installed`, exit 0, and no change -- which would then pass
                 // no check dotpkg has.
                 if d != Disagreement::NotInstalled {
-                    return StepOutcome::Failed(format!("{app}: install did not happen -- {d}"));
+                    return StepOutcome::Failed {
+                        why: format!("{app}: install did not happen -- {d}"),
+                        touched,
+                    };
                 }
                 if let Err(e) = m.install(staged, arch.as_deref()) {
-                    return StepOutcome::Failed(format!("{app}: could not run retry: {e:#}"));
+                    return StepOutcome::Failed {
+                        why: format!("{app}: could not run retry: {e:#}"),
+                        touched,
+                    };
                 }
                 if let Err(d2) = verdict(root, app, &want) {
-                    return StepOutcome::Failed(format!(
-                        "{app}: install did not happen, even on retry -- {d2}"
-                    ));
+                    return StepOutcome::Failed {
+                        why: format!("{app}: install did not happen, even on retry -- {d2}"),
+                        touched,
+                    };
                 }
             }
             // Claim only now, and preserve an existing `adopt`.
@@ -138,10 +169,16 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
         }
         Step::Remove { app } => {
             if let Err(e) = m.uninstall(app) {
-                return StepOutcome::Failed(format!("{app}: could not run uninstall: {e:#}"));
+                return StepOutcome::Failed {
+                    why: format!("{app}: could not run uninstall: {e:#}"),
+                    touched: false,
+                };
             }
             if let Err(d) = verdict(root, app, &Expected::Absent) {
-                return StepOutcome::Failed(format!("{app}: uninstall did not happen -- {d}"));
+                return StepOutcome::Failed {
+                    why: format!("{app}: uninstall did not happen -- {d}"),
+                    touched: false,
+                };
             }
             state.remove(SCOOP, app);
             StepOutcome::Done
@@ -165,7 +202,12 @@ pub struct ExecOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemResult {
     Done,
-    Failed(String),
+    /// `touched` mirrors `StepOutcome::Failed`'s field of the same name: true
+    /// when the machine was already altered before this failure happened.
+    Failed {
+        why: String,
+        touched: bool,
+    },
     /// Not attempted, and the run is not at fault: the package started
     /// running, or removals are gated off.
     Held(String),
@@ -194,7 +236,19 @@ impl Execution {
     pub fn failed(&self) -> usize {
         self.results
             .iter()
-            .filter(|(_, r)| matches!(r, ItemResult::Failed(_)))
+            .filter(|(_, r)| matches!(r, ItemResult::Failed { .. }))
+            .count()
+    }
+    /// How many `Failed` results happened only after the machine was already
+    /// altered -- today, only a `Step::Replace` whose uninstall verified
+    /// `Absent` before its install then failed. Separate from `changed()`,
+    /// which means "verified fully done": a package counted here is neither
+    /// done nor as it was, and `exit_code` must not call that "nothing
+    /// changed" just because it isn't `Done` either.
+    pub fn touched(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|(_, r)| matches!(r, ItemResult::Failed { touched: true, .. }))
             .count()
     }
     pub fn held(&self) -> usize {
@@ -211,6 +265,13 @@ impl Execution {
     /// something" can never both be true: a refusal means `execute` returned
     /// `Err` before performing a single step, so nothing in `self` could have
     /// changed.
+    ///
+    /// `touched()` counts alongside `changed()` here for the same reason it
+    /// exists at all: a `Replace` whose uninstall really removed the package
+    /// before its install failed has changed the machine, even though no
+    /// result is `Done`. Reporting 2 for that shape would tell an operator
+    /// there is nothing to look at, which is the single worst thing this
+    /// code could say about a machine that just lost a package.
     pub fn exit_code(&self, refused: bool) -> i32 {
         debug_assert!(
             !(refused && self.changed() > 0),
@@ -220,7 +281,7 @@ impl Execution {
             return 2;
         }
         if self.failed() > 0 {
-            if self.changed() == 0 {
+            if self.changed() == 0 && self.touched() == 0 {
                 return 2;
             }
             return 1;
@@ -345,7 +406,7 @@ pub fn execute(
         }
         let r = match run_step(root, m, state, step) {
             StepOutcome::Done => ItemResult::Done,
-            StepOutcome::Failed(why) => ItemResult::Failed(why),
+            StepOutcome::Failed { why, touched } => ItemResult::Failed { why, touched },
         };
         ex.results.push((app, r));
     }

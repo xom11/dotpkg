@@ -45,10 +45,12 @@ enum Command {
         /// --allow-prune for that) and does not bypass any other guard.
         #[arg(long)]
         yes: bool,
-        /// Required, in addition to consent, for a run that removes
-        /// anything. The cheapest answer to one surviving declared package
-        /// disarming the mass-prune guard while everything else it owned
-        /// gets pruned.
+        /// Required, in addition to `--yes`, for an unattended run that
+        /// removes anything. Answering the confirmation prompt directly
+        /// still authorises a prune on its own -- this only gates the
+        /// `--yes` fast path, which is the cheapest answer to one surviving
+        /// declared package disarming the mass-prune guard while
+        /// everything else it owned gets pruned.
         #[arg(long)]
         allow_prune: bool,
         /// Install what is ready even though some packages could not be
@@ -65,6 +67,21 @@ enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
     },
+}
+
+/// Print a refusal and exit 2.
+///
+/// A guard firing, the user saying no, or no answer being available are all
+/// the same fact from a caller's point of view: refused, and the machine was
+/// not touched. `?` propagation up through `main() -> Result<()>` would print
+/// the same text but exit 1 -- indistinguishable from `--prepare` finding a
+/// package it could not prepare, which is a different fact a CI script needs
+/// to be able to tell apart without parsing stderr. `--prepare`'s own exit 1
+/// is deliberately untouched by this: it is not a refusal, and its own test
+/// pins it.
+fn refuse(err: anyhow::Error) -> ! {
+    eprintln!("{err:#}");
+    std::process::exit(2);
 }
 
 fn main() -> Result<()> {
@@ -101,12 +118,13 @@ fn main() -> Result<()> {
             state,
         } => {
             let state_path = state.unwrap_or_else(State::default_path);
-            anyhow::ensure!(
-                state_path.is_absolute(),
-                "the state file resolves to {}, which is relative to the current \
-                 directory. Pass --state with an absolute path.",
-                state_path.display()
-            );
+            if !state_path.is_absolute() {
+                refuse(anyhow::anyhow!(
+                    "the state file resolves to {}, which is relative to the current \
+                     directory. Pass --state with an absolute path.",
+                    state_path.display()
+                ));
+            }
 
             // Both guards run before anything reads the machine: an empty
             // pkg.toml or an incoherent lock are file-corruption cases, and
@@ -115,10 +133,14 @@ fn main() -> Result<()> {
             let declared_only = dotpkg::config::load(&config)?;
             let state_only = State::load_or_empty(&state_path)?;
             if !allow_empty_config {
-                dotpkg::apply::mass_prune_guard(&declared_only, &state_only)?;
+                if let Err(e) = dotpkg::apply::mass_prune_guard(&declared_only, &state_only) {
+                    refuse(e);
+                }
             }
             let locked_only = dotpkg::lock::load_or_empty(&lock)?;
-            dotpkg::apply::lock_coherence_guard(&locked_only)?;
+            if let Err(e) = dotpkg::apply::lock_coherence_guard(&locked_only) {
+                refuse(e);
+            }
 
             let mut d = dotpkg::apply::load_everything(&config, &lock, &state_path)?;
             for w in &d.scan.warnings {
@@ -196,15 +218,27 @@ fn main() -> Result<()> {
                 );
             }
 
+            // A converged machine: nothing to install, nothing to remove,
+            // nothing held back, and nothing reported as needing attention
+            // either. Asking "0 installed, 0 removed, continue?" here has no
+            // meaningful answer, and an unreadable stdin would refuse it
+            // anyway -- exit 2, "go look", every single night, about
+            // nothing. There is nothing to look at.
+            if steps.is_empty() && unusable.is_empty() && held.is_empty() {
+                println!("  Nothing to do -- the machine already matches pkg.toml and pkg.lock.");
+                std::io::stdout().flush().ok();
+                return Ok(());
+            }
+
             let removals = steps
                 .iter()
                 .filter(|s| matches!(s, Step::Remove { .. }))
                 .count();
             if removals > 0 && yes && !allow_prune {
-                anyhow::bail!(
+                refuse(anyhow::anyhow!(
                     "this run would remove {removals} package(s) and --yes was passed. \
                      Removals need --allow-prune as well."
-                );
+                ));
             }
 
             let question = format!(
@@ -252,6 +286,19 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
+
+            // The `eprintln!` above satisfies "printed as held" at the time
+            // it happens, but the closing table is what a user actually
+            // reads at the end of a run -- and until now it disagreed,
+            // reporting "0 held" while a prune really was held.
+            for app in &held {
+                ex.results.push((
+                    app.clone(),
+                    dotpkg::execute::ItemResult::Held(
+                        "removal held: another package in this run could not be prepared".into(),
+                    ),
+                ));
+            }
 
             // Report only what a fresh scan confirms.
             let after = <Scoop as Backend>::scan(&d.scoop)?;

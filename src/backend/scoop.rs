@@ -412,6 +412,50 @@ fn resolve_spelling(dir: &Path, commit: &str, app_key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The exact argv for prefetching a staged manifest.
+///
+/// Pure, and separate from the call that runs it, because the guarantee worth
+/// testing here is a property of the argv — that hash verification is never
+/// skipped — and not the behaviour of a subprocess no test on this platform
+/// can run.
+pub fn download_argv(manifest: &Path) -> Vec<String> {
+    vec![
+        "download".to_string(),
+        manifest.to_string_lossy().into_owned(),
+    ]
+}
+
+impl Scoop {
+    /// Measured: `scoop.ps1` cannot be exec'd directly and bare `scoop` from
+    /// `PATH` is whatever the user's shell resolves. `shims/scoop.cmd` runs
+    /// non-interactively.
+    pub fn scoop_exe(&self) -> PathBuf {
+        self.root.join("shims").join("scoop.cmd")
+    }
+
+    /// Fetch and hash-verify the artifact a staged manifest names, without
+    /// installing it. Nothing on the machine changes except scoop's cache.
+    ///
+    /// The exit code is the only signal this phase has: `scoop download` was
+    /// not measured for silent-success behaviour the way `install` and `reset`
+    /// were, and inventing a cache-path check against an unmeasured assumption
+    /// would be worse than saying so.
+    pub fn download(&self, manifest: &Path) -> Result<()> {
+        let argv = download_argv(manifest);
+        let out = Command::new(self.scoop_exe())
+            .args(&argv)
+            .output()
+            .with_context(|| format!("cannot run {}", self.scoop_exe().display()))?;
+        anyhow::ensure!(
+            out.status.success(),
+            "scoop download failed for {}: {}",
+            manifest.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

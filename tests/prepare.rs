@@ -318,3 +318,42 @@ fn a_winget_pin_in_the_scoop_map_is_an_error_not_a_panic() {
         .unwrap_err();
     assert!(format!("{err:#}").contains("inconsistent"));
 }
+
+use dotpkg::backend::scoop::download_argv;
+
+#[test]
+fn the_download_argv_never_skips_hash_verification() {
+    // The approved design forbids --skip-hash-check and this is the one place
+    // it would be tempting. Hash verification is scoop's, and dotpkg does not
+    // opt out of it.
+    //
+    // This is the whole of what a test in this repository can honestly prove
+    // about the download step: what scoop then does with the argv was
+    // measured, not asserted, and is covered by the Windows dogfood.
+    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"));
+    assert!(
+        !argv.iter().any(|a| a.contains("skip-hash") || a == "-s"),
+        "hash verification must never be skipped: {argv:?}"
+    );
+}
+
+#[test]
+fn the_download_argv_names_the_staged_manifest() {
+    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"));
+    assert_eq!(argv[0], "download");
+    assert!(
+        argv.iter().any(|a| a.ends_with("tool.json")),
+        "the staged path is the point: {argv:?}"
+    );
+}
+
+#[test]
+fn the_scoop_entry_point_is_the_cmd_shim() {
+    // Measured: scoop.ps1 cannot be exec'd by Command, and relying on PATH
+    // picks up whatever the user's shell resolves. shims/scoop.cmd runs
+    // non-interactively and exits 0.
+    let root = tempfile::tempdir().unwrap();
+    let exe = Scoop::new(root.path().to_path_buf()).scoop_exe();
+    assert_eq!(exe.file_name().unwrap(), "scoop.cmd");
+    assert!(exe.starts_with(std::fs::canonicalize(root.path()).unwrap()));
+}

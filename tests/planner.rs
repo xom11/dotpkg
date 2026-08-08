@@ -131,6 +131,29 @@ fn a_running_package_is_skipped_rather_than_changed() {
 }
 
 #[test]
+fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
+    // The `running` check must stay INSIDE the branch that has a change to
+    // make. Hoisting it above `match current` -- a refactor anyone might make
+    // in good faith -- turns every healthy running app into a spurious `!`
+    // line. Nothing else in this file would notice: every other test passes
+    // `running = &[]`, and the one that does not has a version mismatch.
+    //
+    // On a real machine that is most of the list: kanata, nvim, brave.
+    let p = plan(
+        &config::parse(DECLARED_FZF).unwrap(),
+        &lock::parse(LOCK_FZF_741).unwrap(),
+        &[installed("fzf", "0.74.1")],
+        &State::default(),
+        &["fzf".into()],
+    );
+    assert!(
+        p.actions.is_empty(),
+        "a running package that already matches the lock needs no line: got {:?}",
+        p.actions
+    );
+}
+
+#[test]
 fn an_undeclared_owned_package_is_a_prune() {
     let mut state = State::default();
     state.set(SCOOP, "aichat", Ownership::Adopted);

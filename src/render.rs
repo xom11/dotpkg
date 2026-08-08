@@ -12,20 +12,24 @@ pub fn render(plan: &Plan) -> String {
                 backend,
                 name,
                 version,
-                ..
+                arch,
             } => {
-                format!("  + {backend:<6} {name:<14} {version:<24} (install)")
+                format!(
+                    "  + {backend:<6} {name:<14} {version:<24} (install{})",
+                    arch_suffix(arch)
+                )
             }
             Action::Upgrade {
                 backend,
                 name,
                 from,
                 to,
-                ..
+                arch,
             } => {
                 format!(
-                    "  ^ {backend:<6} {name:<14} {:<24} (upgrade)",
-                    format!("{from} -> {to}")
+                    "  ^ {backend:<6} {name:<14} {:<24} (upgrade{})",
+                    format!("{from} -> {to}"),
+                    arch_suffix(arch)
                 )
             }
             Action::Downgrade {
@@ -33,11 +37,12 @@ pub fn render(plan: &Plan) -> String {
                 name,
                 from,
                 to,
-                ..
+                arch,
             } => {
                 format!(
-                    "  v {backend:<6} {name:<14} {:<24} (downgrade, from lock)",
-                    format!("{from} -> {to}")
+                    "  v {backend:<6} {name:<14} {:<24} (downgrade, from lock{})",
+                    format!("{from} -> {to}"),
+                    arch_suffix(arch)
                 )
             }
             Action::Prune {
@@ -159,6 +164,19 @@ fn action_backend_name(action: &Action) -> (&str, &Name) {
     }
 }
 
+/// `", arm64"` when the plan resolved an architecture, empty when it did not
+/// (`Arch::Keep`, or nothing installed to fall back to) -- so an `Install`,
+/// `Upgrade` or `Downgrade` line says which architecture `scoop download`
+/// will actually be told to fetch, which is half the reason Task 8 resolves
+/// it in the plan at all: the other half is that it must appear in the plan
+/// the user says yes to, not stay a fact only `apply` finds out later.
+fn arch_suffix(arch: &Option<String>) -> String {
+    match arch {
+        Some(a) => format!(", {a}"),
+        None => String::new(),
+    }
+}
+
 /// The right-hand side of a `ready` line. `classify` only ever produces a
 /// ready outcome for these four action shapes (`ReadyToFetch` for the three
 /// `NeedsArtifact` kinds, `ReadyToRemove` for `Prune`), so the fallback below
@@ -166,12 +184,22 @@ fn action_backend_name(action: &Action) -> (&str, &Name) {
 /// ever changes.
 fn ready_rest(action: &Action) -> String {
     match action {
-        Action::Install { version, .. } => format!("{version:<18}(install)"),
-        Action::Upgrade { from, to, .. } => {
-            format!("{:<18}(upgrade)", format!("{from} -> {to}"))
+        Action::Install { version, arch, .. } => {
+            format!("{version:<18}(install{})", arch_suffix(arch))
         }
-        Action::Downgrade { from, to, .. } => {
-            format!("{:<18}(downgrade)", format!("{from} -> {to}"))
+        Action::Upgrade { from, to, arch, .. } => {
+            format!(
+                "{:<18}(upgrade{})",
+                format!("{from} -> {to}"),
+                arch_suffix(arch)
+            )
+        }
+        Action::Downgrade { from, to, arch, .. } => {
+            format!(
+                "{:<18}(downgrade{})",
+                format!("{from} -> {to}"),
+                arch_suffix(arch)
+            )
         }
         Action::Prune { version, .. } => format!("{version:<18}(prune)"),
         _ => String::new(),
@@ -330,6 +358,53 @@ mod tests {
     }
 
     #[test]
+    fn a_ready_line_names_the_architecture_the_plan_resolved() {
+        // Half the reason Task 8 resolves arch in the plan is that it must
+        // show up here, before the user says yes -- not stay a fact `apply`
+        // discovers on its own later.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: "python".into(),
+                    version: "3.14.6".into(),
+                    arch: Some("arm64".into()),
+                },
+                outcome: ready_to_fetch("python", "3.14.6"),
+            }],
+        };
+        let out = render_preparation(&p);
+        assert!(
+            out.contains("(install, arm64)"),
+            "the resolved architecture must be visible: {out}"
+        );
+    }
+
+    #[test]
+    fn a_ready_line_adds_nothing_when_no_architecture_was_resolved() {
+        // `Arch::Keep`, or a machine with no install.json to fall back to:
+        // the parenthetical must read exactly as it did before this field
+        // existed -- not "(install, )" or any other trace of an empty value.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: "python".into(),
+                    version: "3.14.6".into(),
+                    arch: None,
+                },
+                outcome: ready_to_fetch("python", "3.14.6"),
+            }],
+        };
+        let out = render_preparation(&p);
+        assert!(out.contains("(install)"), "got: {out}");
+        assert!(
+            !out.contains("arm64") && !out.contains("(install, )"),
+            "no architecture was resolved, so none should appear: {out}"
+        );
+    }
+
+    #[test]
     fn a_ready_downgrade_shows_the_reverse_arrow() {
         let p = Preparation {
             prepared: vec![Prepared {
@@ -459,6 +534,85 @@ mod tests {
         assert!(out.contains("~ scoop  python"));
         assert!(out.contains("64bit, declared arm64"));
         assert!(out.contains("4 change(s), 2 skipped, 1 architecture drift"));
+    }
+
+    #[test]
+    fn render_shows_the_architecture_the_plan_resolved() {
+        let plan = Plan {
+            actions: vec![
+                Action::Install {
+                    backend: SCOOP.into(),
+                    name: "python".into(),
+                    version: "3.14.6".into(),
+                    arch: Some("arm64".into()),
+                },
+                Action::Upgrade {
+                    backend: SCOOP.into(),
+                    name: "bat".into(),
+                    from: "0.26.0".into(),
+                    to: "0.26.1".into(),
+                    arch: Some("arm64".into()),
+                },
+                Action::Downgrade {
+                    backend: SCOOP.into(),
+                    name: "fzf".into(),
+                    from: "0.74.2".into(),
+                    to: "0.74.1".into(),
+                    arch: Some("arm64".into()),
+                },
+            ],
+        };
+        let out = render(&plan);
+        assert!(
+            out.contains("(install, arm64)"),
+            "an install must say which architecture it will fetch: {out}"
+        );
+        assert!(
+            out.contains("(upgrade, arm64)"),
+            "an upgrade must say which architecture it will fetch: {out}"
+        );
+        assert!(
+            out.contains("(downgrade, from lock, arm64)"),
+            "a downgrade must say which architecture it will fetch: {out}"
+        );
+    }
+
+    #[test]
+    fn render_adds_nothing_when_no_architecture_was_resolved() {
+        // `Arch::Keep`, or nothing installed to fall back to: an undecorated
+        // plan line must read exactly as it did before this field existed.
+        let plan = Plan {
+            actions: vec![
+                Action::Install {
+                    backend: SCOOP.into(),
+                    name: "python".into(),
+                    version: "3.14.6".into(),
+                    arch: None,
+                },
+                Action::Upgrade {
+                    backend: SCOOP.into(),
+                    name: "bat".into(),
+                    from: "0.26.0".into(),
+                    to: "0.26.1".into(),
+                    arch: None,
+                },
+                Action::Downgrade {
+                    backend: SCOOP.into(),
+                    name: "fzf".into(),
+                    from: "0.74.2".into(),
+                    to: "0.74.1".into(),
+                    arch: None,
+                },
+            ],
+        };
+        let out = render(&plan);
+        assert!(out.contains("(install)"), "got: {out}");
+        assert!(out.contains("(upgrade)"), "got: {out}");
+        assert!(out.contains("(downgrade, from lock)"), "got: {out}");
+        assert!(
+            !out.contains("arm64"),
+            "no architecture was resolved, so none should appear: {out}"
+        );
     }
 
     #[test]

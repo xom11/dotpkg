@@ -545,6 +545,26 @@ fn the_download_argv_never_skips_hash_verification() {
 }
 
 #[test]
+fn the_download_argv_carries_the_resolved_architecture() {
+    // `install_argv` has had this coverage since the previous task;
+    // `download_argv` never has, and it is the one `stage_and_fetch` actually
+    // calls during prepare. Asserted as the whole argv, for the same reason
+    // as the test above: a predicate that only checks "does -a appear
+    // somewhere" cannot fail if it appears in the wrong position, or if
+    // "arm64" is dropped while "-a" survives.
+    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"), Some("arm64"));
+    assert_eq!(
+        argv,
+        vec![
+            "download".to_string(),
+            "-a".to_string(),
+            "arm64".to_string(),
+            "/stage/tool/1.0.0/tool.json".to_string()
+        ]
+    );
+}
+
+#[test]
 fn the_download_argv_names_the_staged_manifest() {
     let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"), None);
     assert_eq!(argv[0], "download");

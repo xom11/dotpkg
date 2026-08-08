@@ -749,6 +749,105 @@ mod tests {
         );
     }
 
+    // Unix-only: this drives a real child process through `Scoop::download`'s
+    // `Command::new(self.scoop_exe())`, and a fake `scoop.cmd` that both a
+    // POSIX shell and cmd.exe would accept is not one file. Gated rather than
+    // skipped silently, same call as
+    // `a_root_reached_through_a_symlink_still_matches_running_processes` in
+    // tests/scoop_scan.rs.
+    //
+    // Why this test exists: mutating `stage_and_fetch` to pass `None` instead
+    // of `arch.as_deref()` into `scoop.download` left the entire suite green
+    // -- every other `Action` literal in this file uses `arch: None`, and
+    // `download_argv`'s own unit test in tests/prepare.rs never goes through
+    // `stage_and_fetch` at all. Without this, the wiring from "the plan
+    // resolved arm64" to "the argv scoop actually ran carried -a arm64" was
+    // asserted nowhere.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_forwards_the_resolved_architecture_all_the_way_to_scoop_download() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let bucket_dir = root.path().join("buckets").join("main");
+        std::fs::create_dir_all(bucket_dir.join("bucket")).unwrap();
+        git_output(&bucket_dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            bucket_dir.join("bucket").join("tool.json"),
+            r#"{"version":"1.0.0","bin":"tool.exe"}"#,
+        )
+        .unwrap();
+        git_output(&bucket_dir, &["add", "-A"]);
+        git_output(
+            &bucket_dir,
+            &[
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "bump",
+            ],
+        );
+        let commit = git_output(&bucket_dir, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+
+        // A fake `scoop download` that records the argv it was invoked with,
+        // then prints the one line `download_verdict` reads as success --
+        // letting `prepare` reach `Outcome::ReadyToFetch` without a real
+        // scoop binary anywhere on this machine.
+        let argv_dump = root.path().join("argv-dump.txt");
+        let shims = root.path().join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let script_path = shims.join("scoop.cmd");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho \"$@\" > \"{}\"\necho 'Checking hash of tool.zip ... ok.'\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("tool"),
+            Pin::ScoopCommit {
+                bucket: "main".into(),
+                commit,
+                version: "1.0.0".into(),
+            },
+        );
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: SCOOP.into(),
+                name: Name::new("tool"),
+                version: "1.0.0".into(),
+                arch: Some("arm64".into()),
+            }],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        assert!(
+            matches!(prep.prepared[0].outcome, Outcome::ReadyToFetch { .. }),
+            "expected the fake scoop.cmd's output to verify, got {:?}",
+            prep.prepared[0].outcome
+        );
+
+        let argv = std::fs::read_to_string(&argv_dump)
+            .unwrap_or_else(|e| panic!("scoop.cmd was never invoked: {e}"));
+        assert!(
+            argv.contains("-a arm64"),
+            "the plan resolved arm64 but the argv scoop actually ran did not carry it: {argv:?}"
+        );
+    }
+
     #[test]
     fn prepare_treats_a_prune_as_ready_to_remove() {
         // Nothing to fetch for a removal -- 2b-2 does the uninstalling, and

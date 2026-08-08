@@ -774,20 +774,36 @@ fn the_architecture_an_install_will_use_is_decided_in_the_plan_not_in_the_execut
         &Running::default(),
     );
 
-    let arch_of = |n: &str| -> Option<String> {
+    // `Option<Option<String>>`, deliberately not flattened: `None` means "no
+    // Upgrade action for this name exists at all", and `Some(None)` means "it
+    // exists, and its arch is None". Collapsing those to one `Option<String>`
+    // (as an earlier version of this test did, via a trailing `?`) made
+    // `assert_eq!(arch_of("kanata"), None)` pass whether kanata produced an
+    // Upgrade with no arch, as intended, or no action at all -- a plan defect
+    // that would have gone uncaught.
+    let arch_of = |n: &str| -> Option<Option<String>> {
         p.actions.iter().find_map(|a| match a {
             Action::Upgrade { name, arch, .. } if *name == Name::new(n) => Some(arch.clone()),
             _ => None,
-        })?
+        })
     };
-    assert_eq!(arch_of("python").as_deref(), Some("arm64"), "declared wins");
     assert_eq!(
-        arch_of("stylua").as_deref(),
-        Some("64bit"),
+        arch_of("python"),
+        Some(Some("arm64".to_string())),
+        "declared wins"
+    );
+    assert_eq!(
+        arch_of("stylua"),
+        Some(Some("64bit".to_string())),
         "an undeclared package keeps the architecture it already has -- reinstalling \
          it as arm64 would be an unasked-for change"
     );
-    assert_eq!(arch_of("kanata"), None, "`keep` means pass no -a at all");
+    assert_eq!(
+        arch_of("kanata"),
+        Some(None),
+        "kanata must still appear as an Upgrade -- `keep` means pass no -a at all, \
+         not that kanata is skipped"
+    );
 }
 
 #[test]

@@ -539,3 +539,66 @@ fn a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_note() {
         "the held count must reflect the real held prune: {stdout}"
     );
 }
+
+// -- fix round 2 ---------------------------------------------------------
+
+#[test]
+fn keep_going_does_not_report_success_when_a_declared_package_could_not_be_prepared() {
+    // The gap this crate's own Task 12 report flagged and the coordinator's
+    // re-review confirmed: a package that fails to PREPARE lands only in
+    // `unusable` and never becomes a `Step`, so `Execution` -- and
+    // therefore `ex.exit_code(false)` -- cannot see it at all. Here the
+    // plan is exactly one Install (fzf, declared and locked but not
+    // installed), which stages for real and fails at download because
+    // there is no scoop binary on this platform. Nothing else is declared,
+    // so `steps` ends up empty and `execute()` has nothing of its own to
+    // fail on -- `ex.failed() == 0` is genuinely true, and the run must
+    // still not report success.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        "{}",
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+
+    // `--yes` is required to reach the exit-code computation at all: with
+    // `unusable` non-empty the run does not take the converged-machine
+    // short-circuit, and without `--yes` it would refuse at the
+    // confirmation prompt on the closed stdin first (exit 2, a different
+    // code entirely, and not what this test is about).
+    let out = f.run(&["apply", "--keep-going", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a run that left a declared package unprepared must not report success (0): \
+         stdout: {stdout} stderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_relative_state_path_is_refused_before_anything_runs() {
+    // The one refusal path in `main.rs` with no automated test before this
+    // -- the re-reviewer had to run the binary by hand to confirm it exits
+    // 2. Cheap to close.
+    let f = Fixture::new(
+        "[scoop]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed"}}"#,
+    );
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--state", "some/relative/path.json"]);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a relative --state path is a refusal, and a refusal exits 2: {stderr}"
+    );
+    assert!(
+        stderr.contains("--state"),
+        "name the flag that needs an absolute path: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}

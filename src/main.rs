@@ -321,6 +321,14 @@ fn main() -> Result<()> {
             print!("{}", dotpkg::render::render_execution(&ex));
             std::io::stdout().flush().ok();
             let code = ex.exit_code(false);
+            // A package that failed to PREPARE never becomes a Step, so `ex`
+            // cannot see it. Without this floor, `--keep-going` reports
+            // success for a run that left a declared package uninstalled.
+            let code = if code == 0 && !preparation.is_ok() {
+                1
+            } else {
+                code
+            };
             if code != 0 {
                 std::process::exit(code);
             }

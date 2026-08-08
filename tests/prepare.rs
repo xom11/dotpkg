@@ -110,10 +110,94 @@ fn a_commit_the_bucket_does_not_have_fails_and_stages_nothing() {
     let msg = format!("{err:#}");
     assert!(msg.contains("0000000"), "name the commit: {msg}");
     assert!(msg.contains("main"), "name the bucket: {msg}");
+    // The diagnosis, not just incidental substrings: without this, the
+    // fallthrough "has no manifest for [...]" message also contains the sha
+    // and the bucket name and would pass these assertions for the wrong
+    // reason -- it would read as "no file matches", not "the commit itself
+    // does not exist".
+    assert!(
+        msg.contains("is not in bucket"),
+        "name why it failed, not just what: {msg}"
+    );
     assert_eq!(
         fs::read_dir(stage_dir.path()).unwrap().count(),
         0,
         "nothing may be staged when the commit is missing"
+    );
+}
+
+#[test]
+fn a_manifest_absent_at_the_pinned_commit_does_not_fall_back_to_the_working_tree() {
+    // The commit here IS real -- `cat-file -e` passes -- but the app's
+    // manifest was not added until a LATER commit than the one the lock
+    // pins. `cat-file -e` cannot catch this: the commit genuinely exists.
+    // Only `git_show` refusing to read outside the pinned commit can. Under
+    // a `git_show` that falls back to the working tree when the pinned path
+    // is missing, this would silently stage whatever tool.json says right
+    // now (2.0.0, added one commit later) and report success -- the exact
+    // "quietly falls back to latest" failure the design forbids.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let dir = root.path().join("buckets").join("main");
+    fs::create_dir_all(dir.join("bucket")).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+
+    fs::write(
+        dir.join("bucket").join("other.json"),
+        r#"{"version":"1.0.0","bin":"other.exe"}"#,
+    )
+    .unwrap();
+    git(&dir, &["add", "-A"]);
+    git(
+        &dir,
+        &[
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "other only",
+        ],
+    );
+    let commit_before_tool_existed = git(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // tool.json shows up only here -- one commit later than the one pinned
+    // below. The working tree has it from this point on; the pinned commit
+    // never did.
+    fs::write(
+        dir.join("bucket").join("tool.json"),
+        r#"{"version":"2.0.0","bin":"tool.exe"}"#,
+    )
+    .unwrap();
+    git(&dir, &["add", "-A"]);
+    git(
+        &dir,
+        &[
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "add tool",
+        ],
+    );
+
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &commit_before_tool_existed, "2.0.0"),
+        )
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("tool"), "got {err:#}");
+    assert_eq!(
+        fs::read_dir(stage_dir.path()).unwrap().count(),
+        0,
+        "nothing may be staged when the manifest is absent at the pinned commit"
     );
 }
 

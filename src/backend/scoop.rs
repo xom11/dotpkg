@@ -1,7 +1,9 @@
 use super::{Backend, Scan};
 use crate::model::{Installed, Name, SCOOP};
+use crate::sys::Process;
 use anyhow::Result;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// Every executable this manifest declares, normalised to the form
@@ -96,6 +98,44 @@ impl Scoop {
             .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join("scoop")))
             .unwrap_or_else(|| PathBuf::from("scoop"));
         Scoop { root }
+    }
+
+    /// Which installed apps have a live process running out of their own tree.
+    ///
+    /// Two roots, not one. `apps/<name>/...` is the obvious place; `persist`
+    /// is the one that gets forgotten, and `rustup` puts `cargo.exe` under
+    /// `persist/rustup/.cargo/bin/`.
+    ///
+    /// This is the only signal available for a package whose manifest names no
+    /// executable (`nodejs`, `rustup`). It cannot replace name matching: a
+    /// process at a higher integrity level reports no path at all, and that is
+    /// exactly the case — an elevated kanata — where names still work.
+    ///
+    /// `shims/` is deliberately not a root. A shim is named for the manifest's
+    /// alias, which `declared_executables` already collects.
+    pub fn running_apps(&self, procs: &[Process]) -> BTreeSet<Name> {
+        fn fold(p: &std::path::Path) -> String {
+            p.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
+        }
+
+        let mut out = BTreeSet::new();
+        for parent in ["apps", "persist"] {
+            // The trailing separator is what stops `appsbackup` from reading
+            // as the `apps` tree.
+            let root = format!("{}/", fold(&self.root.join(parent)));
+            for p in procs {
+                let Some(exe) = p.exe.as_deref() else {
+                    continue;
+                };
+                let Some(rest) = fold(exe).strip_prefix(&root).map(str::to_string) else {
+                    continue;
+                };
+                if let Some(seg) = rest.split('/').next().filter(|s| !s.is_empty()) {
+                    out.insert(Name::new(seg));
+                }
+            }
+        }
+        out
     }
 }
 

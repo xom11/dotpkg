@@ -238,3 +238,92 @@ fn a_manifest_naming_no_executable_yields_none_rather_than_guessing() {
     app_from_fixture(dir.path(), "nodejs", "arm64");
     assert_eq!(bins_of(dir.path(), "nodejs"), Vec::<String>::new());
 }
+
+use dotpkg::model::Name;
+use dotpkg::sys::Process;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+fn proc(name: &str, exe: Option<PathBuf>) -> Process {
+    Process {
+        name: name.to_string(),
+        exe,
+    }
+}
+
+#[test]
+fn a_process_running_out_of_an_app_directory_names_that_app() {
+    // nodejs is why this exists: its manifest names no executable at all, so
+    // the path is the only signal there is.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let got = Scoop::new(root.clone()).running_apps(&[proc(
+        "node",
+        Some(root.join("apps/nodejs/current/node.exe")),
+    )]);
+    assert_eq!(got, BTreeSet::from([Name::new("nodejs")]));
+}
+
+#[test]
+fn the_persist_tree_counts_too_because_rustup_lives_there() {
+    // rustup's env_add_path is `.cargo\bin`, which scoop puts under
+    // persist/rustup, outside apps entirely.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let got = Scoop::new(root.clone()).running_apps(&[proc(
+        "cargo",
+        Some(root.join("persist/rustup/.cargo/bin/cargo.exe")),
+    )]);
+    assert_eq!(got, BTreeSet::from([Name::new("rustup")]));
+}
+
+#[test]
+fn a_process_with_no_readable_path_is_not_an_error() {
+    // sysinfo reports None for a process at a higher integrity level. That is
+    // the case name matching covers, so this must simply contribute nothing.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let got = Scoop::new(root).running_apps(&[proc("kanata", None)]);
+    assert!(got.is_empty());
+}
+
+#[test]
+fn a_process_outside_the_scoop_tree_names_nothing() {
+    let root = PathBuf::from("/tmp/dpk-root");
+    let got =
+        Scoop::new(root).running_apps(&[proc("node", Some(PathBuf::from("/usr/local/bin/node")))]);
+    assert!(got.is_empty());
+}
+
+#[test]
+fn a_sibling_directory_with_a_shared_prefix_is_not_the_apps_tree() {
+    // `.../scoop/appsbackup/x.exe` must not read as app `backup`.
+    let root = PathBuf::from("/tmp/dpk-root");
+    let got = Scoop::new(root.clone())
+        .running_apps(&[proc("x", Some(root.join("appsbackup/backup/x.exe")))]);
+    assert!(got.is_empty(), "got {got:?}");
+}
+
+#[test]
+fn path_matching_folds_case_like_the_filesystem() {
+    let root = PathBuf::from("/tmp/DPK-Root");
+    let got = Scoop::new(root).running_apps(&[proc(
+        "node",
+        Some(PathBuf::from("/tmp/dpk-root/Apps/NodeJS/current/node.exe")),
+    )]);
+    assert_eq!(got, BTreeSet::from([Name::new("nodejs")]));
+}
+
+#[test]
+fn windows_paths_with_backslashes_and_a_resolved_version_dir_match() {
+    // The only shape that occurs on the real machine, and the one a test
+    // written on a Mac is most likely to miss: separators are backslashes, and
+    // sysinfo may report the version directory the `current` junction resolves
+    // to rather than `current` itself. Either way the segment after `apps` is
+    // the app name.
+    let root = PathBuf::from(r"C:\Users\kln\scoop");
+    let got = Scoop::new(root).running_apps(&[proc(
+        "nvim",
+        Some(PathBuf::from(
+            r"C:\Users\kln\scoop\apps\neovim\0.12.4\bin\nvim.exe",
+        )),
+    )]);
+    assert_eq!(got, BTreeSet::from([Name::new("neovim")]));
+}

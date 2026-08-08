@@ -278,18 +278,45 @@ fn counts_separate_changes_from_skips_and_reports() {
 fn the_planner_source_performs_no_io() {
     // The planner being pure is what lets layer-1 tests run on any OS. A stray
     // subprocess or file read here would quietly make the suite Windows-only.
+    //
+    // This is an ALLOWLIST, deliberately. The denylist it replaced ("does the
+    // source mention `std::fs`?") admitted anything nobody had thought to
+    // forbid: `use std::{env, fs, io, process};` contains none of those
+    // strings, because a braced group import never spells out `std::fs` at
+    // all. An unfamiliar dependency must be refused by default, not admitted
+    // by default -- the whole point of the guard is to catch the import whose
+    // danger the person adding it did not see.
+    const ALLOWED: &[&str] = &[
+        "crate::",
+        "std::collections",
+        // `super::*` re-exports exactly what the lines above already admitted,
+        // so it can smuggle nothing in. It is how the in-file test module gets
+        // at `is_older`.
+        "super::",
+    ];
     let src = include_str!("../src/plan.rs");
-    for forbidden in [
-        "std::process",
-        "Command::",
-        "std::fs",
-        "File::",
-        "reqwest",
-        "std::net",
-    ] {
+
+    for line in src.lines() {
+        let line = line.trim();
+        let Some(path) = line.strip_prefix("use ") else {
+            continue;
+        };
         assert!(
-            !src.contains(forbidden),
-            "src/plan.rs must stay pure but mentions {forbidden}"
+            ALLOWED.iter().any(|a| path.starts_with(a)),
+            "src/plan.rs must stay pure: `{line}` is not one of {ALLOWED:?}. \
+             If this import really is pure, add it to ALLOWED and say why."
+        );
+    }
+
+    // A `use` line is the usual way in, but not the only one: `std::fs::read`
+    // called at full path needs no import at all. Every `std::` the planner
+    // names, in code or in prose, must be one this test has vouched for.
+    for (i, _) in src.match_indices("std::") {
+        let tail = &src[i..];
+        assert!(
+            tail.starts_with("std::collections"),
+            "src/plan.rs must stay pure: fully-qualified `{}` bypasses the import allowlist",
+            tail.lines().next().unwrap_or(tail).trim_end()
         );
     }
 }

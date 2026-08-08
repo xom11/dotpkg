@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, Scan};
 use crate::model::{Installed, SCOOP};
 use anyhow::Result;
 use serde::Deserialize;
@@ -42,16 +42,16 @@ impl Backend for Scoop {
         SCOOP
     }
 
-    fn scan(&self) -> Result<Vec<Installed>> {
+    fn scan(&self) -> Result<Scan> {
         let apps = self.root.join("apps");
         let entries = match std::fs::read_dir(&apps) {
             Ok(e) => e,
             // No scoop on this machine is a valid state, not a failure.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Scan::default()),
             Err(e) => return Err(e.into()),
         };
 
-        let mut out = Vec::new();
+        let mut out = Scan::default();
         for entry in entries.flatten() {
             if !entry.path().is_dir() {
                 continue;
@@ -63,12 +63,31 @@ impl Backend for Scoop {
             }
 
             let current = entry.path().join("current");
-            let Ok(manifest_text) = std::fs::read_to_string(current.join("manifest.json")) else {
-                // A half-finished or broken install must not fail the whole scan.
-                continue;
+            let manifest_path = current.join("manifest.json");
+            let manifest_text = match std::fs::read_to_string(&manifest_path) {
+                Ok(t) => t,
+                // No manifest yet is the ordinary shape of a half-finished
+                // install, or of `current` pointing at a version directory
+                // scoop is still unpacking. Nothing to tell the user.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // Anything else -- a permission denial, a dangling junction --
+                // is a fact about this machine. Skipping it silently would make
+                // an app the user *does* have look uninstalled, which in Phase 2
+                // is an offer to reinstall it. Still not fatal: one unreadable
+                // directory must not hide the other forty.
+                Err(e) => {
+                    out.warnings
+                        .push(format!("{name}: cannot read manifest.json: {e}"));
+                    continue;
+                }
             };
-            let Ok(manifest) = serde_json::from_str::<Manifest>(&manifest_text) else {
-                continue;
+            let manifest = match serde_json::from_str::<Manifest>(&manifest_text) {
+                Ok(m) => m,
+                Err(e) => {
+                    out.warnings
+                        .push(format!("{name}: manifest.json is not usable: {e}"));
+                    continue;
+                }
             };
 
             // install.json is absent on apps installed by older scoop versions.
@@ -77,7 +96,7 @@ impl Backend for Scoop {
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or_default();
 
-            out.push(Installed {
+            out.installed.push(Installed {
                 backend: SCOOP.to_string(),
                 name,
                 version: manifest.version,

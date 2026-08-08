@@ -33,10 +33,17 @@ fn main() -> Result<()> {
             let declared = dotpkg::config::load(&config)?;
             let locked = dotpkg::lock::load_or_empty(&lock)?;
             let state = State::load_or_empty(&State::default_path())?;
-            let installed = Scoop::discover().scan()?;
+            let scan = Scoop::discover().scan()?;
             let running = dotpkg::sys::running_process_names();
 
-            let plan = dotpkg::plan::plan(&declared, &locked, &installed, &state, &running);
+            // Before the plan, not after: a package missing from the plan
+            // because dotpkg could not read it is the one thing the plan
+            // itself cannot say.
+            for w in &scan.warnings {
+                eprintln!("warning: scoop: {w}");
+            }
+
+            let plan = dotpkg::plan::plan(&declared, &locked, &scan.installed, &state, &running);
             print!("{}", dotpkg::render::render(&plan));
         }
     }

@@ -103,10 +103,19 @@ impl State {
     }
 
     /// Drop entries naming a package that is not installed, returning them.
+    ///
+    /// Returns nothing if `present` is empty while the state has entries for this
+    /// backend. An empty re-scan is a scan error, not evidence that nothing is
+    /// installed — dropping everything in that case would wipe the prune fence
+    /// without the caller knowing it happened.
     pub fn reconcile(&mut self, backend: &str, present: &[Name]) -> Vec<Name> {
         let Some(m) = self.0.get_mut(backend) else {
             return Vec::new();
         };
+        // Refuse to drop everything if the scan came back empty but we have entries.
+        if present.is_empty() && !m.is_empty() {
+            return Vec::new();
+        }
         let dropped: Vec<Name> = m.keys().filter(|n| !present.contains(n)).cloned().collect();
         for n in &dropped {
             m.remove(n);
@@ -124,13 +133,18 @@ impl State {
     /// The temp file is created in the destination directory, not in the
     /// system temp directory, because `rename` is only atomic within one
     /// filesystem.
+    ///
+    /// The temp filename is unique per writer (using the process ID) to avoid
+    /// truncating in place when two writes race. `File::create` truncates an
+    /// existing file's inode, so without uniqueness, concurrent writers can
+    /// corrupt the prune fence by interleaving writes to the same inode.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_file_name(format!("state.json.tmp{}", std::process::id()));
         {
             use std::io::Write;
             let mut f = std::fs::File::create(&tmp)
@@ -146,13 +160,19 @@ impl State {
             let bak = path.with_extension("json.bak");
             let _ = std::fs::copy(path, &bak);
         }
-        std::fs::rename(&tmp, path).with_context(|| {
-            format!(
-                "cannot move {} into place at {}",
-                tmp.display(),
-                path.display()
-            )
-        })
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e).with_context(|| {
+                    format!(
+                        "cannot move {} into place at {}",
+                        tmp.display(),
+                        path.display()
+                    )
+                })
+            }
+        }
     }
 
     /// `%LOCALAPPDATA%\dotpkg\state.json` on Windows; the XDG-ish equivalent
@@ -330,5 +350,22 @@ mod tests {
             .filter(|n| n != "state.json")
             .collect();
         assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    #[test]
+    fn reconcile_refuses_to_disown_everything_when_the_scan_came_back_empty() {
+        // An empty re-scan is a scan error, not evidence that nothing is
+        // installed. Dropping everything would wipe the prune fence without the
+        // caller knowing it happened.
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        s.set(SCOOP, &Name::new("bat"), Ownership::Installed);
+
+        let dropped = s.reconcile(SCOOP, &[]);
+
+        assert!(dropped.is_empty());
+        assert!(s.owns(SCOOP, &Name::new("fzf")));
+        assert!(s.owns(SCOOP, &Name::new("bat")));
+        assert_eq!(s.owned_count(SCOOP), 2);
     }
 }

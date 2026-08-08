@@ -1868,9 +1868,14 @@ Confirm from the task's own `whoami /groups` that it ran at `Medium Mandatory Le
 
 Record the verbatim output, then answer:
 
-1. **Does `! scoop kanata running` appear while kanata is running?** Start kanata if it is not running. If it cannot be started, write down that the check was **not exercised** — do not report a pass. Also record which process names are actually alive (`Kanata.exe` from the shim, the long `kanata_windows_tty_winIOv2_arm64.exe`, or both), since the design predicts the answer depends on how it was launched.
-2. **Are `neovim`, `ripgrep` and `7zip` matched by their real executables?** With `nvim`, `rg` or `7z` running and a lock entry forcing a version change, each must print `!` rather than an upgrade or downgrade line.
-3. **Are `nodejs` and `rustup` caught by path matching alone?** Run `node` and `cargo`; both name no executable in their manifests, so a `!` line here comes from the path signal and nothing else. This is the case that justified putting path matching in 2a.
+1. **Is kanata detected if it is already running?** Record which process names are actually alive — `Kanata.exe` from the shim, the long `kanata_windows_tty_winIOv2_arm64.exe`, or both — since the design predicts the answer depends on how it was launched.
+
+   **Do not start kanata to make this check possible.** It is the machine's keyboard remapper; starting it applies a remapping the user did not ask for at this moment, and a stale or broken config would cost the keyboard on the machine needed to fix it — the exact failure this whole phase exists to prevent. If kanata is not running, write down that the live check was **not exercised**, and say so plainly rather than reporting a pass. The manifest side of the kanata case is already proven by the `kanata.json` fixture test, which is why not observing it live is a gap in evidence rather than a gap in the fix.
+
+2. **Are `neovim` and `ripgrep` matched by their real executables?** These are safe to start and kill: `nvim --headless` and `rg` against a large tree both exit on demand and hold nothing. With one running and a lock entry forcing a version change, each must print `!` rather than an upgrade or downgrade line.
+3. **Is `nodejs` caught by path matching alone?** Start a `node` process that sleeps, e.g. `node -e "setTimeout(()=>{}, 120000)"`, and kill it afterwards. `nodejs` names no executable in its manifest, so a `!` line here comes from the path signal and nothing else. This is the case that justified putting path matching in 2a. `rustup`/`cargo` is the same shape and may be used instead or as well, provided nothing long-running is left behind.
+
+   Every process started for this run must be killed before the task finishes, and the record must list them.
 4. **Do all thirty apps still scan, with no new warnings** compared with the Phase 1 run?
 5. **Does `~ scoop stylua 64bit, declared arm64` appear**, and does the summary line carry `1 architecture drift`?
 

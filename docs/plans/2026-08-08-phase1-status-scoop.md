@@ -528,7 +528,12 @@ pin     = "version-only"
     fn a_scoop_entry_without_a_commit_is_rejected() {
         // The commit IS the lock. An entry carrying only a version would look
         // locked while guaranteeing nothing.
-        let err = parse("[scoop.fzf]\nversion = \"0.74.1\"\n").unwrap_err();
+        //
+        // `bucket` is supplied deliberately: omitting both fields would make this
+        // pass only because serde reports missing fields in struct declaration
+        // order, so a future field reorder would break the test without breaking
+        // the guarantee.
+        let err = parse("[scoop.fzf]\nbucket = \"main\"\nversion = \"0.74.1\"\n").unwrap_err();
         assert!(format!("{err:#}").contains("commit"), "got: {err:#}");
     }
 
@@ -1817,7 +1822,7 @@ SCOOP=/tmp/dpk cargo run -- status --config /tmp/dpk/pkg.toml --lock /tmp/dpk/pk
 Expected output:
 
 ```
-  v scoop  fzf            0.74.2 -> 0.74.1       (downgrade, from lock)
+  v scoop  fzf            0.74.2 -> 0.74.1         (downgrade, from lock)
 
   1 change(s), 0 skipped
 ```

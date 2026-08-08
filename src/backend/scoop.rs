@@ -527,60 +527,118 @@ impl Scoop {
         self.root.join("shims").join("scoop.cmd")
     }
 
-    /// Fetch and hash-verify the artifact a staged manifest names, without
-    /// installing it. Nothing on the machine changes except scoop's cache.
+    /// Fetch and hash-verify the artifact a staged manifest names.
     ///
-    /// The exit code is the only signal this phase has: `scoop download` was
-    /// not measured for silent-success behaviour the way `install` and `reset`
-    /// were, and inventing a cache-path check against an unmeasured assumption
-    /// would be worse than saying so.
+    /// The exit code is read and ignored: measured, `scoop download` returns 0
+    /// for a hash mismatch and for a dead URL. `download_verdict` reads what
+    /// scoop actually said.
     pub fn download(&self, manifest: &Path) -> Result<()> {
         let argv = download_argv(manifest);
         let out = Command::new(self.scoop_exe())
             .args(&argv)
             .output()
             .with_context(|| format!("cannot run {}", self.scoop_exe().display()))?;
-        anyhow::ensure!(
-            out.status.success(),
-            "scoop download failed for {}: {}",
-            manifest.display(),
-            download_failure_detail(
-                &String::from_utf8_lossy(&out.stderr),
-                &String::from_utf8_lossy(&out.stdout),
-            )
-        );
-        Ok(())
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        match download_verdict(&stdout) {
+            FetchVerdict::Verified => Ok(()),
+            FetchVerdict::HashFailed => anyhow::bail!(
+                "hash check failed for {}: {}",
+                manifest.display(),
+                tail(&stdout)
+            ),
+            FetchVerdict::UrlDead => anyhow::bail!(
+                "the manifest's url is gone for {}: {}",
+                manifest.display(),
+                tail(&stdout)
+            ),
+            FetchVerdict::Unproven => anyhow::bail!(
+                "scoop download did not report a verified hash for {} (it exits 0 either way, \
+                 so this is treated as a failure): {}",
+                manifest.display(),
+                tail(&stdout)
+            ),
+        }
     }
 }
 
-/// What to print when `scoop download` exits non-zero.
-///
-/// A dead URL, a hash mismatch and a network failure all arrive here, and this
-/// text is the entire "here is why" half of the phase's promise that nothing
-/// happened and the user is told why.
-///
-/// **Which stream carries that text is unmeasured.** The dogfood run never
-/// produced a failing download, and scoop is a PowerShell program whose
-/// user-facing output mostly goes to stdout -- so forwarding only stderr risks
-/// forwarding an empty string in exactly the case the promise is about. Both
-/// are read for that reason, and the fallback exists so the message can never
-/// trail off after the colon.
-fn download_failure_detail(stderr: &str, stdout: &str) -> String {
-    /// Enough to carry scoop's error and the line or two of context around
-    /// it, without pasting an entire progress log into one anyhow message.
-    const TAIL_LINES: usize = 20;
+/// Drop ANSI SGR sequences. scoop colours its output, and a colour code
+/// between `ERROR` and the rest of a line would hide a failure marker.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c2 in chars.by_ref() {
+                if c2.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
-    if !stderr.trim().is_empty() {
-        return stderr.trim().to_string();
+/// What `scoop download` actually did, read from its stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchVerdict {
+    Verified,
+    HashFailed,
+    UrlDead,
+    /// Neither a success marker nor a known failure marker. Fail-closed.
+    Unproven,
+}
+
+/// `scoop download` exits 0 whatever happens — measured on a14 for a hash
+/// mismatch and for a 404 — so the verdict comes from stdout.
+///
+/// **`'<app>' (<version>) was downloaded successfully!` is printed even when
+/// the hash check failed.** It is not a success marker, and treating it as one
+/// is the single most dangerous mistake available in this function.
+///
+/// The only success marker is `Checking hash of … ok.`, and its absence is
+/// failure rather than doubt: a manifest that declares no `url`/`hash` prints
+/// none of these and is refused. That is a known limitation, and refusing is
+/// the direction that cannot lose data.
+///
+/// stderr is deliberately not consulted. Measured: it is non-empty on a
+/// *successful* run, carrying non-fatal `Cannot find path …` noise.
+pub fn download_verdict(stdout: &str) -> FetchVerdict {
+    let clean = strip_ansi(stdout);
+    if clean.contains("ERROR Hash check failed!") {
+        return FetchVerdict::HashFailed;
     }
-    let stdout = stdout.trim();
-    if stdout.is_empty() {
-        return "scoop printed nothing on either stream".to_string();
+    let dead = clean.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("ERROR URL ") && t.ends_with(" is not valid")
+    });
+    if dead {
+        return FetchVerdict::UrlDead;
     }
-    let lines: Vec<&str> = stdout.lines().collect();
+    let verified = clean.lines().any(|l| {
+        l.trim_start().starts_with("Checking hash of ") && l.trim_end().ends_with("... ok.")
+    });
+    if verified {
+        FetchVerdict::Verified
+    } else {
+        FetchVerdict::Unproven
+    }
+}
+
+/// The last few lines of scoop's stdout, for an error message.
+fn tail(stdout: &str) -> String {
+    const TAIL_LINES: usize = 20;
+    let clean = strip_ansi(stdout);
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return "scoop printed nothing at all".to_string();
+    }
+    let lines: Vec<&str> = trimmed.lines().collect();
     match lines.len().checked_sub(TAIL_LINES) {
         Some(skip) if skip > 0 => format!("(last {TAIL_LINES} lines) {}", lines[skip..].join("\n")),
-        _ => stdout.to_string(),
+        _ => trimmed.to_string(),
     }
 }
 
@@ -649,49 +707,75 @@ mod tests {
         );
     }
 
-    // -- download_failure_detail -----------------------------------------
+    // -- download_verdict -------------------------------------------------
+    //
+    // Every string below is scoop 0.5.3's real output, captured on a14 on
+    // 2026-08-08 through System.Diagnostics.Process. All three exited 0.
+
+    const OK_CACHED: &str = "INFO  Downloading 'fzf' [arm64]
+Loading fzf-0.74.1-windows_arm64.zip from cache
+Checking hash of fzf-0.74.1-windows_arm64.zip ... ok.
+'fzf' (0.74.1) was downloaded successfully!
+";
+
+    const BAD_HASH: &str = "INFO  Downloading 'badhash' [arm64]
+Downloading https://github.com/junegunn/fzf/releases/download/v0.74.1/fzf-0.74.1-windows_arm64.zip (1.9 MB)...
+Checking hash of fzf-0.74.1-windows_arm64.zip ... ERROR Hash check failed!
+App:         badhash
+URL:         https://github.com/junegunn/fzf/releases/download/v0.74.1/fzf-0.74.1-windows_arm64.zip
+First bytes: 50 4B 03 04 14 00 08 00
+Expected:    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+Actual:      b688ecafa2d1fdb0af3383f25d6d122866c13ad7cc996e9f735bf90e6c75f83f
+ERROR
+Please try again or create a new issue by using the following link and paste your console output:
+https:////
+'badhash' (0.74.1) was downloaded successfully!
+";
+
+    const DEAD_URL: &str = "INFO  Downloading 'deadurl' [arm64]
+The remote server returned an error: (404) Not Found.
+ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/download/v9.9.9/nothing.zip is not valid
+";
 
     #[test]
-    fn a_failing_download_reports_stderr_when_scoop_uses_it() {
+    fn the_sentence_scoop_prints_after_a_hash_failure_is_not_a_success_marker() {
+        // The trap, in one test. Both of these say "was downloaded
+        // successfully!" and only one of them verified anything.
+        assert!(BAD_HASH.contains("was downloaded successfully!"));
+        assert!(OK_CACHED.contains("was downloaded successfully!"));
+        assert_eq!(download_verdict(OK_CACHED), FetchVerdict::Verified);
+        assert_eq!(download_verdict(BAD_HASH), FetchVerdict::HashFailed);
+    }
+
+    #[test]
+    fn a_dead_url_is_told_apart_from_a_bad_hash() {
+        assert_eq!(download_verdict(DEAD_URL), FetchVerdict::UrlDead);
+    }
+
+    #[test]
+    fn silence_is_failure_because_scoop_cannot_signal_it_any_other_way() {
+        assert_eq!(download_verdict(""), FetchVerdict::Unproven);
         assert_eq!(
-            download_failure_detail("  hash check failed for fzf  \n", "downloading fzf\n"),
-            "hash check failed for fzf"
+            download_verdict("INFO  Downloading 'x' [arm64]\n"),
+            FetchVerdict::Unproven
+        );
+        assert_eq!(
+            download_verdict("WARN  'fzf' (0.74.1) is already installed.\n"),
+            FetchVerdict::Unproven
         );
     }
 
     #[test]
-    fn a_failing_download_falls_back_to_stdout_because_powershell_writes_there() {
-        // The case the promise depends on: scoop exits non-zero having said
-        // everything it had to say on stdout. Forwarding only stderr made the
-        // message read "scoop download failed for <path>: " and stop.
-        let detail = download_failure_detail("   \n", "ERROR Hash check failed for fzf\n");
-        assert!(
-            detail.contains("Hash check failed"),
-            "stdout must be forwarded when stderr is blank: {detail:?}"
-        );
+    fn ansi_colour_cannot_hide_a_failure() {
+        let coloured = BAD_HASH.replace("ERROR", "\u{1b}[31;1mERROR\u{1b}[0m");
+        assert_eq!(download_verdict(&coloured), FetchVerdict::HashFailed);
     }
 
     #[test]
-    fn a_failing_download_that_said_nothing_at_all_still_says_something() {
-        let detail = download_failure_detail("", "");
-        assert!(
-            !detail.trim().is_empty(),
-            "the message must never trail off after the colon"
-        );
-    }
-
-    #[test]
-    fn a_long_stdout_is_cut_to_its_tail_where_the_error_is() {
-        let noisy: String = (0..500).map(|i| format!("progress {i}\n")).collect();
-        let stdout = format!("{noisy}ERROR the url is gone\n");
-        let detail = download_failure_detail("", &stdout);
-        assert!(detail.contains("ERROR the url is gone"), "got {detail}");
-        assert!(!detail.contains("progress 0\n"), "the head must be cut");
-        assert!(
-            detail.lines().count() <= 21,
-            "got {} lines",
-            detail.lines().count()
-        );
+    fn one_verified_url_does_not_excuse_a_second_that_failed() {
+        let mixed = "Checking hash of a.zip ... ok.\n\
+                     Checking hash of b.zip ... ERROR Hash check failed!\n";
+        assert_eq!(download_verdict(mixed), FetchVerdict::HashFailed);
     }
 
     // -- ensure_plain_component ------------------------------------------

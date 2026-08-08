@@ -1,4 +1,4 @@
-use crate::model::Name;
+use crate::model::{fold_map, fold_names, Name};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -85,51 +85,13 @@ struct RawWingetSection {
     packages: Vec<String>,
 }
 
-/// Fold raw strings into `Name`s, refusing any two that collide.
-///
-/// `Name` compares case-insensitively, so `fzf` and `FZF` are one package —
-/// but a `Vec` keeps both and the declared loop acts on both, and a map keeps
-/// the first key with the last value. Neither is something a user can see in
-/// their own file, so it is rejected here rather than resolved silently.
-fn fold_names(raw: Vec<String>, what: &str) -> Result<Vec<Name>> {
-    let mut seen: BTreeMap<Name, String> = BTreeMap::new();
-    let mut out = Vec::with_capacity(raw.len());
-    for s in raw {
-        let name = Name::new(s.clone());
-        if let Some(first) = seen.get(&name) {
-            anyhow::bail!(
-                "{what} declares the same package twice: {first:?} and {s:?} differ only in case"
-            );
-        }
-        seen.insert(name.clone(), s);
-        out.push(name);
-    }
-    Ok(out)
-}
-
-fn fold_opts(raw: BTreeMap<String, PkgOpts>) -> Result<BTreeMap<Name, PkgOpts>> {
-    let mut spellings: BTreeMap<Name, String> = BTreeMap::new();
-    let mut out = BTreeMap::new();
-    for (s, opts) in raw {
-        let name = Name::new(s.clone());
-        if let Some(first) = spellings.get(&name) {
-            anyhow::bail!(
-                "[scoop.opts] names the same package twice: {first:?} and {s:?} differ only in case"
-            );
-        }
-        spellings.insert(name.clone(), s);
-        out.insert(name, opts);
-    }
-    Ok(out)
-}
-
 pub fn parse(text: &str) -> Result<Config> {
     let raw: RawConfig = toml::from_str(text).context("pkg.toml is not valid")?;
     Ok(Config {
         scoop: ScoopSection {
             buckets: raw.scoop.buckets,
             packages: fold_names(raw.scoop.packages, "[scoop]")?,
-            opts: fold_opts(raw.scoop.opts)?,
+            opts: fold_map(raw.scoop.opts, "[scoop.opts]")?,
         },
         winget: WingetSection {
             packages: fold_names(raw.winget.packages, "[winget]")?,
@@ -220,6 +182,21 @@ packages = ["Git.Git"]
         assert!(
             msg.contains("fzf") && msg.contains("FZF"),
             "name both spellings: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_exact_repeat_is_rejected_without_blaming_a_case_difference() {
+        // `["fzf", "fzf"]` lands on the same collision path as `["fzf",
+        // "FZF"]`, and the message used to end "differ only in case" -- which
+        // for this pair is simply false, and sends the reader looking for a
+        // capital letter that is not there.
+        let err = parse("[scoop]\npackages = [\"fzf\", \"fzf\"]\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("fzf"), "name the spelling: {msg}");
+        assert!(
+            !msg.contains("differ only in case"),
+            "these do not differ in case at all: {msg}"
         );
     }
 

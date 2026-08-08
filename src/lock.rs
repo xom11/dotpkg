@@ -1,4 +1,4 @@
-use crate::model::Name;
+use crate::model::{fold_map, Name};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -49,20 +49,27 @@ struct RawWinget {
     pin: String,
 }
 
+/// Keyed by `String`, not by `Name`, deliberately: a `BTreeMap<Name, _>` folds
+/// case on the way in and merges `[scoop.fzf]` with `[scoop.FZF]` into one
+/// entry — the first key, the last value — with nothing said. This is the file
+/// Phase 2b-2 uninstalls and reinstalls from, so the pair is folded explicitly
+/// below and a collision is refused.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLock {
     #[serde(default)]
-    scoop: BTreeMap<Name, RawScoop>,
+    scoop: BTreeMap<String, RawScoop>,
     #[serde(default)]
-    winget: BTreeMap<Name, RawWinget>,
+    winget: BTreeMap<String, RawWinget>,
 }
 
 pub fn parse(text: &str) -> Result<Lock> {
     let raw: RawLock = toml::from_str(text).context("pkg.lock is not valid")?;
+    let raw_scoop = fold_map(raw.scoop, "pkg.lock [scoop]")?;
+    let raw_winget = fold_map(raw.winget, "pkg.lock [winget]")?;
 
     let mut lock = Lock::default();
-    for (name, r) in raw.scoop {
+    for (name, r) in raw_scoop {
         lock.scoop.insert(
             name,
             Pin::ScoopCommit {
@@ -72,7 +79,7 @@ pub fn parse(text: &str) -> Result<Lock> {
             },
         );
     }
-    for (name, r) in raw.winget {
+    for (name, r) in raw_winget {
         anyhow::ensure!(
             r.pin == "version-only",
             "winget lock entry {name} has pin={:?}; only \"version-only\" is defined",
@@ -157,6 +164,75 @@ pin     = "version-only"
         let err = parse("[winget.\"Git.Git\"]\nversion = \"2.55.0\"\npin = \"content-hash\"\n")
             .unwrap_err();
         assert!(format!("{err:#}").contains("version-only"), "got: {err:#}");
+    }
+
+    #[test]
+    fn two_lock_entries_for_one_package_are_rejected_rather_than_merged() {
+        // Measured before this fix: `BTreeMap<Name, RawScoop>` folded the two
+        // keys into ONE entry, keeping the first key and the LAST value -- so
+        // the lock silently pinned fzf to 2.0.0 while still calling it `fzf`,
+        // and 2b-2 would reinstall from that. Two different commits are used
+        // so the merge cannot be dismissed as harmless.
+        let err = parse(
+            r#"
+[scoop.fzf]
+bucket  = "main"
+commit  = "1111111111111111111111111111111111111111"
+version = "1.0.0"
+
+[scoop.FZF]
+bucket  = "main"
+commit  = "2222222222222222222222222222222222222222"
+version = "2.0.0"
+"#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fzf") && msg.contains("FZF"),
+            "name both spellings: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_same_collision_is_refused_in_the_winget_map() {
+        let err = parse(
+            r#"
+[winget."Git.Git"]
+version = "2.55.0"
+pin     = "version-only"
+
+[winget."git.git"]
+version = "2.40.0"
+pin     = "version-only"
+"#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Git.Git") && msg.contains("git.git"),
+            "name both spellings: {msg}"
+        );
+    }
+
+    #[test]
+    fn distinct_lock_entries_are_still_accepted() {
+        // The guard must not reject a legitimate lock.
+        let lock = parse(
+            r#"
+[scoop.fzf]
+bucket  = "main"
+commit  = "1111111111111111111111111111111111111111"
+version = "1.0.0"
+
+[scoop.bat]
+bucket  = "main"
+commit  = "2222222222222222222222222222222222222222"
+version = "0.26.1"
+"#,
+        )
+        .unwrap();
+        assert_eq!(lock.scoop.len(), 2);
     }
 
     #[test]

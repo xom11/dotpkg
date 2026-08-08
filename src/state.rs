@@ -1,6 +1,6 @@
-use crate::model::Name;
+use crate::model::{fold_map, Name};
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -17,9 +17,27 @@ pub enum Ownership {
 ///
 /// This is the prune fence. A package absent from here is never touched, which
 /// is what makes dotpkg safe to install on a machine full of existing software.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct State(BTreeMap<String, BTreeMap<Name, Ownership>>);
+
+/// Hand-written rather than derived: deserializing straight into
+/// `BTreeMap<Name, Ownership>` folds case on the way in and merges `"fzf"`
+/// with `"FZF"` into one entry, silently. `owned_count` is the number the
+/// mass-prune guard prints and compares against zero, so a merge there
+/// understates how much dotpkg is about to remove.
+impl<'de> Deserialize<'de> for State {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<State, D::Error> {
+        let raw: BTreeMap<String, BTreeMap<String, Ownership>> = BTreeMap::deserialize(d)?;
+        let mut out = BTreeMap::new();
+        for (backend, packages) in raw {
+            let folded = fold_map(packages, &format!("state.json [{backend}]"))
+                .map_err(|e| serde::de::Error::custom(format!("{e:#}")))?;
+            out.insert(backend, folded);
+        }
+        Ok(State(out))
+    }
+}
 
 impl State {
     pub fn owns(&self, backend: &str, name: &Name) -> bool {
@@ -122,6 +140,28 @@ mod tests {
         let mut s = State::default();
         s.set(SCOOP, &Name::new("FZF"), Ownership::Installed);
         assert!(s.owns(SCOOP, &Name::new("fzf")));
+    }
+
+    #[test]
+    fn two_entries_for_one_package_are_refused_rather_than_counted_once() {
+        // Measured before this fix: `BTreeMap<Name, Ownership>` merged these
+        // into ONE entry, so owned_count() reported 1 -- and owned_count is
+        // exactly the number the mass-prune guard prints to tell the user how
+        // much is about to be removed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{ "scoop": { "fzf": "installed", "FZF": "adopted" } }"#,
+        )
+        .unwrap();
+
+        let err = State::load_or_empty(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fzf") && msg.contains("FZF"),
+            "name both spellings: {msg}"
+        );
     }
 
     #[test]

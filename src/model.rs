@@ -1,6 +1,7 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -41,6 +42,65 @@ impl Name {
     pub fn key(&self) -> &str {
         &self.key
     }
+}
+
+/// The one error text every collision uses, wherever the two spellings came
+/// from.
+///
+/// It names both spellings and does **not** claim they "differ only in case":
+/// an exact repeat (`["fzf", "fzf"]`) reaches this same path, and telling that
+/// user to look for a case difference sends them hunting for something that is
+/// not there. The case rule is stated as the rule it is, not as a diagnosis of
+/// this particular pair.
+fn collision(what: &str, first: &str, second: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{what} names the same package twice: {first:?} and {second:?} \
+         (package names are compared without regard to case)"
+    )
+}
+
+/// Fold raw strings into `Name`s, refusing any two that name the same package.
+///
+/// `Name` compares case-insensitively, so `fzf` and `FZF` are one package —
+/// but a `Vec` keeps both and every declared loop then acts on both. Neither
+/// spelling is something a user can see is a duplicate in their own file, so
+/// it is rejected here rather than resolved silently.
+pub fn fold_names(raw: Vec<String>, what: &str) -> Result<Vec<Name>> {
+    let mut seen: BTreeMap<Name, String> = BTreeMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        let name = Name::new(s.clone());
+        if let Some(first) = seen.get(&name) {
+            return Err(collision(what, first, &s));
+        }
+        seen.insert(name.clone(), s);
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// The map form of [`fold_names`], for every `BTreeMap<Name, _>` that is built
+/// from user- or file-supplied string keys.
+///
+/// A `BTreeMap<Name, V>` deserialized straight from `String` keys **silently
+/// merges** a colliding pair: measured behaviour is one entry, keeping the
+/// FIRST key and the LAST value. Every such map in dotpkg decides something
+/// destructive — which manifest gets reinstalled (`pkg.lock`), how many
+/// packages dotpkg admits to owning (`state.json`), which architecture an app
+/// is pinned to (`[scoop.opts]`) — so the merge is refused rather than
+/// resolved.
+pub fn fold_map<V>(raw: BTreeMap<String, V>, what: &str) -> Result<BTreeMap<Name, V>> {
+    let mut spellings: BTreeMap<Name, String> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for (s, value) in raw {
+        let name = Name::new(s.clone());
+        if let Some(first) = spellings.get(&name) {
+            return Err(collision(what, first, &s));
+        }
+        spellings.insert(name.clone(), s);
+        out.insert(name, value);
+    }
+    Ok(out)
 }
 
 impl From<String> for Name {

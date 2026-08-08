@@ -255,6 +255,29 @@ fn a_manifest_naming_no_executable_yields_none_rather_than_guessing() {
     assert_eq!(bins_of(dir.path(), "nodejs"), Vec::<String>::new());
 }
 
+#[test]
+fn a_dot_com_bin_is_stripped_the_same_as_dot_exe() {
+    // `.com` is the one non-`.exe` extension that is ever a live Windows
+    // process image (see sys::EXECUTABLE_SUFFIXES). If this side and the live
+    // process side ever strip a different suffix list, a `.com` package's
+    // manifest and its running process stop agreeing on its name.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("apps").join("tool").join("current");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(
+        d.join("manifest.json"),
+        r#"{"version":"1.0","bin":"tool.com"}"#,
+    )
+    .unwrap();
+
+    let got = Scoop::new(dir.path().to_path_buf())
+        .scan()
+        .unwrap()
+        .installed;
+    assert_eq!(got.len(), 1, "got {got:?}");
+    assert_eq!(got[0].bins, vec!["tool"]);
+}
+
 use dotpkg::model::Name;
 use dotpkg::sys::Process;
 use std::collections::BTreeSet;

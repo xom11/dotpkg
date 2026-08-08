@@ -137,8 +137,9 @@ pub struct Running {
 }
 
 impl Running {
-    /// `names` must already be lowercased with any `.exe` suffix removed;
-    /// `sys::running_processes` is what produces them.
+    /// `names` must already be lowercased with any suffix in
+    /// `sys::EXECUTABLE_SUFFIXES` removed; `sys::running_processes` is what
+    /// produces them.
     pub fn new(names: BTreeSet<String>, dirs: BTreeSet<Name>) -> Running {
         Running { names, dirs }
     }
@@ -153,9 +154,10 @@ impl Running {
     /// Over-matching is deliberate. A false positive costs one `!` line the
     /// user clears by closing an app; a false negative costs the app.
     ///
-    /// `bins` entries must already be lowercased with any known extension
-    /// stripped, matching `names` above -- `declared_executables` in
-    /// `backend::scoop` is what produces them in that form.
+    /// `bins` entries must already be lowercased with any suffix in
+    /// `sys::EXECUTABLE_SUFFIXES` removed, matching `names` above --
+    /// `declared_executables` in `backend::scoop` is what produces them in
+    /// that form.
     pub fn covers(&self, name: &Name, bins: &[String]) -> bool {
         self.dirs.contains(name)
             || self.names.contains(name.key())

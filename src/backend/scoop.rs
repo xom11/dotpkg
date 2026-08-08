@@ -1,6 +1,6 @@
 use super::{Backend, Scan};
 use crate::model::{Installed, Name, SCOOP};
-use crate::sys::Process;
+use crate::sys::{Process, EXECUTABLE_SUFFIXES};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -26,8 +26,6 @@ use std::path::PathBuf;
 /// Over-collection is the safe direction: a spurious entry can only ever
 /// cause a package to be skipped.
 fn declared_executables(manifest: &serde_json::Value) -> Vec<String> {
-    const EXECUTABLE_SUFFIXES: &[&str] = &["exe", "cmd", "bat", "ps1", "com"];
-
     fn add(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
         match v {
             serde_json::Value::String(s) => {

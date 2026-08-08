@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod backend;
 pub mod config;
+pub mod execute;
 pub mod lock;
 pub mod model;
 pub mod plan;

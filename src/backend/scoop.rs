@@ -512,11 +512,53 @@ fn resolve_spelling(dir: &Path, commit: &str, app_key: &str) -> Option<String> {
 /// testing here is a property of the argv — that hash verification is never
 /// skipped — and not the behaviour of a subprocess no test on this platform
 /// can run.
-pub fn download_argv(manifest: &Path) -> Vec<String> {
-    vec![
-        "download".to_string(),
-        manifest.to_string_lossy().into_owned(),
-    ]
+///
+/// `-a` is passed whenever an architecture is known: measured, `scoop
+/// download` without it fetches the *default* architecture's artifact — two
+/// different files for one version — so a prefetch that omits it warms the
+/// wrong artifact and the later install reaches the network from inside the
+/// mutation window.
+pub fn download_argv(manifest: &Path, arch: Option<&str>) -> Vec<String> {
+    let mut argv = vec!["download".to_string()];
+    if let Some(a) = arch {
+        argv.push("-a".to_string());
+        argv.push(a.to_string());
+    }
+    argv.push(manifest.to_string_lossy().into_owned());
+    argv
+}
+
+/// The exact argv for removing an installed app.
+///
+/// `app.key()`, not the display form: scoop resolves names case-insensitively
+/// and the folded key is the one thing that cannot depend on how the user
+/// spelled it in `pkg.toml`.
+///
+/// **Never `-p`/`--purge`.** Measured: without it, `scoop uninstall` keeps
+/// everything under `persist`, so the window this opens risks binaries and
+/// shims and not the user's data. Adding it would silently change that.
+pub fn uninstall_argv(app: &Name) -> Vec<String> {
+    vec!["uninstall".to_string(), app.key().to_string()]
+}
+
+/// The exact argv for installing a staged manifest.
+///
+/// `-u`/`--no-update-scoop` keeps a scoop self-update and a bucket `git pull`
+/// out of the window between an uninstall and its install. Measured: it is
+/// accepted alongside a manifest path.
+///
+/// `-a` is passed whenever an architecture is known, because `scoop download`
+/// without it fetches the *default* architecture's artifact — measured, two
+/// different files for one version — and an install that then wants the other
+/// one reaches the network from inside the window.
+pub fn install_argv(manifest: &Path, arch: Option<&str>) -> Vec<String> {
+    let mut argv = vec!["install".to_string(), "-u".to_string()];
+    if let Some(a) = arch {
+        argv.push("-a".to_string());
+        argv.push(a.to_string());
+    }
+    argv.push(manifest.to_string_lossy().into_owned());
+    argv
 }
 
 impl Scoop {
@@ -532,8 +574,8 @@ impl Scoop {
     /// The exit code is read and ignored: measured, `scoop download` returns 0
     /// for a hash mismatch and for a dead URL. `download_verdict` reads what
     /// scoop actually said.
-    pub fn download(&self, manifest: &Path) -> Result<()> {
-        let argv = download_argv(manifest);
+    pub fn download(&self, manifest: &Path, arch: Option<&str>) -> Result<()> {
+        let argv = download_argv(manifest, arch);
         let out = Command::new(self.scoop_exe())
             .args(&argv)
             .output()
@@ -558,6 +600,35 @@ impl Scoop {
                 tail(&stdout)
             ),
         }
+    }
+}
+
+impl crate::execute::Mutator for Scoop {
+    fn uninstall(&self, app: &Name) -> Result<crate::execute::CommandReport> {
+        self.run(&uninstall_argv(app))
+    }
+    fn install(
+        &self,
+        manifest: &Path,
+        arch: Option<&str>,
+    ) -> Result<crate::execute::CommandReport> {
+        self.run(&install_argv(manifest, arch))
+    }
+}
+
+impl Scoop {
+    /// Run scoop and capture everything it said. The exit code is recorded,
+    /// not judged.
+    fn run(&self, argv: &[String]) -> Result<crate::execute::CommandReport> {
+        let out = Command::new(self.scoop_exe())
+            .args(argv)
+            .output()
+            .with_context(|| format!("cannot run {}", self.scoop_exe().display()))?;
+        Ok(crate::execute::CommandReport {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
     }
 }
 
@@ -927,5 +998,79 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
                 "say what a commit must look like: {bad:?} -> {msg}"
             );
         }
+    }
+
+    // -- uninstall_argv / install_argv ------------------------------------
+
+    #[test]
+    fn the_uninstall_argv_is_exactly_this_and_never_purges() {
+        // -p/--purge deletes the user's persisted data. It is opt-in in scoop
+        // and dotpkg never opts in: the uninstall+install window is supposed
+        // to risk binaries and shims, not somebody's config.
+        assert_eq!(uninstall_argv(&Name::new("FZF")), vec!["uninstall", "fzf"]);
+        let argv = uninstall_argv(&Name::new("fzf"));
+        assert!(
+            !argv.iter().any(|a| a == "-p" || a == "--purge"),
+            "{argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "-g" || a == "--global"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn the_install_argv_names_the_staged_path_and_always_passes_no_update_scoop() {
+        let m = Path::new("/stage/fzf/0.74.1/fzf.json");
+        assert_eq!(
+            install_argv(m, Some("arm64")),
+            vec!["install", "-u", "-a", "arm64", "/stage/fzf/0.74.1/fzf.json"]
+        );
+        assert_eq!(
+            install_argv(m, None),
+            vec!["install", "-u", "/stage/fzf/0.74.1/fzf.json"]
+        );
+    }
+
+    #[test]
+    fn no_argv_this_crate_builds_ever_skips_hash_checking() {
+        let m = Path::new("/stage/fzf/0.74.1/fzf.json");
+        for argv in [
+            install_argv(m, Some("arm64")),
+            install_argv(m, None),
+            download_argv(m, None),
+            uninstall_argv(&Name::new("fzf")),
+        ] {
+            assert!(
+                !argv.iter().any(|a| a == "-s" || a == "--skip-hash-check"),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_scoop_argv_is_built_by_a_named_function() {
+        // The argv tests above are only honest if there is exactly one
+        // construction site per command. An inline `.args([...])` would slip
+        // past all of them.
+        //
+        // `git` argv are exempt: they are built inline on purpose in
+        // `git_show` and `resolve_spelling`, and neither is a scoop
+        // invocation. Verified at plan time: exactly two such sites exist
+        // (`git_ok` takes a slice variable, so it does not match).
+        //
+        // Asserted below as 5, not 2: `include_str!` pulls in this very test,
+        // and the two comments above plus this test's own needle each quote
+        // the pattern being searched for, so this function contributes three
+        // self-matches on top of the two real ones. Measured against the
+        // tree with this test present, not assumed.
+        let src = include_str!("scoop.rs");
+        let inline = src.matches(".args([").count();
+        assert_eq!(
+            inline, 5,
+            "the two real inline .args([..]) sites belong to git (git_show, \
+             resolve_spelling) plus three self-matches from this test's own wording; \
+             build every SCOOP argv in a *_argv function so the tests above cover it"
+        );
     }
 }

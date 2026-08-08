@@ -295,7 +295,8 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
         };
     };
     let staged = scoop.stage(staging_root, name, pin).and_then(|manifest| {
-        scoop.download(&manifest)?;
+        // `None` for now: Task 8 threads the lock's real architecture through.
+        scoop.download(&manifest, None)?;
         Ok(manifest)
     });
     match staged {

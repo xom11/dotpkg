@@ -534,7 +534,7 @@ fn the_download_argv_never_skips_hash_verification() {
     // a predicate that only looks for the flags thought of today cannot fail
     // for any argv that grows a new one, and this equality also pins the
     // manifest path that the sibling test checks.
-    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"));
+    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"), None);
     assert_eq!(
         argv,
         vec![
@@ -546,7 +546,7 @@ fn the_download_argv_never_skips_hash_verification() {
 
 #[test]
 fn the_download_argv_names_the_staged_manifest() {
-    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"));
+    let argv = download_argv(Path::new("/stage/tool/1.0.0/tool.json"), None);
     assert_eq!(argv[0], "download");
     assert!(
         argv.iter().any(|a| a.ends_with("tool.json")),

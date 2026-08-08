@@ -216,9 +216,16 @@ impl Running {
 `sys.rs` grows `running_processes() -> Vec<Process { name, exe: Option<PathBuf> }>`.
 Resolving a path to an app name needs scoop's on-disk layout, so it is
 `Scoop::running_apps(&self, &[Process]) -> BTreeSet<Name>` on the backend, and
-`main.rs` assembles the `Running` the planner receives. The planner stays pure
-and still takes the running set as an input, exactly as the approved design
-requires.
+`Scoop::running_set(&self, &[Process]) -> Running` unions the two signals. The
+planner stays pure and still takes the running set as an input, exactly as the
+approved design requires.
+
+The union lives in the library rather than in `main.rs` for a reason found by
+the final review: assembled inline in `main.rs` it was the one part of the
+mechanism no test could reach, and four separate mutations that each destroyed
+half the detection left the whole suite green. The design's central claim is
+that the two signals cover each other's blind spots — a claim that has to be
+testable somewhere.
 
 Prefix comparison is case-insensitive, matching the filesystem.
 

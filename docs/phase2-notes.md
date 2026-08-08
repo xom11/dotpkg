@@ -50,16 +50,23 @@ acting on drift means a reinstall. The Phase 2 plan should open with it.
 
 ## Smaller, real, and cheap
 
-- `Scoop::scan`'s error handling is narrowed so only `NotFound` is swallowed, but
+- ~~`Scoop::scan`'s error handling is narrowed so only `NotFound` is swallowed, but
   only the *parse* branch is tested. Reverting the *read* branch to swallow every
   I/O error leaves all scoop tests green. A portable fixture: make `manifest.json`
-  a directory, which produces a non-NotFound `Err`.
-- `entries.flatten()` in the same function still swallows `read_dir` iteration
-  errors — same class of bug, four lines away.
+  a directory, which produces a non-NotFound `Err`.~~ **Fixed in Phase 2a.** The
+  directory fixture is exactly what was used; reverting the read branch no longer
+  leaves the suite green.
+- ~~`entries.flatten()` in the same function still swallows `read_dir` iteration
+  errors — same class of bug, four lines away.~~ **Fixed in Phase 2a**, but with
+  no test: producing a failing `read_dir` iteration needs a directory entry that
+  cannot be stat'd, which is not portable across macOS, Linux and Windows. Verified
+  by inspection only, and recorded as such rather than counted as covered.
+- The *JSON parse* branch of the same function still has no test. The test that
+  reads as covering it actually covers the missing-`version` branch.
 - The planner purity guard is an allowlist over `use` lines plus a ban on
   fully-qualified `std::` paths. Stronger than the denylist it replaced, but still
   not sound: `crate::` is allowed wholesale, and `crate::sys` / `crate::config` do
-  I/O, so `use crate::sys; sys::running_process_names()` passes. A third-party
+  I/O, so `use crate::sys; sys::running_processes()` passes. A third-party
   crate written full-path (`sysinfo::System::new_all()`) also passes. Treat it as
   a tripwire for accidents, not a proof.
 - The guard matches text, so prose containing `std::fs` inside `src/plan.rs` fails

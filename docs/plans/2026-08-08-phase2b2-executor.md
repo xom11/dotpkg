@@ -3473,7 +3473,64 @@ the spec fixes:
 
 `Scoop::root()` becomes a public accessor.
 
-- [ ] **Step 5: Implement `render_execution`**
+- [ ] **Step 5: Stop `render_preparation` promising something `apply` cannot keep**
+
+`render_preparation` ends with an unconditional
+`out.push_str("  Nothing has been changed.\n")` (`src/render.rs:127`), and a
+test pins that unconditionality. In a full `apply` run the preparation table is
+printed **before** the prompt and the mutations — so the run would print the
+promise and then break it. That is the exact failure this project's error
+handling exists to prevent, arriving in its own output.
+
+The promise belongs to `--prepare`, so move it to the caller:
+
+```rust
+/// Renders what `prepare` found out.
+///
+/// It does **not** print "Nothing has been changed." — that sentence is
+/// `--prepare`'s promise, and in a full `apply` run this same table is
+/// printed before the mutations begin. `main.rs` prints the promise in the
+/// `--prepare` branch, where it is true.
+pub fn render_preparation(p: &Preparation) -> String {
+```
+
+Delete the trailing `push_str` and update the test that pins it
+(`src/render.rs`'s `mod tests`) to assert the opposite, keeping the reason in
+the test's own comment:
+
+```rust
+    #[test]
+    fn the_preparation_table_does_not_promise_anything_about_mutations() {
+        // `apply` prints this same table before it starts changing things, so
+        // the promise cannot live here. main.rs prints it in the --prepare
+        // branch, and tests/cli.rs asserts it appears there.
+        let out = render_preparation(&Preparation::default());
+        assert!(
+            !out.contains("Nothing has been changed."),
+            "the promise belongs to --prepare's caller: {out}"
+        );
+    }
+```
+
+In `main.rs`'s `--prepare` branch, print it explicitly:
+
+```rust
+            if prepare {
+                println!("  Nothing has been changed.");
+                std::io::stdout().flush().ok();
+                if !preparation.is_ok() {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+```
+
+`tests/cli.rs`'s existing
+`a_preparation_that_could_not_be_completed_exits_non_zero_and_says_nothing_changed`
+already asserts the sentence appears for `--prepare`; it must keep passing
+unchanged, which is what proves the sentence did not simply get lost.
+
+- [ ] **Step 6: Implement `render_execution`**
 
 In `src/render.rs`:
 
@@ -3514,12 +3571,12 @@ pub fn render_execution(ex: &Execution) -> String {
 }
 ```
 
-- [ ] **Step 6: Run**
+- [ ] **Step 7: Run**
 
 Run: `cargo test --all` — expected: 199 passed.
 Run: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` — clean.
 
-- [ ] **Step 7: Negative controls**
+- [ ] **Step 8: Negative controls**
 
 1. Make `confirm` return `Ok(true)` for `Ok(0)`. Record that
    `no_answer_at_all_means_no_and_says_which_flag_would_have_helped` and
@@ -3533,7 +3590,7 @@ Run: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` — cle
 3. Delete the `--allow-prune` check. Record that
    `yes_alone_does_not_authorise_a_prune` fails. Restore.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/main.rs src/apply.rs src/render.rs tests/cli.rs

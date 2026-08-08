@@ -53,8 +53,8 @@ pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
 /// from somewhere else. Neither is allowed to be the only one.
 ///
 /// Deliberately does not check the lock's bucket against `pkg.toml`'s
-/// declared buckets: that is a per-package concern (Task 11 owns it, once a
-/// parsed `BucketDecl` gives it a case-folded name to compare against), not a
+/// declared buckets: that is a per-package concern, checked in
+/// `stage_and_fetch` via a parsed `BucketDecl`'s case-folded `Name`, not a
 /// whole-run one. A whole-run version of that check deadlocks -- drop a
 /// package and its bucket line from `pkg.toml` together, and the stale lock
 /// entry would fail every later `apply` before the plan is even built,
@@ -242,14 +242,25 @@ impl Preparation {
 ///
 /// A per-package failure is recorded in that package's `Outcome` and the walk
 /// continues -- one bad package must never hide, or stop, the others.
-pub fn prepare(plan: &Plan, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> Preparation {
+///
+/// `declared` is `pkg.toml`, parsed: `stage_and_fetch` uses it to check a
+/// pin's bucket against `[scoop] buckets` before ever touching the disk.
+pub fn prepare(
+    plan: &Plan,
+    lock: &Lock,
+    scoop: &Scoop,
+    staging_root: &Path,
+    declared: &Config,
+) -> Preparation {
     let prepared = plan
         .actions
         .iter()
         .map(|action| Prepared {
             action: action.clone(),
             outcome: match classify(action) {
-                Intent::NeedsArtifact => stage_and_fetch(action, lock, scoop, staging_root),
+                Intent::NeedsArtifact => {
+                    stage_and_fetch(action, lock, scoop, staging_root, declared)
+                }
                 Intent::NoArtifactNeeded => Outcome::ReadyToRemove,
                 Intent::Skip(why) => Outcome::Skipped { why },
                 Intent::NotLocked => Outcome::NotLocked,
@@ -260,6 +271,15 @@ pub fn prepare(plan: &Plan, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> 
     Preparation { prepared }
 }
 
+/// Whether `bucket`, spelled as a lock's pin has it, names a bucket
+/// `pkg.toml` declares. Compared via `Name`, which folds case:
+/// `$SCOOP/buckets/Main` and `main` are the same directory on Windows, and a
+/// byte-exact comparison would fail a lock that stages perfectly well.
+fn bucket_is_declared(declared: &Config, bucket: &str) -> bool {
+    let name = Name::new(bucket);
+    declared.scoop.buckets.iter().any(|b| b.name == name)
+}
+
 /// The `NeedsArtifact` half of `prepare`, kept separate so the walk above
 /// reads as a plain classify-and-dispatch.
 ///
@@ -267,7 +287,13 @@ pub fn prepare(plan: &Plan, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> 
 /// `Result` or panicking: a `Preparation` must always be total over the
 /// plan it was given, because the whole point of the phase is that one
 /// package's problem is reported, not fatal to the run.
-fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> Outcome {
+fn stage_and_fetch(
+    action: &Action,
+    lock: &Lock,
+    scoop: &Scoop,
+    staging_root: &Path,
+    declared: &Config,
+) -> Outcome {
     let (Action::Install {
         backend,
         name,
@@ -310,6 +336,20 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
             why: format!("{name}: no lock entry (the planner should have caught this)"),
         };
     };
+    // A per-package failure, not a whole-run abort: `lock_coherence_guard`
+    // deliberately leaves this out (see its doc comment) because a whole-run
+    // version deadlocks when a package and its bucket line are dropped from
+    // `pkg.toml` together.
+    if let Pin::ScoopCommit { bucket, .. } = pin {
+        if !bucket_is_declared(declared, bucket) {
+            return Outcome::Failed {
+                why: format!(
+                    "{name}: bucket {bucket:?} is not declared in pkg.toml -- \
+                     add it to [scoop] buckets"
+                ),
+            };
+        }
+    }
     let staged = scoop.stage(staging_root, name, pin).and_then(|manifest| {
         // NOT COVERED BY ANY TEST ON THIS PLATFORM: that `arch.as_deref()`
         // here (rather than `None`) is what actually reaches `scoop
@@ -623,6 +663,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
+        // Declared, so this test still proves stage()'s on-disk check --
+        // the undeclared-in-pkg.toml check below has its own tests.
+        let declared = crate::config::parse("[scoop]\nbuckets = [\"extras\"]\n").unwrap();
 
         let mut lock = Lock::default();
         lock.scoop.insert(
@@ -656,7 +699,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.failed_count(), 1);
         assert_eq!(prep.ready_count(), 1, "the prune must still go through");
@@ -682,6 +725,128 @@ mod tests {
         );
     }
 
+    // -- the undeclared-bucket check --------------------------------------
+    //
+    // Task 4 deliberately left this out of lock_coherence_guard (see its doc
+    // comment): a whole-run version deadlocks if a package and its bucket
+    // line are dropped from pkg.toml together. It belongs here instead, as a
+    // per-package failure.
+
+    #[test]
+    fn bucket_declared_check_folds_case() {
+        // $SCOOP/buckets/Main and main are the same directory on Windows, so
+        // a byte-exact comparison would refuse a lock that stages perfectly
+        // well.
+        let declared = crate::config::parse("[scoop]\nbuckets = [\"main\"]\n").unwrap();
+        assert!(bucket_is_declared(&declared, "main"));
+        assert!(bucket_is_declared(&declared, "Main"));
+        assert!(bucket_is_declared(&declared, "MAIN"));
+        assert!(!bucket_is_declared(&declared, "extras"));
+    }
+
+    #[test]
+    fn a_lock_naming_a_bucket_pkg_toml_does_not_declare_fails_that_package_only() {
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        // "main" is declared; the lock below pins a different bucket.
+        let declared = crate::config::parse("[scoop]\nbuckets = [\"main\"]\n").unwrap();
+
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("tool"),
+            Pin::ScoopCommit {
+                bucket: "extras".into(),
+                commit: "a".repeat(40),
+                version: "1.0.0".into(),
+            },
+        );
+        // Install first, Prune second: proves this failure does not stop the
+        // walk from reaching the next package either.
+        let plan = Plan {
+            actions: vec![
+                Action::Install {
+                    backend: SCOOP.into(),
+                    name: Name::new("tool"),
+                    version: "1.0.0".into(),
+                    arch: None,
+                },
+                Action::Prune {
+                    backend: SCOOP.into(),
+                    name: Name::new("old"),
+                    version: "0.1.0".into(),
+                },
+            ],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        assert_eq!(prep.failed_count(), 1);
+        assert_eq!(prep.ready_count(), 1, "the prune must still go through");
+        assert!(!prep.is_ok());
+
+        let Outcome::Failed { why } = &prep.prepared[0].outcome else {
+            panic!(
+                "expected a Failed outcome, got {:?}",
+                prep.prepared[0].outcome
+            );
+        };
+        assert!(why.contains("extras"), "name the bucket: {why}");
+        assert!(why.contains("[scoop] buckets"), "say how to fix it: {why}");
+        // Disambiguates this from stage()'s own "bucket not present on disk"
+        // failure, which also names the bucket but for a different reason
+        // and would send the user to `scoop bucket add` instead of pkg.toml.
+        assert!(
+            !why.contains("not present at"),
+            "this is the pkg.toml-declared check, not stage()'s on-disk check: {why}"
+        );
+    }
+
+    #[test]
+    fn the_undeclared_bucket_check_folds_case_like_windows_directories_do() {
+        // A lock naming "Main" against a pkg.toml declaring "main" must NOT
+        // trip the undeclared-bucket check -- that would refuse a lock that
+        // stages perfectly well, over nothing but a case difference that does
+        // not exist on the filesystem this is bound for.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let declared = crate::config::parse("[scoop]\nbuckets = [\"main\"]\n").unwrap();
+
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("tool"),
+            Pin::ScoopCommit {
+                bucket: "Main".into(),
+                commit: "a".repeat(40),
+                version: "1.0.0".into(),
+            },
+        );
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: SCOOP.into(),
+                name: Name::new("tool"),
+                version: "1.0.0".into(),
+                arch: None,
+            }],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let Outcome::Failed { why } = &prep.prepared[0].outcome else {
+            panic!(
+                "expected Failed -- there is no real bucket on disk -- got {:?}",
+                prep.prepared[0].outcome
+            );
+        };
+        // It still fails, because no real bucket exists on disk in this
+        // test -- but for stage()'s reason, not because the case fold was
+        // skipped.
+        assert!(
+            !why.contains("is not declared"),
+            "the case fold must accept Main against declared main: {why}"
+        );
+        assert!(why.contains("not present at"), "got {why}");
+    }
+
     #[test]
     fn stage_and_fetch_is_total_even_if_ever_called_with_the_wrong_action_shape() {
         // prepare() only ever reaches stage_and_fetch via classify() returning
@@ -694,13 +859,14 @@ mod tests {
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
+        let declared = Config::default();
         let action = Action::Prune {
             backend: SCOOP.into(),
             name: Name::new("a"),
             version: "1".into(),
         };
 
-        let outcome = stage_and_fetch(&action, &lock, &scoop, stage_dir.path());
+        let outcome = stage_and_fetch(&action, &lock, &scoop, stage_dir.path(), &declared);
         let Outcome::Failed { why } = outcome else {
             panic!("expected a Failed outcome, got {outcome:?}");
         };
@@ -720,6 +886,7 @@ mod tests {
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
+        let declared = Config::default();
 
         let plan = Plan {
             actions: vec![Action::Install {
@@ -730,7 +897,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
                 "expected a Failed outcome, got {:?}",
@@ -786,6 +953,7 @@ mod tests {
             },
         );
         let scoop = Scoop::new(root.path().to_path_buf());
+        let declared = crate::config::parse("[scoop]\nbuckets = [\"main\"]\n").unwrap();
         let plan = Plan {
             actions: vec![Action::Install {
                 backend: SCOOP.into(),
@@ -795,7 +963,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 1);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
@@ -835,6 +1003,7 @@ mod tests {
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
+        let declared = Config::default();
         let plan = Plan {
             actions: vec![Action::Prune {
                 backend: SCOOP.into(),
@@ -843,7 +1012,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared[0].outcome, Outcome::ReadyToRemove);
         assert!(prep.is_ok());
     }
@@ -854,6 +1023,7 @@ mod tests {
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
+        let declared = Config::default();
         let plan = Plan {
             actions: vec![
                 Action::Skip {
@@ -869,7 +1039,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.skipped_count(), 1);
         assert_eq!(prep.not_locked_count(), 1);
         assert!(!prep.is_ok(), "a not-locked package must fail the run");
@@ -961,6 +1131,7 @@ mod tests {
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
+        let declared = Config::default();
         let plan = Plan {
             actions: vec![
                 Action::Unmanaged {
@@ -977,7 +1148,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.ready_count(), 0);
         assert_eq!(prep.failed_count(), 0);

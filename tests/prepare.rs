@@ -575,6 +575,27 @@ fn the_download_argv_names_the_staged_manifest() {
 }
 
 #[test]
+fn cloning_is_only_offered_for_a_bucket_pkg_toml_declares_with_a_url() {
+    // Never a guessed URL: a lock naming an undeclared bucket is a failure
+    // that says so.
+    let cfg = dotpkg::config::parse(
+        "[scoop]\nbuckets = [\"main\", \"xom11=https://example.invalid/b\"]\n",
+    )
+    .unwrap();
+    let argvs: Vec<Vec<String>> = cfg
+        .scoop
+        .buckets
+        .iter()
+        .map(dotpkg::backend::scoop::bucket_add_argv)
+        .collect();
+    assert_eq!(argvs[0], vec!["bucket", "add", "main"]);
+    assert_eq!(
+        argvs[1],
+        vec!["bucket", "add", "xom11", "https://example.invalid/b"]
+    );
+}
+
+#[test]
 fn the_scoop_entry_point_is_the_cmd_shim() {
     // Measured: scoop.ps1 cannot be exec'd by Command, and relying on PATH
     // picks up whatever the user's shell resolves. shims/scoop.cmd runs

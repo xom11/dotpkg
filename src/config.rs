@@ -12,9 +12,50 @@ pub struct Config {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScoopSection {
-    pub buckets: Vec<String>,
+    pub buckets: Vec<BucketDecl>,
     pub packages: Vec<Name>,
     pub opts: BTreeMap<Name, PkgOpts>,
+}
+
+/// One entry of `[scoop] buckets`.
+///
+/// `"main"` names a bucket scoop already knows; `"xom11=https://…"` names one
+/// it does not and says where to get it. Until Phase 2b-2 this list was parsed
+/// into `Vec<String>` and read by nothing, while the approved design described
+/// cloning from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketDecl {
+    pub name: Name,
+    pub url: Option<String>,
+}
+
+fn parse_buckets(raw: Vec<String>) -> Result<Vec<BucketDecl>> {
+    let mut seen: BTreeMap<Name, String> = BTreeMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let (name_str, url) = match entry.split_once('=') {
+            Some((n, u)) => (n.to_string(), Some(u.to_string())),
+            None => (entry.clone(), None),
+        };
+        let name = Name::new(name_str.clone());
+        // The bucket name becomes `$SCOOP/buckets/<name>` and a git argument.
+        crate::backend::scoop::ensure_plain_component(&name, "bucket name", name.key())?;
+        if let Some(u) = &url {
+            anyhow::ensure!(
+                u.starts_with("https://") || u.starts_with("http://") || u.contains('@'),
+                "[scoop] buckets: {u:?} does not look like a git remote"
+            );
+        }
+        if let Some(first) = seen.get(&name) {
+            anyhow::bail!(
+                "[scoop] buckets names the same bucket twice: {first:?} and {name_str:?} \
+                 (bucket names are compared without regard to case)"
+            );
+        }
+        seen.insert(name.clone(), name_str);
+        out.push(BucketDecl { name, url });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -89,7 +130,7 @@ pub fn parse(text: &str) -> Result<Config> {
     let raw: RawConfig = toml::from_str(text).context("pkg.toml is not valid")?;
     Ok(Config {
         scoop: ScoopSection {
-            buckets: raw.scoop.buckets,
+            buckets: parse_buckets(raw.scoop.buckets)?,
             packages: fold_names(raw.scoop.packages, "[scoop]")?,
             opts: fold_map(raw.scoop.opts, "[scoop.opts]")?,
         },
@@ -226,5 +267,46 @@ packages = ["Git.Git"]
         // The guard must not reject a legitimate config.
         let cfg = parse("[scoop]\npackages = [\"fzf\", \"bat\", \"ripgrep\"]\n").unwrap();
         assert_eq!(cfg.scoop.packages.len(), 3);
+    }
+
+    #[test]
+    fn a_bucket_declaration_splits_into_a_name_and_an_optional_url() {
+        let cfg = parse(
+            "[scoop]\nbuckets = [\"main\", \"extras\", \
+             \"xom11=https://github.com/xom11/scoop-bucket\"]\n",
+        )
+        .unwrap();
+        let b = &cfg.scoop.buckets;
+        assert_eq!(b.len(), 3);
+        assert_eq!(b[0].name, Name::new("main"));
+        assert_eq!(b[0].url, None);
+        assert_eq!(b[2].name, Name::new("xom11"));
+        assert_eq!(
+            b[2].url.as_deref(),
+            Some("https://github.com/xom11/scoop-bucket")
+        );
+    }
+
+    #[test]
+    fn a_bucket_name_that_could_leave_its_directory_is_refused_at_parse_time() {
+        for bad in ["../evil", "a/b", "-oops", "", "c:\\x"] {
+            let text = format!("[scoop]\nbuckets = [\"{bad}=https://example.invalid/x\"]\n");
+            assert!(parse(&text).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_bucket_url_must_look_like_a_url() {
+        assert!(parse("[scoop]\nbuckets = [\"x=not a url\"]\n").is_err());
+        assert!(parse("[scoop]\nbuckets = [\"x=https://example.invalid/b\"]\n").is_ok());
+        assert!(parse("[scoop]\nbuckets = [\"x=git@example.invalid:b.git\"]\n").is_ok());
+    }
+
+    #[test]
+    fn two_bucket_declarations_naming_the_same_bucket_are_refused() {
+        let err =
+            parse("[scoop]\nbuckets = [\"main\", \"MAIN=https://x.invalid/y\"]\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("main") && msg.contains("MAIN"), "{msg}");
     }
 }

@@ -528,6 +528,44 @@ pub fn download_argv(manifest: &Path, arch: Option<&str>) -> Vec<String> {
     argv
 }
 
+/// The argv for adding a bucket. A declaration with no URL names a bucket
+/// scoop already knows by name (`main`, `extras`).
+pub fn bucket_add_argv(b: &crate::config::BucketDecl) -> Vec<String> {
+    let mut argv = vec![
+        "bucket".to_string(),
+        "add".to_string(),
+        b.name.key().to_string(),
+    ];
+    if let Some(u) = &b.url {
+        argv.push(u.clone());
+    }
+    argv
+}
+
+impl Scoop {
+    /// Clone every declared bucket that is not on disk. Returns one entry per
+    /// bucket that is still missing afterwards.
+    ///
+    /// Verified by looking for `.git` again, not by the exit code: measured,
+    /// `scoop bucket add` exits 0 on a duplicate and on a failure alike.
+    pub fn clone_missing_buckets(&self, declared: &crate::config::Config) -> Vec<(Name, String)> {
+        let mut failed = Vec::new();
+        for b in &declared.scoop.buckets {
+            let dir = self.root.join("buckets").join(b.name.key());
+            if dir.join(".git").exists() {
+                continue;
+            }
+            let argv = bucket_add_argv(b);
+            match self.run(&argv) {
+                Ok(_) if dir.join(".git").exists() => {}
+                Ok(r) => failed.push((b.name.clone(), tail(&r.stdout))),
+                Err(e) => failed.push((b.name.clone(), format!("{e:#}"))),
+            }
+        }
+        failed
+    }
+}
+
 /// The exact argv for removing an installed app.
 ///
 /// `app.key()`, not the display form: scoop resolves names case-insensitively

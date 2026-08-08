@@ -100,7 +100,8 @@ fn main() -> Result<()> {
 
             let plan = dotpkg::plan::plan(&declared, &locked, &scan.installed, &state, &running);
             let staging_root = dotpkg::apply::default_staging_root();
-            let preparation = dotpkg::apply::prepare(&plan, &locked, &scoop, &staging_root);
+            let preparation =
+                dotpkg::apply::prepare(&plan, &locked, &scoop, &staging_root, &declared);
 
             print!("{}", dotpkg::render::render_preparation(&preparation));
             // `process::exit` below skips the normal `main` teardown that

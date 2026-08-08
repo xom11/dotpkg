@@ -2662,8 +2662,31 @@ pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
     std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
 }
 
+/// Refuse to run at all against a root that does not look like a scoop
+/// install.
+///
+/// Found in Task 5's review. `verify::verdict` maps "no `apps/` directory" to
+/// absent, and `Expected::Absent` maps absent to `Ok(())` — so a wrong or
+/// typo'd `$SCOOP` **verifies every uninstall as successful**. Installs are
+/// safe in the same state (they come back `NotInstalled`, an error); it is
+/// only the destructive direction that silently passes, and it is exactly the
+/// direction where scoop also exits 0. One check, once, before any of it.
+pub fn root_looks_like_scoop(root: &Path) -> Result<(), String> {
+    if root.join("apps").is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} has no apps directory, so it is not a scoop root. Refusing to run: \
+         every uninstall would verify as successful against an empty tree. \
+         Check $SCOOP.",
+        root.display()
+    ))
+}
+
 /// Run every step, in order, verifying each. One package's failure never
 /// stops another's.
+///
+/// Callers must have passed `root_looks_like_scoop` first; `main.rs` does.
 pub fn execute(
     root: &Path,
     steps: Vec<Step>,

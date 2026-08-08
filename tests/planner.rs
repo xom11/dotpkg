@@ -555,6 +555,22 @@ fn a_package_installed_for_the_wrong_architecture_is_reported() {
 }
 
 #[test]
+fn architecture_comparison_ignores_case() {
+    // Scoop writes lowercase today, so this is speculative -- but the thesis
+    // of this branch is that case-sensitive comparison in the decision layer
+    // is how software gets removed, and in Phase 2b drift may drive a
+    // reinstall.
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", Some("ARM64"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
+}
+
+#[test]
 fn drift_is_reported_even_without_a_lock_entry() {
     // Otherwise the report is invisible on any machine that has not run
     // `dotpkg update` -- which is every machine today, including the one this

@@ -146,7 +146,11 @@ pub fn plan(
             // versions did not write one, and reinstalling those on every run
             // would be a bug, not a fix.
             if let Some(have) = cur.arch.as_deref() {
-                if have != want {
+                // Scoop writes lowercase today, but the decision layer must
+                // not depend on that staying true: a case-different match
+                // here is exactly the kind of comparison this branch exists
+                // to remove, and in Phase 2b drift may drive a reinstall.
+                if !have.eq_ignore_ascii_case(want) {
                     reports.push(Action::ArchDrift {
                         backend: SCOOP.into(),
                         name: name.clone(),

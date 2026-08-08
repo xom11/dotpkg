@@ -204,9 +204,20 @@ pub fn plan(
 
 /// Dotted numeric comparison, falling back to string order for anything that
 /// is not purely numeric. Deliberately not semver: scoop versions include
-/// shapes like `26.01` and `2026.07.15.08.55` that semver rejects, and getting
-/// the direction wrong only changes the arrow shown in the plan, never whether
-/// a change happens.
+/// shapes like `26.01` and `2026.07.15.08.55` that semver rejects.
+///
+/// **Its result is load-bearing only for the arrow `status` prints.** The
+/// decision to change a package is made by `cur.version == want` above; this
+/// function only picks `Upgrade` vs `Downgrade` for the display. So its edge
+/// cases — `1.0.0-rc1` vs `1.0.0` compare equal, since both reduce to `[1,0,0]`
+/// once the non-digits are stripped — are cosmetic today.
+///
+/// That stops being true the moment anything *gates* on the distinction: an
+/// `apply` that refuses downgrades without `--allow-downgrade`, a policy that
+/// skips them, a report that counts them separately. Whoever writes that is
+/// promoting this function from cosmetic to load-bearing and owes it a real
+/// version comparison — pre-release ordering, non-numeric suffixes, and the
+/// `pa.is_empty()` string fallback all become answers a user can be hurt by.
 fn is_older(a: &str, b: &str) -> bool {
     let parts = |s: &str| -> Vec<u64> {
         s.split(|c: char| !c.is_ascii_digit())

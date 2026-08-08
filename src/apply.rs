@@ -528,6 +528,17 @@ mod tests {
             );
         };
         assert!(why.contains("extras"), "name the bucket: {why}");
+        // The same tightening as the two integration tests in
+        // tests/prepare.rs, for the same measured reason: with the
+        // bucket-exists check in `stage()` deleted outright, `contains
+        // ("extras")` alone stayed green here, because the next error down
+        // ("commit abc123 is not in bucket \"extras\"") also names the
+        // bucket -- while telling the user their commit is broken when what
+        // they actually need is `scoop bucket add`.
+        assert!(
+            why.contains("not present at"),
+            "name why it failed, not just what: {why}"
+        );
     }
 
     #[test]

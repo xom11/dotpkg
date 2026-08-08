@@ -2,7 +2,7 @@
 name = "dotpkg"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 description = "Declarative package management for Windows: winget and scoop from one dotfile, with a real lock file and prune"
 repository = "https://github.com/xom11/dotpkg"
 license = "MIT"

@@ -18,7 +18,10 @@ Copied from `docs/specs/2026-08-08-design.md`. Every task's requirements implici
 - **Prune only ever touches a package named in `state.json`.** Phase 1 does not prune, but the planner must already classify by ownership.
 - **Scoop helper packages are `dark`, `innounp`, `7zip`, `lessmsi`.** Never reported as strays.
 - **Test layers 1 and 2 must run on Linux and macOS.** No test in Phase 1 may require Windows or a real scoop install.
-- Rust edition 2021, minimum toolchain 1.74 (clap 4 derive requirement).
+- Rust edition 2021, minimum toolchain 1.85 — the highest `rust-version` in the
+  resolved tree (hashbrown 1.85.0, with clap 4, indexmap and getrandom at 1.85).
+  Anything lower is a claim the crate cannot honour, and `rust-version` is
+  metadata a crates.io publish carries.
 
 ---
 
@@ -66,7 +69,7 @@ winget backend (Phase 4) and choco (v2) land without touching `plan.rs`.
 name = "dotpkg"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 description = "Declarative package management for Windows: winget and scoop from one dotfile, with a real lock file and prune"
 repository = "https://github.com/xom11/dotpkg"
 license = "MIT"

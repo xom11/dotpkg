@@ -79,22 +79,31 @@ struct Install {
     architecture: Option<String>,
 }
 
+/// Strip the extended-length `\\?\` prefix Windows' `canonicalize` adds.
+///
+/// Per Microsoft's own documentation this form comes back for essentially
+/// any existing directory, not only an aliased one, so this is what keeps
+/// `running_apps` matching for a plain, unaliased `$SCOOP` on every real
+/// Windows machine -- not just the aliased-root case this task set out to
+/// fix.
+fn strip_extended_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
 /// Resolve aliases so path matching compares the string `sysinfo` reports.
 ///
 /// A path that does not exist is kept as given: a machine with no scoop is a
 /// valid state, and `canonicalize` would turn it into an error.
-///
-/// On Windows `canonicalize` returns an extended-length `\\?\C:\...` path,
-/// which would break the very comparison this exists to fix, so the prefix is
-/// stripped.
 fn resolve_root(root: PathBuf) -> PathBuf {
     let Ok(canon) = std::fs::canonicalize(&root) else {
         return root;
     };
     let s = canon.to_string_lossy();
-    match s.strip_prefix(r"\\?\") {
-        Some(stripped) => PathBuf::from(stripped),
-        None => canon,
+    let stripped = strip_extended_prefix(&s);
+    if stripped.len() < s.len() {
+        PathBuf::from(stripped)
+    } else {
+        canon
     }
 }
 
@@ -262,5 +271,38 @@ impl Backend for Scoop {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // This is the branch `resolve_root` hits on every real Windows machine,
+    // aliased root or not -- `canonicalize` returns this extended-length form
+    // for essentially any existing directory -- and until now nothing in the
+    // suite ever passed it a `\\?\`-prefixed string: the aliased-root test in
+    // `tests/scoop_scan.rs` only reaches this code on unix, where
+    // `canonicalize` never produces this prefix, so the branch has run for
+    // every contributor and told nobody anything.
+    #[test]
+    fn the_extended_length_prefix_windows_adds_is_stripped() {
+        assert_eq!(
+            strip_extended_prefix(r"\\?\C:\Users\kln\scoop"),
+            r"C:\Users\kln\scoop"
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_extended_length_prefix_is_returned_unchanged() {
+        assert_eq!(
+            strip_extended_prefix(r"C:\Users\kln\scoop"),
+            r"C:\Users\kln\scoop"
+        );
+    }
+
+    #[test]
+    fn an_empty_string_does_not_panic() {
+        assert_eq!(strip_extended_prefix(""), "");
     }
 }

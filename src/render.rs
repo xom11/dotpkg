@@ -63,6 +63,17 @@ pub fn render(plan: &Plan) -> String {
             } => {
                 format!("  ? {backend:<6} {name:<14} {version:<24} (unmanaged -- no action)")
             }
+            Action::ArchDrift {
+                backend,
+                name,
+                have,
+                want,
+            } => {
+                format!(
+                    "  ~ {backend:<6} {name:<14} {:<24} (architecture drift -- reported, not fixed)",
+                    format!("{have}, declared {want}")
+                )
+            }
         };
         out.push_str(&line);
         out.push('\n');
@@ -71,11 +82,16 @@ pub fn render(plan: &Plan) -> String {
     if plan.actions.is_empty() {
         out.push_str("  nothing to do\n");
     } else {
-        out.push_str(&format!(
-            "\n  {} change(s), {} skipped\n",
+        let mut summary = format!(
+            "\n  {} change(s), {} skipped",
             plan.change_count(),
             plan.skip_count()
-        ));
+        );
+        if plan.drift_count() > 0 {
+            summary.push_str(&format!(", {} architecture drift", plan.drift_count()));
+        }
+        summary.push('\n');
+        out.push_str(&summary);
     }
     out
 }
@@ -131,6 +147,12 @@ mod tests {
                     name: "antigravity".into(),
                     version: "2.0.6".into(),
                 },
+                Action::ArchDrift {
+                    backend: SCOOP.into(),
+                    name: "python".into(),
+                    have: "64bit".into(),
+                    want: "arm64".into(),
+                },
             ],
         };
         let out = render(&plan);
@@ -141,7 +163,9 @@ mod tests {
         assert!(out.contains("! scoop  kanata"));
         assert!(out.contains("! winget Git.Git"));
         assert!(out.contains("? scoop  antigravity"));
-        assert!(out.contains("4 change(s), 2 skipped"));
+        assert!(out.contains("~ scoop  python"));
+        assert!(out.contains("64bit, declared arm64"));
+        assert!(out.contains("4 change(s), 2 skipped, 1 architecture drift"));
     }
 
     #[test]

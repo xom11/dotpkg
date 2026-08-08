@@ -335,6 +335,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
             Action::Prune { .. } => "prune",
             Action::Skip { .. } => "skip",
             Action::Unmanaged { .. } => "unmanaged",
+            Action::ArchDrift { .. } => "archdrift",
         })
         .collect();
     assert_eq!(
@@ -521,4 +522,118 @@ fn an_idle_owned_undeclared_package_is_still_pruned() {
             version: "0.30.0".into()
         }]
     );
+}
+
+const ARM64_PYTHON: &str =
+    "[scoop]\npackages = [\"python\"]\n\n[scoop.opts]\npython = { arch = \"arm64\" }\n";
+
+fn installed_arch(name: &str, version: &str, arch: Option<&str>) -> Installed {
+    let mut i = installed(name, version);
+    i.arch = arch.map(|a| a.to_string());
+    i
+}
+
+#[test]
+fn a_package_installed_for_the_wrong_architecture_is_reported() {
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert!(
+        p.actions.contains(&Action::ArchDrift {
+            backend: SCOOP.into(),
+            name: Name::new("python"),
+            have: "64bit".into(),
+            want: "arm64".into(),
+        }),
+        "got {:?}",
+        p.actions
+    );
+}
+
+#[test]
+fn drift_is_reported_even_without_a_lock_entry() {
+    // Otherwise the report is invisible on any machine that has not run
+    // `dotpkg update` -- which is every machine today, including the one this
+    // gets dogfooded on.
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.drift_count(), 1, "got {:?}", p.actions);
+}
+
+#[test]
+fn an_unknown_installed_architecture_is_not_drift() {
+    // install.json only appeared in later scoop versions. Treating unknown as
+    // wrong would make dotpkg want to reinstall such apps on every run.
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", None)],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
+}
+
+#[test]
+fn keep_means_never_report_whatever_is_installed() {
+    let p = plan(
+        &config::parse(
+            "[scoop]\npackages = [\"rustup\"]\n\n[scoop.opts]\nrustup = { arch = \"keep\" }\n",
+        )
+        .unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("rustup", "1.28.0", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
+}
+
+#[test]
+fn an_undeclared_architecture_is_no_opinion_and_no_report() {
+    let p = plan(
+        &config::parse("[scoop]\npackages = [\"python\"]\n").unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
+}
+
+#[test]
+fn drift_is_a_report_not_a_change() {
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::Lock::default(),
+        &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.change_count(), 0, "drift must not count as a change");
+}
+
+#[test]
+fn a_package_can_be_both_an_upgrade_and_a_drift() {
+    // Two true facts. Suppressing one would need a rule the reader has to
+    // remember, and 2b may well fix the arch by way of the upgrade anyway.
+    let p = plan(
+        &config::parse(ARM64_PYTHON).unwrap(),
+        &lock::parse("[scoop.python]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"3.14.6\"\n")
+            .unwrap(),
+        &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.change_count(), 1);
+    assert_eq!(p.drift_count(), 1);
 }

@@ -31,12 +31,40 @@ pub struct WingetSection {
     pub packages: Vec<Name>,
 }
 
+/// The architectures scoop names in install.json, plus the opt-out.
+///
+/// A closed set on purpose: `arch = "arm"` used to parse and mean "installed
+/// wrong, forever", because nothing ever equals it.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Arch {
+    #[serde(rename = "64bit")]
+    X64,
+    #[serde(rename = "32bit")]
+    X86,
+    Arm64,
+    /// Never change whatever is installed.
+    Keep,
+}
+
+impl Arch {
+    /// The string scoop writes into install.json. `Keep` names no
+    /// architecture: it is the absence of an opinion, not a value.
+    pub fn as_scoop(self) -> Option<&'static str> {
+        match self {
+            Arch::X64 => Some("64bit"),
+            Arch::X86 => Some("32bit"),
+            Arch::Arm64 => Some("arm64"),
+            Arch::Keep => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PkgOpts {
-    /// "64bit", "32bit", "arm64", or "keep" to never change what is installed.
     #[serde(default)]
-    pub arch: Option<String>,
+    pub arch: Option<Arch>,
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -73,14 +101,8 @@ packages = ["Git.Git"]
 
         assert_eq!(cfg.scoop.packages, vec!["fzf", "bat"]);
         assert_eq!(cfg.scoop.buckets.len(), 3);
-        assert_eq!(
-            cfg.scoop.opts[&Name::new("python")].arch.as_deref(),
-            Some("64bit")
-        );
-        assert_eq!(
-            cfg.scoop.opts[&Name::new("kanata")].arch.as_deref(),
-            Some("keep")
-        );
+        assert_eq!(cfg.scoop.opts[&Name::new("python")].arch, Some(Arch::X64));
+        assert_eq!(cfg.scoop.opts[&Name::new("kanata")].arch, Some(Arch::Keep));
         assert_eq!(cfg.winget.packages, vec!["Git.Git"]);
 
         // The two checks above fold case (`PartialEq<&str> for Name`), so they
@@ -106,6 +128,18 @@ packages = ["Git.Git"]
         assert!(
             format!("{err:#}").contains("packagess"),
             "error should name the bad key, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_architecture_is_an_error_not_a_permanent_drift() {
+        // `arch = "arm"` used to parse cleanly and mean "always wrong", which
+        // in Phase 2b is "reinstall on every run".
+        let err = parse("[scoop.opts]\npython = { arch = \"arm\" }\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("arm64"),
+            "the error must list the real values: {msg}"
         );
     }
 }

@@ -61,6 +61,15 @@ pub enum Action {
         name: Name,
         version: String,
     },
+    /// Installed for an architecture other than the one declared. Reported in
+    /// Phase 2a and not acted on: fixing it means a reinstall, and that
+    /// decision waits for the measured picture from a real machine.
+    ArchDrift {
+        backend: String,
+        name: Name,
+        have: String,
+        want: String,
+    },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -90,6 +99,13 @@ impl Plan {
             .filter(|a| matches!(a, Action::Skip { .. }))
             .count()
     }
+
+    pub fn drift_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::ArchDrift { .. }))
+            .count()
+    }
 }
 
 /// Pure. No I/O, no network, no subprocess — every input is passed in, which is
@@ -112,6 +128,34 @@ pub fn plan(
         let current = installed
             .iter()
             .find(|i| i.backend == SCOOP && &i.name == name);
+
+        // Emitted independently of the version verdict, and before the lock
+        // check: architecture is a fact about the machine, true whether or not
+        // dotpkg knows which version it wants. A package can be both an
+        // Upgrade and an ArchDrift; those are two true facts.
+        if let (Some(cur), Some(want)) = (
+            current,
+            declared
+                .scoop
+                .opts
+                .get(name)
+                .and_then(|o| o.arch)
+                .and_then(|a| a.as_scoop()),
+        ) {
+            // A missing install.json means "unknown", not "wrong". Older scoop
+            // versions did not write one, and reinstalling those on every run
+            // would be a bug, not a fix.
+            if let Some(have) = cur.arch.as_deref() {
+                if have != want {
+                    reports.push(Action::ArchDrift {
+                        backend: SCOOP.into(),
+                        name: name.clone(),
+                        have: have.to_string(),
+                        want: want.to_string(),
+                    });
+                }
+            }
+        }
 
         let Some(pin) = lock.scoop.get(name) else {
             actions.push(Action::Skip {

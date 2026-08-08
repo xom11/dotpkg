@@ -129,7 +129,11 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // Set true only once the uninstall half is PROVEN by
                 // `verdict`, not merely attempted: a failure at or before
                 // this point leaves the machine exactly as it was, and a
-                // failure after it leaves the package genuinely gone.
+                // failure after it leaves the package genuinely gone. Same
+                // assumption as `Step::Remove`'s `StillPresent` reasoning
+                // below: a failed uninstall here is read as having removed
+                // nothing, which holds only if scoop's uninstall is
+                // all-or-nothing -- unmeasured, and wrong if it is partial.
                 if let Err(d) = verdict(root, app, &Expected::Absent) {
                     return StepOutcome::Failed {
                         why: format!("{app}: uninstall did not happen -- {d}"),
@@ -213,6 +217,13 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // so an operator looks rather than being told nothing
                 // happened. `Expected::Absent` cannot produce any other
                 // `Disagreement` variant (see `verdict`'s match arm).
+                //
+                // The `StillPresent` half of this assumes scoop's uninstall
+                // is all-or-nothing -- it either removes the whole package or
+                // fails and removes nothing -- which is unmeasured. A scoop
+                // that can uninstall partially would leave real residue
+                // behind a `StillPresent` verdict, and this call would then
+                // be wrong to report untouched.
                 let touched = matches!(d, Disagreement::Unreadable(_));
                 return StepOutcome::Failed {
                     why: format!("{app}: uninstall did not happen -- {d}"),

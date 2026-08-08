@@ -627,10 +627,25 @@ fn the_recovery_file_is_written_before_anything_is_mutated_and_names_every_artif
         !text.contains("uninstall"),
         "the recovery file only ever puts software back: {text}"
     );
+
+    // `write_recovery` derives each line from `install_argv`, so `-u` (kept
+    // out of the uninstall/install window, see `install_argv`) must survive
+    // into the recovery line too -- not just into the scoop invocation the
+    // executor itself runs.
+    let scoop_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("scoop ")).collect();
+    assert_eq!(
+        scoop_lines.len(),
+        2,
+        "one line per artifact, removals excluded: {text}"
+    );
+    for line in scoop_lines {
+        assert!(line.contains("install"), "missing 'install': {line}");
+        assert!(line.contains("-u"), "missing '-u': {line}");
+    }
 }
 
 #[test]
-fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently() {
+fn exit_code_is_0_for_clean_1_for_every_failure_shape_and_2_for_refused() {
     let clean = Execution::default();
     assert_eq!(clean.exit_code(false), 0);
     assert_eq!(clean.exit_code(true), 2, "refused before starting");
@@ -677,9 +692,12 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
         "a failure is outstanding even when it changed nothing"
     );
 
-    // Important 3: a `Failed` result can still mean the machine changed, if
-    // its uninstall half really ran before the failure -- `touched` is how
-    // that reaches `exit_code` even though no result is `Done`.
+    // `exit_code` does not read `touched` at all -- it only counts
+    // `failed()` and `held()`. This shape (a `Failed` result whose uninstall
+    // half really ran before the install side gave up) exits 1 for the exact
+    // same reason `untouched_failure` above does, not because it is touched.
+    // The touched/untouched distinction survives only in
+    // `render_execution`'s wording -- see `Execution::touched`'s doc comment.
     let touched_but_not_done = Execution {
         results: vec![(
             Name::new("d"),
@@ -694,7 +712,8 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
     assert_eq!(
         touched_but_not_done.exit_code(false),
         1,
-        "the package is genuinely gone -- 2 would say there is nothing to look at"
+        "touched or untouched, a Failed result is still just a failure to \
+         exit_code -- both exit 1"
     );
 }
 
@@ -939,6 +958,116 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
     assert!(
         !state.owns(SCOOP, &Name::new("fzf")),
         "a failed install must not be recorded as owned, even though something landed on disk"
+    );
+}
+
+// -- Second wave: two touched-derivation controls the final review found
+// were independently deletable without reddening any existing test --
+
+#[test]
+fn a_remove_whose_post_uninstall_verdict_is_unreadable_is_touched() {
+    // `Step::Remove`'s `touched` derivation
+    // (`matches!(d, Disagreement::Unreadable(_))`) had no control: reverting
+    // it to `let touched = false;` left the whole suite green. `apps/` as a
+    // regular file, not a directory, is the same portable idiom
+    // `src/verify.rs` uses for its own `Unreadable` test -- `read_dir` fails
+    // on it (not with `NotFound`) on macOS, Linux, and Windows alike.
+    let t = Tree::new();
+    std::fs::write(t.root().join("apps"), b"not a directory").unwrap();
+    let fake = Fake::honest(&t);
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+
+    let out = run_step(
+        t.root(),
+        &fake,
+        &mut state,
+        &Step::Remove {
+            app: Name::new("fzf"),
+        },
+    );
+
+    assert!(
+        matches!(out, StepOutcome::Failed { touched: true, .. }),
+        "an unreadable apps/ after uninstall is unknown, not proven absent, \
+         and must be treated as touched: {out:?}"
+    );
+}
+
+#[test]
+fn a_retry_that_leaves_half_install_residue_is_touched() {
+    // The retry path's own `touched = true;` (the block guarding `d2`) is
+    // independently deletable, leaving only the first verdict's `touched =
+    // true` in place: that first-verdict block never fires here, because the
+    // first verdict below IS `NotInstalled` -- the one disagreement that
+    // earns a retry in the first place. Only the retry's own half-install
+    // residue can prove the `d2` block matters.
+    struct NoOpThenHalfInstall<'a> {
+        tree: &'a Tree,
+        calls: Cell<u32>,
+    }
+    impl Mutator for NoOpThenHalfInstall<'_> {
+        fn uninstall(&self, _app: &Name) -> anyhow::Result<CommandReport> {
+            unreachable!("a plain Install has no uninstall half")
+        }
+        fn install(&self, manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if n == 0 {
+                // The first install lands nothing at all: `verdict` reports
+                // `NotInstalled`, so `run_step` retries exactly once.
+                return Ok(CommandReport {
+                    code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            // The retry leaves the measured half-install residue:
+            // `apps/<app>/<version>/` holding an archive, no `current`.
+            let app = manifest.file_stem().unwrap().to_string_lossy().into_owned();
+            let version = manifest
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            self.tree.half_install(&app, &version);
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: "Checking hash of fzf.zip ... ERROR Hash check failed!\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    let fake = NoOpThenHalfInstall {
+        tree: &t,
+        calls: Cell::new(0),
+    };
+    let mut state = State::default();
+
+    let out = run_step(
+        t.root(),
+        &fake,
+        &mut state,
+        &Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        },
+    );
+
+    assert_eq!(
+        fake.calls.get(),
+        2,
+        "the first install must be a genuine no-op that earns exactly one retry"
+    );
+    assert!(
+        matches!(out, StepOutcome::Failed { touched: true, .. }),
+        "the retry really left half-install residue on disk: {out:?}"
     );
 }
 

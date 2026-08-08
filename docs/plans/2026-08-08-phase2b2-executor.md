@@ -641,7 +641,8 @@ which a URL/hash correction does. The lock silently degrades to latest.
 - Produces:
   - `pub fn ensure_commit_hash(app: &Name, commit: &str) -> anyhow::Result<()>`
     in `src/backend/scoop.rs`
-  - `pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> anyhow::Result<()>`
+  - `pub fn lock_coherence_guard(lock: &Lock) -> anyhow::Result<()>` — takes only
+    the lock: everything it decides is decidable from the lock alone.
     in `src/apply.rs`
 - Consumes: `Pin::ScoopCommit`, `ensure_plain_component` (both existing).
 
@@ -714,11 +715,6 @@ Add to `src/apply.rs`'s `mod tests`:
     fn the_lock_coherence_guard_refuses_every_shape_that_is_decidable_without_io() {
         use crate::lock::Pin;
 
-        let declared = crate::config::parse(
-            "[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n",
-        )
-        .unwrap();
-
         let bad_commit = {
             let mut l = Lock::default();
             l.scoop.insert(
@@ -731,7 +727,7 @@ Add to `src/apply.rs`'s `mod tests`:
             );
             l
         };
-        let msg = format!("{:#}", lock_coherence_guard(&declared, &bad_commit).unwrap_err());
+        let msg = format!("{:#}", lock_coherence_guard(&bad_commit).unwrap_err());
         assert!(msg.contains("tool") && msg.contains("main"), "{msg}");
         assert!(msg.contains("dotpkg update"), "say how to fix it: {msg}");
 
@@ -741,25 +737,21 @@ Add to `src/apply.rs`'s `mod tests`:
                 .insert(Name::new("tool"), Pin::WingetVersion { version: "1".into() });
             l
         };
-        assert!(lock_coherence_guard(&declared, &winget_pin_in_scoop_map).is_err());
+        assert!(lock_coherence_guard(&winget_pin_in_scoop_map).is_err());
 
-        let undeclared_bucket = {
+        let path_escaping_bucket = {
             let mut l = Lock::default();
             l.scoop.insert(
                 Name::new("tool"),
                 Pin::ScoopCommit {
-                    bucket: "nowhere".into(),
+                    bucket: "../evil".into(),
                     commit: "a".repeat(40),
                     version: "1.0.0".into(),
                 },
             );
             l
         };
-        let msg = format!(
-            "{:#}",
-            lock_coherence_guard(&declared, &undeclared_bucket).unwrap_err()
-        );
-        assert!(msg.contains("nowhere"), "name the bucket: {msg}");
+        assert!(lock_coherence_guard(&path_escaping_bucket).is_err());
     }
 
     #[test]
@@ -767,8 +759,6 @@ Add to `src/apply.rs`'s `mod tests`:
         // Positive control: without it, a guard that always errors passes the
         // test above.
         use crate::lock::Pin;
-        let declared =
-            crate::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
         let mut lock = Lock::default();
         lock.scoop.insert(
             Name::new("tool"),
@@ -778,7 +768,7 @@ Add to `src/apply.rs`'s `mod tests`:
                 version: "1.0.0".into(),
             },
         );
-        lock_coherence_guard(&declared, &lock).unwrap();
+        lock_coherence_guard(&lock).unwrap();
     }
 ```
 
@@ -839,14 +829,7 @@ In `src/apply.rs`, beside `mass_prune_guard`:
 /// `Scoop::stage` re-checks the same rules, deliberately: this guard gives a
 /// good whole-run message, and `stage` is a public API that Phase 3 will call
 /// from somewhere else. Neither is allowed to be the only one.
-pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> Result<()> {
-    let buckets: BTreeSet<&str> = declared
-        .scoop
-        .buckets
-        .iter()
-        .map(|b| b.split_once('=').map(|(n, _)| n).unwrap_or(b.as_str()))
-        .collect();
-
+pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
     for (name, pin) in &lock.scoop {
         let Pin::ScoopCommit {
             bucket,
@@ -865,25 +848,33 @@ pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> Result<()> {
             })
             .and_then(|()| crate::backend::scoop::ensure_commit_hash(name, commit))
             .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
-        anyhow::ensure!(
-            buckets.contains(bucket.as_str()),
-            "pkg.lock [scoop.{name}] names bucket {bucket:?}, which pkg.toml does not declare. \
-             Add it to [scoop] buckets, or run `dotpkg update`."
-        );
     }
     Ok(())
 }
 ```
 
-`ensure_plain_component` becomes `pub` for this. Add
-`use std::collections::BTreeSet;` and `use crate::lock::Pin;` to `src/apply.rs`.
+`ensure_plain_component` becomes `pub` for this. Add `use crate::lock::Pin;` to
+`src/apply.rs`.
+
+**This guard does NOT check that the lock's bucket is declared in `pkg.toml`.**
+An earlier draft of this plan put that check here as a whole-run abort, and it
+was wrong twice over. The spec calls it "a per-package `Failed` that says so",
+and the whole-run version deadlocks: drop a package *and* its bucket line from
+`pkg.toml`, and the stale lock entry makes every later `apply` die before the
+plan is built — including the `Prune` that would have cleared it — while the
+error names `dotpkg update`, which does not exist until Phase 3. **Task 11 owns
+that check**, as a per-package failure, where `BucketDecl` already gives it a
+folded `Name` and a parsed `name=url`.
+
+Everything this guard does check is decidable from the lock alone, with no
+reference to `pkg.toml` — which is why it can run before the plan exists.
 
 - [ ] **Step 5: Call the guard from `main.rs`**
 
 In `src/main.rs`'s Apply arm, immediately after the `mass_prune_guard` block:
 
 ```rust
-            dotpkg::apply::lock_coherence_guard(&declared, &locked)?;
+            dotpkg::apply::lock_coherence_guard(&locked)?;
 ```
 
 It is not behind `--allow-empty-config`: that flag says an empty `pkg.toml` is
@@ -2939,9 +2930,17 @@ fn parse_buckets(raw: Vec<String>) -> Result<Vec<BucketDecl>> {
 ```
 
 Change `ScoopSection.buckets` to `Vec<BucketDecl>` and call `parse_buckets` in
-`parse`. Update `lock_coherence_guard`'s bucket set to
-`declared.scoop.buckets.iter().map(|b| &b.name)` and compare with
-`Name::new(bucket)`.
+`parse`.
+
+**Task 11 also owns the undeclared-bucket check**, which Task 4 deliberately
+left out. It is a **per-package** failure, not a whole-run abort: in
+`stage_and_fetch`, a pin whose bucket is not in `declared.scoop.buckets`
+becomes `Outcome::Failed` naming the bucket and saying to add it to
+`[scoop] buckets`. Compare with `Name`, which folds case — `$SCOOP/buckets/Main`
+and `main` are the same directory on Windows, and a byte-exact comparison
+would abort over a lock that stages perfectly well. `prepare()` therefore
+gains a `declared: &Config` parameter. Add a test for the `name=url` form
+specifically: replacing the split with `b.as_str()` must turn a test red.
 
 In `src/backend/scoop.rs`:
 
@@ -3369,7 +3368,7 @@ the spec fixes:
                 dotpkg::apply::mass_prune_guard(&declared_only, &state_only)?;
             }
             let locked_only = dotpkg::lock::load_or_empty(&lock)?;
-            dotpkg::apply::lock_coherence_guard(&declared_only, &locked_only)?;
+            dotpkg::apply::lock_coherence_guard(&locked_only)?;
 
             let mut d = dotpkg::apply::load_everything(&config, &lock, &state_path)?;
             for w in &d.scan.warnings {

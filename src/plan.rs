@@ -181,7 +181,7 @@ pub fn plan(
             Some(cur) => {
                 // Checked only once a change is actually called for, so a
                 // healthy running package produces no line at all.
-                if running.covers(&cur.name, &cur.bins) {
+                if running.covers(cur) {
                     actions.push(Action::Skip {
                         backend: SCOOP.into(),
                         name: name.clone(),
@@ -230,7 +230,7 @@ pub fn plan(
             // Prune is the one action with no second chance: an interrupted
             // upgrade puts the app back, an uninstall does not. So the running
             // check that guards version changes guards this too.
-            if running.covers(&inst.name, &inst.bins) {
+            if running.covers(inst) {
                 actions.push(Action::Skip {
                     backend: SCOOP.into(),
                     name: inst.name.clone(),

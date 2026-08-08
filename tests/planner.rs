@@ -157,6 +157,37 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
 }
 
 #[test]
+fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process() {
+    // The realistic neovim: the package is `neovim`, the live process is
+    // `nvim`, and only the manifest's bin field connects the two -- an exact
+    // name match would miss it entirely. This is the version-change half of
+    // `a_running_package_is_not_pruned_when_only_its_manifest_names_the_process`;
+    // the finding that named this whole phase was exactly this case: "a
+    // neovim upgrade planned cleanly while nvim.exe was running"
+    // (docs/phase2-notes.md).
+    let mut inst = installed("neovim", "0.10.0");
+    inst.bins = vec!["nvim".to_string()];
+
+    let p = plan(
+        &config::parse("[scoop]\npackages = [\"neovim\"]\n").unwrap(),
+        &lock::parse("[scoop.neovim]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.10.1\"\n")
+            .unwrap(),
+        &[inst],
+        &State::default(),
+        &Running::new(BTreeSet::from(["nvim".to_string()]), Default::default()),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: SCOOP.into(),
+            name: "neovim".into(),
+            reason: SkipReason::Running
+        }],
+        "a running package must never turn into an Upgrade"
+    );
+}
+
+#[test]
 fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
     // The winget backend is Phase 4 and stays deferred. Reporting it is not:
     // the spec's example pkg.toml declares `[winget]`, and a user who copies

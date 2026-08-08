@@ -144,24 +144,29 @@ impl Running {
         Running { names, dirs }
     }
 
-    /// True if anything belonging to this package is alive. `bins` is the
-    /// package's declared executables, as `Installed.bins` will carry them
-    /// from Task 3.
+    /// True if anything belonging to this package is alive.
     ///
-    /// Takes the two values rather than an `&Installed` so that `Running`
-    /// does not depend on a type Task 2 is about to change.
+    /// Takes the whole `Installed` rather than its name and bins separately.
+    /// It used to take `(&Name, &[String])`, because `Installed` had not yet
+    /// gained a `bins` field when this was written; that field has existed
+    /// since Task 2, so the narrower signature no longer earns its keep. It
+    /// let a call site copy `cur.name` and quietly forget `cur.bins`, which
+    /// compiled and dropped exactly the signal that catches a package whose
+    /// live process name differs from its own -- the `neovim` / `nvim.exe`
+    /// miss that named this phase. Taking `&Installed` makes that mistake
+    /// impossible to write rather than merely absent from today's callers.
     ///
-    /// Over-matching is deliberate. A false positive costs one `!` line the
-    /// user clears by closing an app; a false negative costs the app.
-    ///
-    /// `bins` entries must already be lowercased with any suffix in
+    /// `inst.bins` entries must already be lowercased with any suffix in
     /// `sys::EXECUTABLE_SUFFIXES` removed, matching `names` above --
     /// `declared_executables` in `backend::scoop` is what produces them in
     /// that form.
-    pub fn covers(&self, name: &Name, bins: &[String]) -> bool {
-        self.dirs.contains(name)
-            || self.names.contains(name.key())
-            || bins.iter().any(|b| self.names.contains(b))
+    ///
+    /// Over-matching is deliberate. A false positive costs one `!` line the
+    /// user clears by closing an app; a false negative costs the app.
+    pub fn covers(&self, inst: &Installed) -> bool {
+        self.dirs.contains(&inst.name)
+            || self.names.contains(inst.name.key())
+            || inst.bins.iter().any(|b| self.names.contains(b))
     }
 }
 
@@ -171,6 +176,19 @@ mod tests {
 
     fn bins(v: &[&str]) -> Vec<String> {
         v.iter().map(|b| b.to_string()).collect()
+    }
+
+    /// An `Installed` with just enough set to exercise `covers`: the fields
+    /// it actually reads (`name`, `bins`), plus placeholders for the rest.
+    fn installed(name: &str, decl_bins: &[&str]) -> Installed {
+        Installed {
+            backend: SCOOP.to_string(),
+            name: Name::new(name),
+            version: "0".to_string(),
+            arch: None,
+            bucket: None,
+            bins: bins(decl_bins),
+        }
     }
 
     #[test]
@@ -212,7 +230,7 @@ mod tests {
     #[test]
     fn a_process_named_after_the_package_is_covered() {
         let r = Running::new(BTreeSet::from(["fzf".to_string()]), BTreeSet::new());
-        assert!(r.covers(&Name::new("fzf"), &[]));
+        assert!(r.covers(&installed("fzf", &[])));
     }
 
     #[test]
@@ -220,7 +238,7 @@ mod tests {
         // neovim's executable is nvim.exe. This is the miss that made a running
         // editor plan a clean upgrade.
         let r = Running::new(BTreeSet::from(["nvim".to_string()]), BTreeSet::new());
-        assert!(r.covers(&Name::new("neovim"), &bins(&["nvim", "xxd"])));
+        assert!(r.covers(&installed("neovim", &["nvim", "xxd"])));
     }
 
     #[test]
@@ -228,18 +246,18 @@ mod tests {
         // nodejs declares env_add_path and no bin anywhere, so the path is the
         // only signal there is.
         let r = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("nodejs")]));
-        assert!(r.covers(&Name::new("nodejs"), &[]));
+        assert!(r.covers(&installed("nodejs", &[])));
     }
 
     #[test]
     fn an_idle_package_is_not_covered() {
         let r = Running::new(BTreeSet::from(["chrome".to_string()]), BTreeSet::new());
-        assert!(!r.covers(&Name::new("neovim"), &bins(&["nvim", "xxd"])));
+        assert!(!r.covers(&installed("neovim", &["nvim", "xxd"])));
     }
 
     #[test]
     fn coverage_by_directory_ignores_case_like_the_filesystem() {
         let r = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("NodeJS")]));
-        assert!(r.covers(&Name::new("nodejs"), &[]));
+        assert!(r.covers(&installed("nodejs", &[])));
     }
 }

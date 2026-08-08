@@ -1,10 +1,12 @@
 use super::{Backend, Scan};
+use crate::lock::Pin;
 use crate::model::{Installed, Name, Running, SCOOP};
 use crate::sys::{Process, EXECUTABLE_SUFFIXES};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Every executable this manifest declares, normalised to the form
 /// `sysinfo` reports a process under: basename, known extension removed,
@@ -272,6 +274,142 @@ impl Backend for Scoop {
         }
         Ok(out)
     }
+}
+
+impl Scoop {
+    /// Recover the exact manifest a lock entry names and write it where scoop
+    /// can install from it. Returns the staged path.
+    ///
+    /// The staged file is named for the **bucket's** spelling of the app, not
+    /// the user's, because `scoop install <path>` takes the installed app name
+    /// from the filename — so this is what makes the resulting directory
+    /// identical to a plain `scoop install <app>`.
+    pub fn stage(&self, staging_root: &Path, app: &Name, pin: &Pin) -> Result<PathBuf> {
+        let Pin::ScoopCommit {
+            bucket,
+            commit,
+            version,
+        } = pin
+        else {
+            anyhow::bail!("{app}: the scoop lock holds a winget pin; the lock is inconsistent");
+        };
+        let bucket_dir = self.root.join("buckets").join(bucket);
+        anyhow::ensure!(
+            bucket_dir.join(".git").exists(),
+            "{app}: bucket {bucket:?} is not present at {}",
+            bucket_dir.display()
+        );
+        anyhow::ensure!(
+            git_ok(
+                &bucket_dir,
+                &["cat-file", "-e", &format!("{commit}^{{commit}}")]
+            ),
+            "{app}: commit {commit} is not in bucket {bucket:?}"
+        );
+
+        // git object paths are case-sensitive; Name is not. Try what the user
+        // wrote, then the folded form.
+        let mut tried: Vec<String> = Vec::new();
+        for spelling in [app.to_string(), app.key().to_string()] {
+            if tried.contains(&spelling) {
+                continue;
+            }
+            tried.push(spelling.clone());
+            let in_repo = format!("bucket/{spelling}.json");
+            let Some(text) = git_show(&bucket_dir, commit, &in_repo)? else {
+                continue;
+            };
+            return stage_text(
+                staging_root,
+                app,
+                version,
+                &format!("{spelling}.json"),
+                &in_repo,
+                commit,
+                &text,
+            );
+        }
+        // Neither guess is what the bucket calls it. One tree listing finds
+        // the real name -- and uses it, rather than only reporting it.
+        if let Some(real) = resolve_spelling(&bucket_dir, commit, app.key()) {
+            let in_repo = format!("bucket/{real}");
+            if let Some(text) = git_show(&bucket_dir, commit, &in_repo)? {
+                return stage_text(staging_root, app, version, &real, &in_repo, commit, &text);
+            }
+        }
+        anyhow::bail!("{app}: bucket {bucket:?} at {commit} has no manifest for {tried:?}");
+    }
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `Ok(None)` when the path is absent from that commit; `Err` only when git
+/// itself could not be run.
+fn git_show(dir: &Path, commit: &str, path_in_repo: &str) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["show", &format!("{commit}:{path_in_repo}")])
+        .output()
+        .with_context(|| format!("cannot run git in {}", dir.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// Validate a recovered manifest against the lock and write it out. Shared by
+/// both routes into staging so the check cannot drift between them.
+fn stage_text(
+    staging_root: &Path,
+    app: &Name,
+    version: &str,
+    filename: &str,
+    in_repo: &str,
+    commit: &str,
+    text: &str,
+) -> Result<PathBuf> {
+    let parsed: serde_json::Value = serde_json::from_str(text)
+        .with_context(|| format!("{app}: {in_repo} at {commit} is not valid JSON"))?;
+    let got = parsed.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    anyhow::ensure!(
+        got == version,
+        "{app}: the lock says {version:?} but {in_repo} at {commit} is {got:?}"
+    );
+    let dir = staging_root.join(app.key()).join(version);
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let out = dir.join(filename);
+    std::fs::write(&out, text).with_context(|| format!("cannot write {}", out.display()))?;
+    Ok(out)
+}
+
+/// The bucket's own filename for this app, found case-insensitively.
+///
+/// Costs one tree listing, and only after the two cheap guesses have missed.
+/// Returning the real spelling rather than only naming it is what lets
+/// `pkg.toml` say `TOOL` while the bucket file is `Tool.json` — without this,
+/// the two guesses only work when the user's casing happens to match.
+fn resolve_spelling(dir: &Path, commit: &str, app_key: &str) -> Option<String> {
+    let listing = Command::new("git")
+        .current_dir(dir)
+        .args(["ls-tree", "--name-only", commit, "bucket/"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let wanted = format!("{app_key}.json");
+    listing
+        .lines()
+        .map(|l| l.rsplit('/').next().unwrap_or(l))
+        .find(|f| f.to_ascii_lowercase() == wanted)
+        .map(str::to_string)
 }
 
 #[cfg(test)]

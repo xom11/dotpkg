@@ -1,0 +1,236 @@
+use dotpkg::backend::scoop::Scoop;
+use dotpkg::lock::Pin;
+use dotpkg::model::Name;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Build a real git repository shaped like a scoop bucket: manifests under
+/// `bucket/`, one commit per version. Returns a commit sha per version, in
+/// the order given.
+///
+/// This is git, not a stand-in for git. `stage` runs the real binary here.
+fn bucket_repo(
+    scoop_root: &Path,
+    bucket: &str,
+    manifest_file: &str,
+    versions: &[&str],
+) -> Vec<String> {
+    let dir = scoop_root.join("buckets").join(bucket);
+    fs::create_dir_all(dir.join("bucket")).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    let mut shas = Vec::new();
+    for v in versions {
+        fs::write(
+            dir.join("bucket").join(manifest_file),
+            format!(r#"{{"version":"{v}","bin":"tool.exe"}}"#),
+        )
+        .unwrap();
+        git(&dir, &["add", "-A"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "bump",
+            ],
+        );
+        shas.push(git(&dir, &["rev-parse", "HEAD"]).trim().to_string());
+    }
+    shas
+}
+
+fn pin(bucket: &str, commit: &str, version: &str) -> Pin {
+    Pin::ScoopCommit {
+        bucket: bucket.into(),
+        commit: commit.into(),
+        version: version.into(),
+    }
+}
+
+#[test]
+fn an_old_commit_recovers_the_old_manifest_not_the_current_one() {
+    // The whole reproducibility claim in one test: the bucket has moved on to
+    // 2.0.0, and the lock still gets 1.0.0.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0", "2.0.0"]);
+
+    let staged = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .unwrap();
+
+    let text = fs::read_to_string(&staged).unwrap();
+    assert!(text.contains("1.0.0"), "got {text}");
+    assert!(
+        !text.contains("2.0.0"),
+        "recovered the current manifest, not the pinned one: {text}"
+    );
+}
+
+#[test]
+fn a_commit_the_bucket_does_not_have_fails_and_stages_nothing() {
+    // The approved design's second mandatory test. A lock that quietly falls
+    // back to latest is worse than no lock, because it makes a guarantee that
+    // is not there.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", "0000000000000000000000000000000000000000", "1.0.0"),
+        )
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("0000000"), "name the commit: {msg}");
+    assert!(msg.contains("main"), "name the bucket: {msg}");
+    assert_eq!(
+        fs::read_dir(stage_dir.path()).unwrap().count(),
+        0,
+        "nothing may be staged when the commit is missing"
+    );
+}
+
+#[test]
+fn the_staged_file_is_named_for_the_buckets_spelling_not_the_users() {
+    // scoop takes the installed app name from the FILENAME, so this is what
+    // makes the resulting app directory identical to what a plain
+    // `scoop install tool` would create.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "Tool.json", &["1.0.0"]);
+
+    let staged = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("TOOL"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        staged.file_name().unwrap(),
+        "Tool.json",
+        "got {}",
+        staged.display()
+    );
+}
+
+#[test]
+fn a_manifest_whose_version_disagrees_with_the_lock_fails() {
+    // The commit is right and the file is there, but the lock says something
+    // else. Installing it would install a version nobody asked for.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &shas[0], "9.9.9"),
+        )
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("9.9.9") && msg.contains("1.0.0"),
+        "name both versions: {msg}"
+    );
+}
+
+#[test]
+fn a_missing_bucket_is_named_rather_than_guessed_at() {
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("extras", "abc123", "1.0.0"),
+        )
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("extras"));
+}
+
+#[test]
+fn a_spelling_neither_guess_finds_is_resolved_from_the_tree() {
+    // `MIXEDCASE` and its folded form `mixedcase` both miss `MixedCase.json`.
+    // One tree listing finds the real name -- and uses it, rather than only
+    // reporting it. Without this third attempt the two cheap guesses only
+    // work when the user's casing happens to match.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "MixedCase.json", &["1.0.0"]);
+
+    let staged = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("MIXEDCASE"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .unwrap();
+    assert_eq!(
+        staged.file_name().unwrap(),
+        "MixedCase.json",
+        "got {}",
+        staged.display()
+    );
+}
+
+#[test]
+fn an_app_the_bucket_simply_does_not_have_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("nosuch"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("nosuch"), "got {err:#}");
+}
+
+#[test]
+fn a_winget_pin_in_the_scoop_map_is_an_error_not_a_panic() {
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let err = Scoop::new(root.path().to_path_buf())
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &Pin::WingetVersion {
+                version: "1.0.0".into(),
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("inconsistent"));
+}

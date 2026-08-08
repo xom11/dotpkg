@@ -23,15 +23,68 @@ manifest as `%TEMP%\dotpkg-tmp-9f2.json` installs an app called
 `dotpkg-tmp-9f2`. Each staged manifest needs its own directory so the file can
 stay named `<app>.json`.
 
-**Unresolved, and it must be measured before the executor is written.** The lock
-pins a version; what command applies it? `scoop install <manifest>` refuses an
-already-installed app. `scoop update <app>` goes to the bucket's *current*
-manifest, not the pinned one. Whether `scoop install -f` uninstalls the old
-version or only adds a directory and moves `current` was never determined. If
-it turns out every version change is uninstall + install, then the design's
-claim that "downgrades are the one irreducible gap" is wrong and the dangerous
-window is far wider than the spec describes. Measure this in a throwaway
-`$env:SCOOP` before writing code against it.
+## Measured: how a version change actually happens, and what the design got wrong
+
+Measured 2026-08-08 on a14, scoop **0.5.3** (`b588a06e`), in a throwaway
+`$env:SCOOP` root using two real pinned `dos2unix` manifests recovered with
+`git show` from the main bucket (7.5.5 at `39160de954ce`, 7.5.6 at
+`8042a958a4e3`). The real `~/scoop` was untouched throughout — 31 apps before
+and after — and the probe root was removed.
+
+**Every version change is uninstall + install. Upgrades are not safer than
+downgrades.** This contradicts the approved design, which states "**Downgrades
+are the one irreducible gap**, because they are uninstall + install" and marks
+`↓` as the arrow that earns a warning. Measured, `^` carries exactly the same
+risk. Whatever 2b does about the confirmation prompt, it must not imply that an
+upgrade is the safe direction.
+
+What was tried, and what each did:
+
+| Command | Result |
+|---|---|
+| `scoop install <path>/app.json` (not installed) | works, exit 0 |
+| `scoop install <path>/app.json` (installed, different version) | **exit 0, no output, nothing changes** |
+| `scoop install -f …` | `Option -f not recognized` |
+| `scoop install --force …` | `Option --force not recognized` |
+| `scoop update <path>/app.json` | exit 1, no output |
+| `scoop reset app@<version present on disk>` | works, relinks shims |
+| `scoop reset app@<version not on disk>` | **exit 0, no output, nothing changes** |
+| `scoop uninstall app` then install the pin | the only sequence that works |
+
+**There is no force flag.** The authoritative list from `scoop help install` is
+`-g/--global`, `-i/--independent`, `-k/--no-cache`, `-s/--skip-hash-check`,
+`-u/--no-update-scoop`, `-a/--arch`. Nothing replaces an existing install.
+
+**`scoop reset` is not a shortcut around this.** It can relink to another
+version *already on disk*, but dotpkg's only version-change mechanism is
+uninstall + install, and the uninstall deletes the old version directory. After
+a change, exactly one version directory exists. The cheap in-place relink is
+therefore unavailable to dotpkg by construction.
+
+**The executor cannot trust exit codes.** Two distinct silent-success traps were
+observed above, both returning 0 while doing nothing. An `apply` that checks
+only the exit code will report an upgrade that never happened — a "never
+degrade silently" violation produced by the tool it orchestrates. **Verify the
+resulting on-disk state after every mutation, not only after uninstall** as the
+design's error table currently requires.
+
+**One piece of good news: `scoop uninstall` keeps persistent data by default.**
+`-p/--purge` is opt-in, so the uninstall+install window risks binaries and
+shims, not the user's data under `persist`.
+
+**`install.json` records `url`, not `bucket`, when installing from a path.**
+Measured: `{ "url": "…\\_stage\\7.5.5\\dos2unix.json", "architecture": "64bit" }`.
+Two consequences. `Installed.bucket` is `None` for everything dotpkg installs,
+so nothing downstream may depend on it. And the recorded path is dotpkg's own
+staging directory — stage manifests somewhere stable such as
+`%LOCALAPPDATA%\dotpkg\manifests\<app>\<version>\<app>.json`, never `%TEMP%`,
+or the app is left pointing at a path that no longer exists.
+
+**Not usable as measured:** `scoop help install` documents
+`scoop install \path\to\app.json@version`, but invoked with a quoted path it
+produced no exit code and no effect. It is redundant anyway — a pinned manifest
+already carries its own version — so it is recorded only so nobody re-tries it
+expecting a way around the above.
 
 ## Must not reach an `apply` that can execute
 

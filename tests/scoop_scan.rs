@@ -125,3 +125,19 @@ fn a_missing_scoop_root_scans_to_nothing() {
     assert!(scan.installed.is_empty());
     assert!(scan.warnings.is_empty());
 }
+
+#[test]
+fn a_mixed_case_app_directory_keeps_its_exact_name_on_display() {
+    // `assert_eq!(got[0].name, "ripgrep")` folds case (`PartialEq<&str> for
+    // Name`), so it would not notice `scan` lowercasing the directory name on
+    // the way in. `.to_string()` goes through `Display`, which does not fold.
+    let dir = tempfile::tempdir().unwrap();
+    app(dir.path(), "RipGrep", "14.1.0", "64bit", "main");
+
+    let got = Scoop::new(dir.path().to_path_buf())
+        .scan()
+        .unwrap()
+        .installed;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].name.to_string(), "RipGrep");
+}

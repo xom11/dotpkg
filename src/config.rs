@@ -59,7 +59,7 @@ mod tests {
             r#"
 [scoop]
 buckets  = ["main", "extras", "xom11=https://github.com/xom11/scoop-bucket"]
-packages = ["fzf", "bat"]
+packages = ["fzf", "Bat"]
 
 [scoop.opts]
 python = { arch = "64bit" }
@@ -82,6 +82,12 @@ packages = ["Git.Git"]
             Some("keep")
         );
         assert_eq!(cfg.winget.packages, vec!["Git.Git"]);
+
+        // The two checks above fold case (`PartialEq<&str> for Name`), so they
+        // would not notice `parse` lowercasing a package name on the way in.
+        // `.to_string()` goes through `Display`, which does not fold.
+        assert_eq!(cfg.scoop.packages[1].to_string(), "Bat");
+        assert_eq!(cfg.winget.packages[0].to_string(), "Git.Git");
     }
 
     #[test]

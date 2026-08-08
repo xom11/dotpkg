@@ -130,6 +130,13 @@ pin     = "version-only"
             }
         );
         assert_eq!(lock.scoop[&Name::new("fzf")].version(), "0.74.1");
+
+        // The indexing checks above look up by folded key, so they would find
+        // the entry even if `parse` had lowercased it on the way in.
+        // `get_key_value` returns the key actually stored; `.to_string()` goes
+        // through `Display`, which does not fold.
+        let (stored_key, _) = lock.winget.get_key_value(&Name::new("Git.Git")).unwrap();
+        assert_eq!(stored_key.to_string(), "Git.Git");
     }
 
     #[test]

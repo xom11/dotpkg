@@ -6,8 +6,6 @@ use std::path::Path;
 /// Deliberately asymmetric: only scoop can be pinned to content. Flattening
 /// these into one shape would let a reader believe a winget entry carries the
 /// same guarantee as a scoop one.
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     ScoopCommit {
@@ -21,8 +19,6 @@ pub enum Pin {
 }
 
 impl Pin {
-    // dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-    #[allow(dead_code)]
     pub fn version(&self) -> &str {
         match self {
             Pin::ScoopCommit { version, .. } => version,
@@ -37,8 +33,6 @@ pub struct Lock {
     pub winget: BTreeMap<String, Pin>,
 }
 
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawScoop {
@@ -47,8 +41,6 @@ struct RawScoop {
     version: String,
 }
 
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWinget {
@@ -56,8 +48,6 @@ struct RawWinget {
     pin: String,
 }
 
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLock {
@@ -67,8 +57,6 @@ struct RawLock {
     winget: BTreeMap<String, RawWinget>,
 }
 
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 pub fn parse(text: &str) -> Result<Lock> {
     let raw: RawLock = toml::from_str(text).context("pkg.lock is not valid")?;
 
@@ -97,8 +85,6 @@ pub fn parse(text: &str) -> Result<Lock> {
 
 /// An absent lock is not an error — it is a machine that has never run
 /// `dotpkg update`. The planner reports every declared package as unlocked.
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 pub fn load_or_empty(path: &Path) -> Result<Lock> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text),

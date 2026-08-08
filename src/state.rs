@@ -20,8 +20,6 @@ pub enum Ownership {
 #[serde(transparent)]
 pub struct State(BTreeMap<String, BTreeMap<String, Ownership>>);
 
-// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
-#[allow(dead_code)]
 impl State {
     pub fn owns(&self, backend: &str, name: &str) -> bool {
         self.0
@@ -98,8 +96,11 @@ mod tests {
     fn the_documented_json_shape_is_what_we_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        std::fs::write(&path, r#"{ "scoop": { "fzf": "installed", "aichat": "adopted" } }"#)
-            .unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "scoop": { "fzf": "installed", "aichat": "adopted" } }"#,
+        )
+        .unwrap();
 
         let s = State::load_or_empty(&path).unwrap();
         assert!(s.owns("scoop", "fzf"));

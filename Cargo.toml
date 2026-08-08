@@ -7,6 +7,14 @@ description = "Declarative package management for Windows: winget and scoop from
 repository = "https://github.com/xom11/dotpkg"
 license = "MIT"
 
+[lib]
+name = "dotpkg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dotpkg"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

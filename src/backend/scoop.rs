@@ -142,6 +142,13 @@ impl Scoop {
         }
     }
 
+    /// The resolved scoop root this instance was built against, for a caller
+    /// (`execute::execute`) that needs it without reaching into a private
+    /// field.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// `$SCOOP` if set, else `%USERPROFILE%\scoop`, matching scoop's own rule.
     pub fn discover() -> Scoop {
         let root = std::env::var_os("SCOOP")

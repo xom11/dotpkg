@@ -39,6 +39,20 @@ impl<'de> Deserialize<'de> for State {
     }
 }
 
+/// The path `save` writes to before the atomic rename, derived from the
+/// filename `path` actually names rather than a hardcoded `"state.json"`.
+///
+/// A free function, not inlined into `save`, so it can be pinned by a test
+/// without going through a real filesystem write: two different targets in
+/// one directory must not collapse onto one temp name.
+fn temp_path_for(path: &Path) -> PathBuf {
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("state.json");
+    path.with_file_name(format!("{stem}.tmp{}", std::process::id()))
+}
+
 impl State {
     pub fn owns(&self, backend: &str, name: &Name) -> bool {
         self.0
@@ -138,13 +152,19 @@ impl State {
     /// truncating in place when two writes race. `File::create` truncates an
     /// existing file's inode, so without uniqueness, concurrent writers can
     /// corrupt the prune fence by interleaving writes to the same inode.
+    ///
+    /// The temp name is derived from `path`'s own filename (`temp_path_for`),
+    /// not the literal `"state.json"`: `--state <path>` lets a caller point
+    /// this at any filename, and a hardcoded stem would leave an orphan named
+    /// `state.json.tmp<pid>` in a directory whose real file is called
+    /// something else if a crash lands between the write and the rename.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_file_name(format!("state.json.tmp{}", std::process::id()));
+        let tmp = temp_path_for(path);
         {
             use std::io::Write;
             let mut f = std::fs::File::create(&tmp)
@@ -367,5 +387,30 @@ mod tests {
         assert!(s.owns(SCOOP, &Name::new("fzf")));
         assert!(s.owns(SCOOP, &Name::new("bat")));
         assert_eq!(s.owned_count(SCOOP), 2);
+    }
+
+    #[test]
+    fn the_temp_path_is_derived_from_the_real_target_not_hardcoded() {
+        // Task 12 adds `--state <path>`, so `path` is no longer always
+        // literally "state.json". Before this fix the temp name was the
+        // literal string `"state.json.tmp<pid>"` regardless of `path` --
+        // harmless while every caller happened to save to a file named
+        // state.json, wrong the moment one doesn't, and silent either way
+        // because `with_file_name` still lands in the right directory and
+        // the later rename still succeeds.
+        let a = temp_path_for(Path::new("/x/state.json"));
+        let b = temp_path_for(Path::new("/x/custom-name.json"));
+        assert!(
+            a.to_string_lossy().starts_with("/x/state.json.tmp"),
+            "{a:?}"
+        );
+        assert!(
+            b.to_string_lossy().starts_with("/x/custom-name.json.tmp"),
+            "{b:?}"
+        );
+        assert_ne!(
+            a, b,
+            "two different targets in the same directory must not share one temp name"
+        );
     }
 }

@@ -1,4 +1,5 @@
 use crate::apply::{Outcome, Preparation, Prepared};
+use crate::execute::{Execution, ItemResult};
 use crate::model::Name;
 use crate::plan::{Action, Plan, SkipReason};
 
@@ -106,12 +107,13 @@ pub fn render(plan: &Plan) -> String {
     out
 }
 
-/// Renders what `prepare` found out, in the shape the design specifies.
+/// Renders what `prepare` found out.
 ///
-/// `Nothing has been changed.` is printed unconditionally, even when
-/// `p.prepared` is empty: it is the promise of the whole phase, true whether
-/// the preparation found nothing to do, everything ready, or everything
-/// failed.
+/// It does **not** print "Nothing has been changed." — that sentence is
+/// `--prepare`'s promise, and in a full `apply` run this same table is
+/// printed before the mutations begin, which would make the run state the
+/// promise and then break it. `main.rs` prints the promise itself, in the
+/// `--prepare` branch, where it is true.
 pub fn render_preparation(p: &Preparation) -> String {
     let mut out = String::new();
     if p.prepared.is_empty() {
@@ -132,7 +134,50 @@ pub fn render_preparation(p: &Preparation) -> String {
             p.not_locked_count(),
         ));
     }
-    out.push_str("  Nothing has been changed.\n");
+    out
+}
+
+/// What the run actually did, according to the disk.
+///
+/// It never says "N upgraded". Every number here comes from a `verdict`
+/// against the filesystem, and the wording says so, because the tool this
+/// orchestrates reports success unconditionally.
+///
+/// A failed recovery-script write is surfaced here too, not just as the
+/// warning `execute` prints the moment it happens: that warning sits above
+/// however many minutes of scoop output follow it, and this table is what a
+/// user actually reads at the end of the run.
+pub fn render_execution(ex: &Execution) -> String {
+    let mut out = String::new();
+    for (name, r) in &ex.results {
+        let line = match r {
+            ItemResult::Done => format!("  done    scoop  {name:<13}verified on disk"),
+            ItemResult::Failed(why) => format!("  FAILED  scoop  {name:<13}{why}"),
+            ItemResult::Held(why) => format!("  held    scoop  {name:<13}{why}"),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for name in &ex.dropped_ghosts {
+        out.push_str(&format!(
+            "  note    scoop  {name:<13}ownership record dropped: nothing by that name is installed\n"
+        ));
+    }
+    out.push_str(&format!(
+        "\n  {} verified on disk, {} failed, {} held.\n",
+        ex.changed(),
+        ex.failed(),
+        ex.held()
+    ));
+    if ex.failed() > 0 {
+        out.push_str("  Some packages were changed and some were not. Look at the machine.\n");
+    }
+    if let Some(why) = &ex.recovery_write_failed {
+        out.push_str(&format!(
+            "  warning: the recovery script could not be written, so a crash from here on \
+             leaves no automatic way back to what was installed before this run: {why}\n"
+        ));
+    }
     out
 }
 
@@ -249,11 +294,15 @@ mod tests {
     // -- render_preparation ---------------------------------------------
 
     #[test]
-    fn nothing_has_been_changed_appears_even_for_an_empty_preparation() {
-        // The promise of the whole phase. True whether the run found nothing
-        // to do, everything ready, or everything failed -- so it must not be
-        // conditioned on the preparation having any content at all.
-        assert!(render_preparation(&Preparation::default()).contains("Nothing has been changed."));
+    fn the_preparation_table_does_not_promise_anything_about_mutations() {
+        // `apply` prints this same table before it starts changing things, so
+        // the promise cannot live here. main.rs prints it in the --prepare
+        // branch, and tests/cli.rs asserts it appears there.
+        let out = render_preparation(&Preparation::default());
+        assert!(
+            !out.contains("Nothing has been changed."),
+            "the promise belongs to --prepare's caller: {out}"
+        );
     }
 
     #[test]
@@ -334,7 +383,6 @@ mod tests {
   !       scoop  zellij       no lock entry -- run `dotpkg update`
 
   2 of 4 changes ready, 2 failed, 1 skipped, 1 not locked.
-  Nothing has been changed.
 ";
         assert_eq!(render_preparation(&p), expected);
     }
@@ -644,5 +692,53 @@ mod tests {
             }],
         };
         assert!(render(&plan).contains("dotpkg update"));
+    }
+
+    // -- render_execution --------------------------------------------------
+
+    #[test]
+    fn the_summary_never_claims_more_than_the_run_verified() {
+        let ex = Execution {
+            results: vec![
+                (Name::new("bat"), ItemResult::Done),
+                (
+                    Name::new("fzf"),
+                    ItemResult::Failed("install did not happen".into()),
+                ),
+                (
+                    Name::new("kanata"),
+                    ItemResult::Held("started running".into()),
+                ),
+            ],
+            dropped_ghosts: vec![Name::new("stale")],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        assert!(out.contains("1 verified on disk"), "{out}");
+        assert!(out.contains("1 failed"), "{out}");
+        assert!(out.contains("1 held"), "{out}");
+        assert!(out.contains("fzf"), "name what failed: {out}");
+        assert!(
+            out.contains("stale"),
+            "say which ownership records were dropped: {out}"
+        );
+        assert!(
+            !out.contains("Nothing has been changed."),
+            "that promise belongs to --prepare and must not appear after a mutation: {out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_recovery_write_is_surfaced_not_silently_dropped() {
+        // `execute` already prints a warning the moment `write_recovery`
+        // fails, above however many minutes of scoop output follow -- but
+        // nothing read `Execution.recovery_write_failed` back afterwards,
+        // which made that warning as good as gone by the time the run ends.
+        let ex = Execution {
+            recovery_write_failed: Some("permission denied".into()),
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        assert!(out.contains("permission denied"), "{out}");
     }
 }

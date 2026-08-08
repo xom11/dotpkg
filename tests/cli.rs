@@ -1,11 +1,17 @@
-//! The three safety behaviours of `apply` that only exist in `main.rs`, and
-//! that nothing else in the suite can reach.
+//! Safety behaviours of `apply` that only exist in `main.rs`, and that
+//! nothing else in the suite can reach: the mass-prune guard running before
+//! the machine is scanned, `--prepare`'s "Nothing has been changed." promise,
+//! the confirmation prompt, the `--allow-prune` gate, and the rule that a
+//! removal only ever runs when the whole preparation came back ok.
 //!
-//! Measured before this file existed: deleting the `--prepare` guard, the
-//! mass-prune guard call, and the `exit(1)` from `main.rs` -- all three, at
-//! once -- left the suite at 127/127 green. "`apply` without `--prepare`
-//! changes nothing" is the single promise that makes this branch safe to merge
-//! before the executor exists, and Phase 2b-2 rewrites that exact `match` arm.
+//! Phase 2b-1 also pinned a hard, unconditional refusal for `apply` without
+//! `--prepare` here -- deliberate, because the executor did not exist yet.
+//! Phase 2b-2 (this file, now) replaces that exact `match` arm with a real
+//! executor, so that guard and the test that pinned it are both gone; what
+//! replaced it is pinned by the tests below instead, most directly by
+//! `apply_with_no_answer_available_refuses_and_changes_nothing`, which runs
+//! the same bare `apply` that guard used to refuse outright and checks it
+//! now reaches the confirmation prompt and refuses *there*.
 //!
 //! The binary is invoked for real via `CARGO_BIN_EXE_dotpkg`, which Cargo sets
 //! for integration tests, so no new dependency is needed. Every run is
@@ -85,6 +91,65 @@ impl Fixture {
     }
 }
 
+impl Fixture {
+    /// A real one-commit git bucket plus a `pkg.lock` naming its real SHA, so
+    /// a run can get past `lock_coherence_guard` and reach staging.
+    fn write_lock_and_bucket_for(&self, app: &str, version: &str) {
+        let dir = self.scoop.path().join("buckets").join("main");
+        fs::create_dir_all(dir.join("bucket")).unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+            text(&out.stdout)
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(
+            dir.join("bucket").join(format!("{app}.json")),
+            format!(r#"{{"version":"{version}","bin":"tool.exe"}}"#),
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ]);
+        let sha = git(&["rev-parse", "HEAD"]).trim().to_string();
+        fs::write(
+            self.work.path().join("pkg.lock"),
+            format!(
+                "[scoop.{app}]\nbucket = \"main\"\ncommit = \"{sha}\"\nversion = \"{version}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// An installed app in the shape `Scoop::scan` reads.
+    fn install_app(&self, app: &str, version: &str) {
+        let cur = self.scoop.path().join("apps").join(app).join("current");
+        fs::create_dir_all(&cur).unwrap();
+        fs::write(
+            cur.join("manifest.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            cur.join("install.json"),
+            r#"{"bucket":"main","architecture":"arm64"}"#,
+        )
+        .unwrap();
+    }
+}
+
 /// Every path under the scoop root and the state directory, each paired with
 /// a hash of its content, sorted. An install, an uninstall, or an in-place
 /// rewrite of an existing file all show up as a change in this list.
@@ -157,45 +222,6 @@ fn the_snapshot_notices_a_file_whose_content_changed_under_the_same_name() {
 }
 
 #[test]
-fn apply_without_prepare_refuses_and_names_the_phase_that_will_add_the_executor() {
-    // The promise the whole branch rests on. Without this guard, `apply`
-    // would fall through to the prepare path and behave as `--prepare`
-    // without being asked to -- doing work the user did not request, and
-    // reporting a plan as though it had been carried out.
-    let f = Fixture::new(
-        "[scoop]\npackages = [\"fzf\"]\n",
-        r#"{"scoop":{"fzf":"installed"}}"#,
-    );
-    let before = f.snapshot();
-
-    let out = f.run(&["apply"]);
-    let stderr = text(&out.stderr);
-    let stdout = text(&out.stdout);
-
-    assert!(
-        !out.status.success(),
-        "apply with no executor must fail, not quietly succeed: {stdout}"
-    );
-    assert!(
-        stderr.contains("2b-2"),
-        "say which phase brings the executor: {stderr}"
-    );
-    assert!(
-        stderr.contains("--prepare"),
-        "say what the user can do instead: {stderr}"
-    );
-    assert!(
-        !stdout.contains("Nothing has been changed."),
-        "it must stop before the preparation runs at all, not report on one: {stdout}"
-    );
-    assert!(
-        !stderr.contains("ghost"),
-        "it must refuse before scanning the machine: {stderr}"
-    );
-    f.assert_nothing_was_touched(before);
-}
-
-#[test]
 fn an_empty_config_is_refused_before_the_machine_is_even_scanned() {
     // Ordering is the property, not just the refusal: the guard exists
     // because a truncated pkg.toml turns every owned package into a prune,
@@ -256,4 +282,188 @@ fn a_preparation_that_could_not_be_completed_exits_non_zero_and_says_nothing_cha
         "the sentinel must be reachable, or the two negative assertions above prove nothing: {stderr}"
     );
     f.assert_nothing_was_touched(before);
+}
+
+// -- the executor: the confirmation prompt, --allow-prune, and the removals
+// gate -----------------------------------------------------------------
+//
+// Read this constraint first, because it decides every fixture below: on
+// macOS there is no scoop binary, so any action needing an artifact fails at
+// `download` and makes `preparation.is_ok()` false. A run that reaches the
+// prompt at all must therefore have a plan containing only prunes and
+// reports. Any fixture with an `Install` in it exits at the "could not be
+// prepared" branch instead -- a different code path, and a test that does
+// not know which one it exercised proves nothing.
+
+#[test]
+fn apply_with_no_answer_available_refuses_and_changes_nothing() {
+    // The fixture is built so the plan is exactly one PRUNE and nothing else:
+    // fzf is declared, locked, and already at the locked version, so it
+    // produces no action; aichat is owned, installed and undeclared. That is
+    // the only shape whose preparation is `ok` on a machine with no scoop, and
+    // therefore the only shape that reaches the prompt.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+    let before = f.snapshot();
+
+    // `Command::output` gives the child an immediately closed stdin, which is
+    // exactly what the medium-integrity scheduled task on a14 produces.
+    let out = f.run(&["apply"]);
+    let stderr = text(&out.stderr);
+    let stdout = text(&out.stdout);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a refused run exits 2; stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--yes"),
+        "say what to pass instead: {stderr}"
+    );
+    assert!(
+        !stderr.contains("scoop.cmd") && !stdout.contains("scoop.cmd"),
+        "it must refuse before running scoop at all: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn the_scoop_cmd_sentinel_is_reachable_or_the_assertion_above_proves_nothing() {
+    // Production prints `cannot run <root>/shims/scoop.cmd` only once it has
+    // actually tried to run scoop. Without this sibling, the negative
+    // assertion above stays green even if the whole executor is deleted.
+    //
+    // Here fzf is declared and locked at 1.0.0 but NOT installed, so the plan
+    // is an Install, prepare stages it for real against real git, and the
+    // download is what fails.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        "{}",
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+
+    let out = f.run(&["apply", "--prepare"]);
+    let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        all.contains("scoop.cmd"),
+        "the sentinel must be reachable: {all}"
+    );
+}
+
+#[test]
+fn yes_alone_does_not_authorise_a_prune() {
+    // Same one-prune fixture as the first test, so this exercises the
+    // --allow-prune gate and not the not-ok-preparation gate.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--yes"]);
+    let stderr = text(&out.stderr);
+
+    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("--allow-prune"), "{stderr}");
+    assert!(
+        !stderr.contains("could not be prepared"),
+        "this must fail on the prune gate, not on an unprepared package: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn a_prune_authorised_by_both_flags_runs_and_records_the_release() {
+    // The positive control for the two tests above: without it, a main.rs
+    // that refuses every run passes both of them. This is also the only test
+    // in the suite that drives a real mutation end to end, and it can only be
+    // a prune -- a prune is the one step that needs no scoop binary to be
+    // *planned*, though it still needs one to be *performed*, so the run
+    // fails at the uninstall and the assertion is that it failed HONESTLY:
+    // exit 2, aichat still on disk, still owned.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+
+    let out = f.run(&["apply", "--yes", "--allow-prune"]);
+    let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+
+    assert!(all.contains("scoop.cmd"), "it must have tried: {all}");
+    assert_eq!(out.status.code(), Some(2), "nothing changed, so 2: {all}");
+    assert!(
+        f.scoop.path().join("apps").join("aichat").exists(),
+        "a failed uninstall must leave the app alone"
+    );
+    let state: String =
+        fs::read_to_string(f.local.path().join("dotpkg").join("state.json")).unwrap();
+    assert!(
+        state.contains("aichat"),
+        "and must not release an app that is still installed: {state}"
+    );
+}
+
+#[test]
+fn keep_going_holds_a_ready_prune_back_when_another_package_could_not_be_prepared() {
+    // Negative control 2's positive complement: a plan with one Failed
+    // install (fzf, staged for real but download fails -- there is no scoop
+    // binary here) and one ready prune (aichat, owned and installed but
+    // undeclared). `--keep-going` lets the run continue past the failed
+    // install instead of refusing outright, but must NOT also let the prune
+    // through -- that gate answers to `preparation.is_ok()` alone, and
+    // nothing else opens it.
+    //
+    // Deleting `gate_removals`'s guard (or the `main.rs` call to it) makes
+    // this test go red: the "held" note below stops appearing, because the
+    // prune would no longer be stripped out before the confirmation
+    // question is built.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+    // No `assert_nothing_was_touched` here: unlike the two prune-only tests
+    // above, fzf's Install action makes `prepare` stage a real manifest under
+    // `%LOCALAPPDATA%\dotpkg\manifests`, which is an intended, harmless write
+    // to the staging area -- not evidence anything installed changed.
+    let scoop_before = std::fs::read_dir(f.scoop.path().join("apps"))
+        .unwrap()
+        .count();
+
+    let out = f.run(&["apply", "--keep-going"]);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "unreadable stdin still refuses the run once it reaches the prompt: {stderr}"
+    );
+    assert!(
+        stderr.contains("aichat") && stderr.contains("held"),
+        "say which prune was held back and that it was held: {stderr}"
+    );
+    assert!(
+        f.scoop.path().join("apps").join("aichat").exists(),
+        "the held prune must not have been removed"
+    );
+    assert_eq!(
+        std::fs::read_dir(f.scoop.path().join("apps"))
+            .unwrap()
+            .count(),
+        scoop_before,
+        "nothing under apps/ may change while the confirmation prompt is still unanswered"
+    );
 }

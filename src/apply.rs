@@ -1,4 +1,5 @@
 use crate::backend::scoop::Scoop;
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::execute::Step;
 use crate::lock::Lock;
@@ -7,6 +8,7 @@ use crate::model::{Name, SCOOP};
 use crate::plan::{Action, Plan, SkipReason};
 use crate::state::State;
 use anyhow::Result;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 /// Refuse a plan built from a config that declares nothing while dotpkg owns
@@ -444,6 +446,104 @@ fn action_name(action: &Action) -> Name {
         | Action::Unmanaged { name, .. }
         | Action::ArchDrift { name, .. } => name.clone(),
     }
+}
+
+/// Ask, and treat anything that is not an explicit yes as a no.
+///
+/// The question goes to `err` so that `apply | tee` still shows it while the
+/// plan and preparation tables stay on stdout.
+///
+/// `Ok(0)` from `read_line` is what a child process with no console gets — the
+/// medium-integrity scheduled task the dogfood runs under — and it means
+/// **no**, loudly, naming `--yes`. `is_terminal()` is deliberately not
+/// consulted: whether a terminal is attached is not the same question as
+/// whether the user agreed.
+pub fn confirm(question: &str, input: &mut dyn BufRead, err: &mut dyn Write) -> Result<bool> {
+    write!(err, "{question}")?;
+    err.flush()?;
+    let mut line = String::new();
+    match input.read_line(&mut line) {
+        Ok(0) => {
+            writeln!(
+                err,
+                "\napply needs an answer and stdin is not readable. Pass --yes if you \
+                 have read the plan above."
+            )?;
+            Ok(false)
+        }
+        Ok(_) => {
+            let a = line.trim().to_ascii_lowercase();
+            Ok(a == "y" || a == "yes")
+        }
+        Err(e) => {
+            writeln!(
+                err,
+                "\ncannot read an answer ({e}); treating that as no. Pass --yes."
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+/// Everything a command needs, loaded once.
+///
+/// `main.rs` used to carry two inline copies of this sequence and `tests/`
+/// reached neither.
+pub struct Driver {
+    pub declared: Config,
+    pub locked: Lock,
+    pub state: State,
+    pub scoop: Scoop,
+    pub scan: crate::backend::Scan,
+    pub running: crate::model::Running,
+}
+
+pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<Driver> {
+    let declared = crate::config::load(config)?;
+    let locked = crate::lock::load_or_empty(lock)?;
+    let state = State::load_or_empty(state_path)?;
+    let scoop = Scoop::discover();
+    let scan = scoop.scan()?;
+    let procs = crate::sys::running_processes();
+    let running = scoop.running_set(&procs);
+    Ok(Driver {
+        declared,
+        locked,
+        state,
+        scoop,
+        scan,
+        running,
+    })
+}
+
+/// Split prepared steps into what may run and which removals are held back.
+///
+/// Removals are gated on the WHOLE preparation being ok, and no flag opens
+/// this gate by itself -- not `--yes`, not `--keep-going`. `--keep-going`
+/// only lets a run continue past packages that could not be prepared; it must
+/// never also let a prune through on the strength of that same flag, because
+/// every newly typed package name is `NotLocked` until `update` exists, which
+/// makes "installs nothing, deletes something" the one shape reachable today
+/// with a not-ok preparation.
+///
+/// Kept as its own function, rather than inline in `main.rs`, because this is
+/// the one decision in the whole driver that a deleted line would make
+/// silently permissive -- and a silently permissive prune is exactly the
+/// mistake this project's tests exist to catch before a machine does.
+pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<Name>) {
+    if preparation_ok {
+        return (steps, Vec::new());
+    }
+    let mut kept = Vec::with_capacity(steps.len());
+    let mut held = Vec::new();
+    for step in steps {
+        if matches!(step, Step::Remove { .. }) {
+            held.push(step.app().clone());
+        } else {
+            kept.push(step);
+        }
+    }
+    (kept, held)
 }
 
 #[cfg(test)]
@@ -1386,5 +1486,127 @@ mod tests {
         let (steps, unusable) = plan_to_steps(&prep);
         assert!(steps.is_empty(), "{steps:?}");
         assert!(unusable.is_empty(), "{unusable:?}");
+    }
+
+    // -- confirm() ---------------------------------------------------------
+
+    #[test]
+    fn no_answer_at_all_means_no_and_says_which_flag_would_have_helped() {
+        // A scheduled task with no console gives a child process an immediately
+        // closed stdin: read_line returns Ok(0). That is the exact shape the
+        // a14 dogfood runs under, and it must never read as consent.
+        let mut empty: &[u8] = b"";
+        let mut err = Vec::new();
+        let answered = confirm("Continue? [y/N] ", &mut empty, &mut err).unwrap();
+        assert!(!answered, "an empty stdin must not be a yes");
+        let text = String::from_utf8(err).unwrap();
+        assert!(text.contains("--yes"), "say what to pass instead: {text}");
+    }
+
+    #[test]
+    fn only_an_explicit_yes_is_a_yes() {
+        for (input, expected) in [
+            ("y\n", true),
+            ("Y\n", true),
+            ("yes\n", true),
+            ("\n", false),
+            ("n\n", false),
+            ("no\n", false),
+            ("Yes please\n", false),
+            ("  y  \n", true),
+        ] {
+            let mut r = input.as_bytes();
+            let mut err = Vec::new();
+            assert_eq!(
+                confirm("q", &mut r, &mut err).unwrap(),
+                expected,
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_question_goes_to_stderr_so_a_piped_run_still_shows_it() {
+        let mut r: &[u8] = b"y\n";
+        let mut err = Vec::new();
+        confirm("Continue? [y/N] ", &mut r, &mut err).unwrap();
+        assert!(String::from_utf8(err).unwrap().contains("Continue?"));
+    }
+
+    #[test]
+    fn a_read_error_is_also_treated_as_no() {
+        // `Ok(0)` (no console at all) has its own tests above; this is the
+        // OTHER way `read_line` can fail to produce an answer -- invalid
+        // UTF-8 on the pipe -- and it must refuse the same way, not fall
+        // through to whatever the half-filled `line` buffer happens to hold.
+        struct Broken(bool);
+        impl std::io::Read for Broken {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = 0xFF; // not valid UTF-8 on its own
+                self.0 = true;
+                Ok(1)
+            }
+        }
+        let mut r = std::io::BufReader::new(Broken(false));
+        let mut err = Vec::new();
+        let answered = confirm("q", &mut r, &mut err).unwrap();
+        assert!(!answered, "a read error must not be a yes");
+        let text = String::from_utf8(err).unwrap();
+        assert!(text.contains("--yes"), "say what to pass instead: {text}");
+    }
+
+    // -- gate_removals() -----------------------------------------------
+    //
+    // This is the whole halt-versus-proceed decision for a removal: no flag
+    // -- not `--yes`, not `--keep-going` -- may open this gate on its own.
+
+    #[test]
+    fn gate_removals_holds_every_prune_back_when_the_preparation_is_not_ok() {
+        let steps = vec![
+            Step::Install {
+                app: Name::new("fzf"),
+                staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                arch: None,
+            },
+            Step::Remove {
+                app: Name::new("aichat"),
+            },
+            Step::Remove {
+                app: Name::new("kanata"),
+            },
+        ];
+        let (kept, held) = gate_removals(steps, false);
+        assert_eq!(
+            kept,
+            vec![Step::Install {
+                app: Name::new("fzf"),
+                staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                arch: None,
+            }],
+            "a non-removal step must still run"
+        );
+        assert_eq!(held, vec![Name::new("aichat"), Name::new("kanata")]);
+    }
+
+    #[test]
+    fn gate_removals_lets_every_step_through_when_the_preparation_is_ok() {
+        // The positive control: without it, a version that always holds
+        // everything back would pass the test above too.
+        let steps = vec![
+            Step::Remove {
+                app: Name::new("aichat"),
+            },
+            Step::Install {
+                app: Name::new("fzf"),
+                staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                arch: None,
+            },
+        ];
+        let (kept, held) = gate_removals(steps.clone(), true);
+        assert_eq!(kept, steps);
+        assert!(held.is_empty());
     }
 }

@@ -131,7 +131,9 @@ pub fn render_preparation(p: &Preparation) -> String {
 fn prepared_line(item: &Prepared) -> String {
     let (backend, name) = action_backend_name(&item.action);
     let (marker, rest) = match &item.outcome {
-        Outcome::Ready { .. } => ("ready", ready_rest(&item.action)),
+        Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove => {
+            ("ready", ready_rest(&item.action))
+        }
         Outcome::Failed { why } => ("FAILED", why.clone()),
         Outcome::Skipped { why } => ("!", why.clone()),
         Outcome::NotLocked => ("!", "no lock entry -- run `dotpkg update`".to_string()),
@@ -154,10 +156,11 @@ fn action_backend_name(action: &Action) -> (&str, &Name) {
     }
 }
 
-/// The right-hand side of a `ready` line. `classify` only ever produces
-/// `Outcome::Ready` for these four action shapes (the three `NeedsArtifact`
-/// kinds, plus `Prune` by definition), so the fallback below is unreachable
-/// in practice; it stays total rather than panicking if that ever changes.
+/// The right-hand side of a `ready` line. `classify` only ever produces a
+/// ready outcome for these four action shapes (`ReadyToFetch` for the three
+/// `NeedsArtifact` kinds, `ReadyToRemove` for `Prune`), so the fallback below
+/// is unreachable in practice; it stays total rather than panicking if that
+/// ever changes.
 fn ready_rest(action: &Action) -> String {
     match action {
         Action::Install { version, .. } => format!("{version:<18}(install)"),
@@ -197,6 +200,16 @@ mod tests {
     use crate::apply::{Outcome, Preparation, Prepared};
     use crate::model::{SCOOP, WINGET};
 
+    /// A fetched-and-verified outcome, with the staged path `prepare` would
+    /// really have produced. `ReadyToFetch` carries a `PathBuf` rather than an
+    /// `Option`, so a test can no longer describe an install as having no
+    /// manifest at all.
+    fn ready_to_fetch(app: &str, version: &str) -> Outcome {
+        Outcome::ReadyToFetch {
+            manifest: std::path::PathBuf::from(format!("/stage/{app}/{version}/{app}.json")),
+        }
+    }
+
     #[test]
     fn an_empty_plan_says_so_rather_than_printing_nothing() {
         assert!(render(&Plan::default()).contains("nothing to do"));
@@ -222,7 +235,7 @@ mod tests {
                         name: "ripgrep".into(),
                         version: "14.1.0".into(),
                     },
-                    outcome: Outcome::Ready { manifest: None },
+                    outcome: ready_to_fetch("ripgrep", "14.1.0"),
                 },
                 Prepared {
                     action: Action::Upgrade {
@@ -231,7 +244,7 @@ mod tests {
                         from: "0.25.0".into(),
                         to: "0.26.1".into(),
                     },
-                    outcome: Outcome::Ready { manifest: None },
+                    outcome: ready_to_fetch("bat", "0.26.1"),
                 },
                 Prepared {
                     action: Action::Install {
@@ -300,7 +313,7 @@ mod tests {
                     name: "aichat".into(),
                     version: "0.30.0".into(),
                 },
-                outcome: Outcome::Ready { manifest: None },
+                outcome: Outcome::ReadyToRemove,
             }],
         };
         let out = render_preparation(&p);
@@ -319,7 +332,7 @@ mod tests {
                     from: "0.74.2".into(),
                     to: "0.74.1".into(),
                 },
-                outcome: Outcome::Ready { manifest: None },
+                outcome: ready_to_fetch("fzf", "0.74.1"),
             }],
         };
         let out = render_preparation(&p);
@@ -337,7 +350,7 @@ mod tests {
                         name: "ripgrep".into(),
                         version: "14.1.0".into(),
                     },
-                    outcome: Outcome::Ready { manifest: None },
+                    outcome: ready_to_fetch("ripgrep", "14.1.0"),
                 },
                 Prepared {
                     action: Action::Unmanaged {

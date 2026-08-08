@@ -23,6 +23,13 @@ use std::path::{Path, PathBuf};
 /// Deliberately no ratio or count threshold. A user who genuinely deletes half
 /// their `pkg.toml` is shown the plan and asked, which is the protection that
 /// already exists.
+///
+/// TODO(phase-4-winget): scoop-only, both in what it reads and in what it
+/// counts. A `pkg.toml` emptied of its `[winget]` section while dotpkg owns
+/// winget packages passes this guard untouched. Deliberately left until the
+/// winget backend exists — there is nothing that can prune a winget package
+/// today, so widening it now would be an untested guard over an unimplemented
+/// path — but it must be widened in the same change that adds one.
 pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
     if !declared.scoop.packages.is_empty() {
         return Ok(());
@@ -95,10 +102,19 @@ pub fn classify(action: &Action) -> Intent {
 /// phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Staged, fetched and hash-verified -- or, for a `Prune`, ready by
-    /// definition, since there is nothing to fetch. `manifest` is `None`
-    /// only in that second case.
-    Ready { manifest: Option<PathBuf> },
+    /// Staged, fetched and hash-verified. The manifest is on disk at this
+    /// path and an executor installs from it.
+    ///
+    /// Split from `ReadyToRemove` rather than carrying an
+    /// `Option<PathBuf>`: as one variant, "no manifest" meant "this is a
+    /// removal" only for values `prepare()` itself produced, and any other
+    /// construction -- a test, a future caller -- could say `Ready { manifest:
+    /// None }` about an `Install` without the compiler objecting. An executor
+    /// branching on `manifest.is_none()` to decide whether to *uninstall*
+    /// would then be right by luck.
+    ReadyToFetch { manifest: PathBuf },
+    /// A removal: ready by definition, because there is nothing to fetch.
+    ReadyToRemove,
     /// A per-package failure. Reported; never stops the run.
     Failed { why: String },
     /// Benign: the user can fix this (usually by closing an app) and run
@@ -118,16 +134,34 @@ pub struct Prepared {
     pub outcome: Outcome,
 }
 
+/// The result of one `apply --prepare` run, whole.
+///
+/// **What `is_ok() == false` obliges an executor to do:** treat the run as
+/// refused and perform *none* of its actions -- not the ready ones either.
+/// That is what Phase 2b-1 ships (`main` prints this and exits 1 without an
+/// executor existing at all), and the conservative reading of a design that
+/// does not say. Phase 2b-2 may decide to narrow it -- "install the ready
+/// ones, report the rest" is a defensible product choice -- but it is a
+/// decision that must be written down and tested there, not inherited by
+/// accident from this type's shape.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Preparation {
     pub prepared: Vec<Prepared>,
 }
 
 impl Preparation {
+    /// Both ready shapes: an install with its manifest fetched, and a removal
+    /// that needed nothing fetched. Counted together because the user-facing
+    /// number is "how much of this plan can go ahead".
     pub fn ready_count(&self) -> usize {
         self.prepared
             .iter()
-            .filter(|p| matches!(p.outcome, Outcome::Ready { .. }))
+            .filter(|p| {
+                matches!(
+                    p.outcome,
+                    Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove
+                )
+            })
             .count()
     }
 
@@ -177,7 +211,7 @@ pub fn prepare(plan: &Plan, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> 
             action: action.clone(),
             outcome: match classify(action) {
                 Intent::NeedsArtifact => stage_and_fetch(action, lock, scoop, staging_root),
-                Intent::NoArtifactNeeded => Outcome::Ready { manifest: None },
+                Intent::NoArtifactNeeded => Outcome::ReadyToRemove,
                 Intent::Skip(why) => Outcome::Skipped { why },
                 Intent::NotLocked => Outcome::NotLocked,
                 Intent::Report => Outcome::Report,
@@ -227,9 +261,7 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
         Ok(manifest)
     });
     match staged {
-        Ok(manifest) => Outcome::Ready {
-            manifest: Some(manifest),
-        },
+        Ok(manifest) => Outcome::ReadyToFetch { manifest },
         Err(e) => Outcome::Failed {
             why: format!("{e:#}"),
         },
@@ -344,7 +376,9 @@ mod tests {
                     name: Name::new("a"),
                     version: "1".into(),
                 },
-                outcome: Outcome::Ready { manifest: None },
+                outcome: Outcome::ReadyToFetch {
+                    manifest: PathBuf::from("/stage/a/1/a.json"),
+                },
             }],
         };
         assert!(ok.is_ok());
@@ -640,8 +674,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_treats_a_prune_as_ready_with_no_manifest() {
-        // Nothing to fetch for a removal -- 2b-2 does the uninstalling.
+    fn prepare_treats_a_prune_as_ready_to_remove() {
+        // Nothing to fetch for a removal -- 2b-2 does the uninstalling, and
+        // the variant itself is what tells it so.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -655,7 +690,7 @@ mod tests {
         };
 
         let prep = prepare(&plan, &lock, &scoop, stage_dir.path());
-        assert_eq!(prep.prepared[0].outcome, Outcome::Ready { manifest: None });
+        assert_eq!(prep.prepared[0].outcome, Outcome::ReadyToRemove);
         assert!(prep.is_ok());
     }
 

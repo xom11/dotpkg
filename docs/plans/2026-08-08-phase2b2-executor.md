@@ -3394,6 +3394,16 @@ the spec fixes:
             dotpkg::apply::lock_coherence_guard(&locked_only)?;
 
             let mut d = dotpkg::apply::load_everything(&config, &lock, &state_path)?;
+            // Signatures below were changed by Tasks 10 and 11 after this
+            // snippet was first written. Use these, not the older shapes:
+            //   prepare(&plan, &locked, &scoop, &staging_root, &declared)
+            //   execute(root, steps, &mutator, &mut state,
+            //           &|| scoop.running_set(&sys::running_processes()),
+            //           &opts) -> Result<Execution, String>
+            // `execute` returning Err means the root is not a scoop install
+            // and NOTHING was attempted -- map it to exit 2.
+            // `Execution.recovery_write_failed: Option<String>` must be
+            // surfaced; a safety net that failed silently is no safety net.
             for w in &d.scan.warnings {
                 eprintln!("warning: scoop: {w}");
             }
@@ -3410,7 +3420,7 @@ the spec fixes:
 
             let staging_root = dotpkg::apply::default_staging_root();
             let preparation =
-                dotpkg::apply::prepare(&plan, &d.locked, &d.scoop, &staging_root);
+                dotpkg::apply::prepare(&plan, &d.locked, &d.scoop, &staging_root, &d.declared);
             print!("{}", dotpkg::render::render_preparation(&preparation));
             std::io::stdout().flush().ok();
 
@@ -3470,14 +3480,21 @@ the spec fixes:
             let opts = dotpkg::execute::ExecOptions {
                 recovery_path: staging_root.parent().map(|p| p.join("recover.cmd")),
             };
-            let mut ex = dotpkg::execute::execute(
+            let sample = || d.scoop.running_set(&dotpkg::sys::running_processes());
+            let mut ex = match dotpkg::execute::execute(
                 d.scoop.root(),
                 steps,
                 &d.scoop,
                 &mut d.state,
-                &d.running,
+                &sample,
                 &opts,
-            );
+            ) {
+                Ok(ex) => ex,
+                Err(why) => {
+                    eprintln!("{why}");
+                    std::process::exit(2);
+                }
+            };
 
             // Report only what a fresh scan confirms.
             let after = <Scoop as dotpkg::backend::Backend>::scan(&d.scoop)?;

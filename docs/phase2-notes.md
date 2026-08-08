@@ -33,6 +33,17 @@ The data needed is already there: scoop manifests carry a `bin` field, and
 and becomes upgrading a running application — the exact scenario the spec's
 error-handling table exists to prevent.
 
+> **Correction, 2026-08-08.** The sentence about `kanata` matching is wrong, and
+> it is wrong in the dangerous direction. Measured from the real manifest on
+> a14: `kanata` declares no top-level `bin`, and its architecture branches name
+> `kanata_windows_tty_winIOv2_arm64.exe` with only the *shim alias* called
+> `Kanata`. Whether the current comparison catches a running kanata depends on
+> how it was launched — through the shim it matches, from the Start Menu
+> shortcut (a GUI variant absent from `bin`) or a scheduled task it does not.
+> Two further gaps found at the same time: `Prune` never consults `running` at
+> all, and `nodejs` / `rustup` name no executable in their manifests, so `bin`
+> alone cannot cover them. See `docs/specs/2026-08-08-phase2a-design.md`.
+
 **Architecture drift is parsed but unhandled.** `PkgOpts.arch` is read from
 `pkg.toml` and ignored by the planner. Correct for a read-only phase, since
 acting on drift means a reinstall. The Phase 2 plan should open with it.

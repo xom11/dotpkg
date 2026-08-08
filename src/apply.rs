@@ -71,10 +71,17 @@ pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
                 "pkg.lock [scoop.{name}] holds a winget pin. Run `dotpkg update` to rewrite it."
             );
         };
-        crate::backend::scoop::ensure_plain_component(name, "bucket", bucket)
-            .and_then(|()| crate::backend::scoop::ensure_plain_component(name, "version", version))
+        crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "bucket", bucket)
             .and_then(|()| {
-                crate::backend::scoop::ensure_plain_component(name, "package name", name.key())
+                crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)
+            })
+            .and_then(|()| {
+                crate::backend::scoop::ensure_plain_component(
+                    name,
+                    "pkg.lock",
+                    "package name",
+                    name.key(),
+                )
             })
             .and_then(|()| crate::backend::scoop::ensure_commit_hash(name, commit))
             .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;

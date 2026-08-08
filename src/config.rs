@@ -33,15 +33,32 @@ fn parse_buckets(raw: Vec<String>) -> Result<Vec<BucketDecl>> {
     let mut seen: BTreeMap<Name, String> = BTreeMap::new();
     let mut out = Vec::with_capacity(raw.len());
     for entry in raw {
+        // Trimmed on both sides of `=`: TOML gives no reason to write
+        // `"xom11 = https://…"` over `"xom11=https://…"`, but a user who does
+        // must not get silent corruption in return -- an untrimmed name never
+        // matches a lock's plain spelling in `bucket_is_declared`, or the real
+        // `buckets/<name>` directory, and an untrimmed URL is handed to `git`
+        // verbatim.
         let (name_str, url) = match entry.split_once('=') {
-            Some((n, u)) => (n.to_string(), Some(u.to_string())),
-            None => (entry.clone(), None),
+            Some((n, u)) => (n.trim().to_string(), Some(u.trim().to_string())),
+            None => (entry.trim().to_string(), None),
         };
         let name = Name::new(name_str.clone());
         // The bucket name becomes `$SCOOP/buckets/<name>` and a git argument.
-        crate::backend::scoop::ensure_plain_component(&name, "bucket name", name.key())?;
+        crate::backend::scoop::ensure_plain_component(
+            &name,
+            "pkg.toml [scoop] buckets",
+            "bucket name",
+            name.key(),
+        )?;
         if let Some(u) = &url {
             anyhow::ensure!(
+                // Deliberately loose: `contains('@')` accepts an `@` anywhere,
+                // not only `user@host:`. SSH remotes are legitimately varied
+                // (custom ports as `ssh://git@host:2222/…`, aliases from
+                // `~/.ssh/config`), and this is the cheap check that lets all
+                // of them through rather than a strict grammar that would
+                // reject a real one.
                 u.starts_with("https://") || u.starts_with("http://") || u.contains('@'),
                 "[scoop] buckets: {u:?} does not look like a git remote"
             );
@@ -308,5 +325,42 @@ packages = ["Git.Git"]
             parse("[scoop]\nbuckets = [\"main\", \"MAIN=https://x.invalid/y\"]\n").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("main") && msg.contains("MAIN"), "{msg}");
+    }
+
+    #[test]
+    fn whitespace_around_the_equals_sign_is_trimmed_from_both_sides() {
+        // Measured before the trim: "xom11 = https://…" was wrongly REJECTED
+        // (the leading space made starts_with("https://") false), and
+        // "xom11 = git@…" was wrongly ACCEPTED with a trailing space baked
+        // into the name and a leading space baked into the url -- silent
+        // corruption, worse than either a clean accept or a clean refuse.
+        let cfg = parse("[scoop]\nbuckets = [\"xom11 = https://example.invalid/b\"]\n").unwrap();
+        assert_eq!(cfg.scoop.buckets[0].name.to_string(), "xom11");
+        assert_eq!(
+            cfg.scoop.buckets[0].url.as_deref(),
+            Some("https://example.invalid/b")
+        );
+
+        let cfg = parse("[scoop]\nbuckets = [\"xom11 = git@example.invalid:b.git\"]\n").unwrap();
+        assert_eq!(cfg.scoop.buckets[0].name.to_string(), "xom11");
+        assert_eq!(
+            cfg.scoop.buckets[0].url.as_deref(),
+            Some("git@example.invalid:b.git")
+        );
+    }
+
+    #[test]
+    fn a_bad_bucket_name_is_blamed_on_pkg_toml_not_on_a_lock_that_is_not_involved() {
+        // ensure_plain_component's message used to hardcode "the lock's",
+        // which is simply false here -- there is no lock, and the offending
+        // text is sitting in pkg.toml.
+        let err =
+            parse("[scoop]\nbuckets = [\"../evil=https://example.invalid/x\"]\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pkg.toml"), "name the actual file: {msg}");
+        assert!(
+            !msg.contains("lock"),
+            "must not send the reader to the wrong file: {msg}"
+        );
     }
 }

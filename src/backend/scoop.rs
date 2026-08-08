@@ -298,13 +298,15 @@ impl Backend for Scoop {
     }
 }
 
-/// Refuse a lock-controlled string that is about to become one path component.
+/// Refuse a string that is about to become one path component.
 ///
 /// `stage()` composes three of them into filesystem paths: `$SCOOP/buckets/
 /// <bucket>` and `<staging_root>/<app>/<version>`. All three arrive from
 /// `pkg.lock`, and Phase 3's `update` fills that file in verbatim from a scoop
 /// bucket — an arbitrary third-party git repository. So these are hostile
 /// input in the ordinary case, not only under a hand-edited lock.
+/// `parse_buckets` reuses this same check for a bucket name straight out of
+/// `pkg.toml`, before any lock is even involved.
 ///
 /// `..` is the obvious escape, not the dangerous one. **`Path::join` with an
 /// absolute component discards everything to its left**, so a single
@@ -316,7 +318,12 @@ impl Backend for Scoop {
 /// blocklist of the escapes someone thought of. A leading `-` is refused for a
 /// different reason: these strings are also handed to `git` and to `scoop`,
 /// where a leading dash reads as an option rather than a name.
-pub fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()> {
+///
+/// `source` names where `value` came from (`"pkg.lock"`, `"pkg.toml [scoop]
+/// buckets"`) and is stitched into the message rather than hardcoded, because
+/// a `pkg.toml` typo reported as "the lock's bucket name" sends the reader to
+/// the wrong file.
+pub fn ensure_plain_component(app: &Name, source: &str, what: &str, value: &str) -> Result<()> {
     let usable = !value.is_empty()
         && value != "."
         && value != ".."
@@ -325,7 +332,7 @@ pub fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()>
         && !Path::new(value).is_absolute();
     anyhow::ensure!(
         usable,
-        "{app}: the lock's {what} {value:?} cannot be used as a path component -- \
+        "{app}: {what} {value:?} in {source} cannot be used as a path component -- \
          it must not be empty, `.`, `..`, absolute, start with `-`, or contain \
          `/`, `\\` or `:`"
     );
@@ -382,9 +389,9 @@ impl Scoop {
         // `app.key()` stands in for both spellings `stage_text` may use: the
         // display form differs from it only by ASCII case, and every rule
         // above is case-blind.
-        ensure_plain_component(app, "bucket", bucket)?;
-        ensure_plain_component(app, "package name", app.key())?;
-        ensure_plain_component(app, "version", version)?;
+        ensure_plain_component(app, "pkg.lock", "bucket", bucket)?;
+        ensure_plain_component(app, "pkg.lock", "package name", app.key())?;
+        ensure_plain_component(app, "pkg.lock", "version", version)?;
         ensure_commit_hash(app, commit)?;
 
         let bucket_dir = self.root.join("buckets").join(bucket);
@@ -959,7 +966,7 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
             "2026-08-08",
             "v2_1",
         ] {
-            ensure_plain_component(&Name::new("tool"), "version", good)
+            ensure_plain_component(&Name::new("tool"), "pkg.lock", "version", good)
                 .unwrap_or_else(|e| panic!("{good:?} must be accepted: {e:#}"));
         }
     }
@@ -984,7 +991,7 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
             "-oops",
             "--upload-pack=touch",
         ] {
-            let err = ensure_plain_component(&Name::new("tool"), "version", bad)
+            let err = ensure_plain_component(&Name::new("tool"), "pkg.lock", "version", bad)
                 .expect_err("{bad:?} must be refused");
             let msg = format!("{err:#}");
             assert!(
@@ -992,6 +999,30 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
                 "say why it was refused: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn the_message_names_the_source_it_was_given_rather_than_always_the_lock() {
+        // Reused for pkg.toml's bucket names at parse time, before any lock
+        // is even involved -- a message that always says "the lock's" sends
+        // that reader to the wrong file.
+        let err = ensure_plain_component(&Name::new("tool"), "pkg.lock", "version", "..")
+            .expect_err("must be refused");
+        assert!(format!("{err:#}").contains("pkg.lock"), "{err:#}");
+
+        let err = ensure_plain_component(
+            &Name::new("xom11"),
+            "pkg.toml [scoop] buckets",
+            "bucket name",
+            "..",
+        )
+        .expect_err("must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pkg.toml"), "name the file: {msg}");
+        assert!(
+            !msg.contains("lock"),
+            "must not point at the wrong file: {msg}"
+        );
     }
 
     // -- ensure_commit_hash ------------------------------------------

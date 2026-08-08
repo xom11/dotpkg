@@ -79,13 +79,34 @@ struct Install {
     architecture: Option<String>,
 }
 
+/// Resolve aliases so path matching compares the string `sysinfo` reports.
+///
+/// A path that does not exist is kept as given: a machine with no scoop is a
+/// valid state, and `canonicalize` would turn it into an error.
+///
+/// On Windows `canonicalize` returns an extended-length `\\?\C:\...` path,
+/// which would break the very comparison this exists to fix, so the prefix is
+/// stripped.
+fn resolve_root(root: PathBuf) -> PathBuf {
+    let Ok(canon) = std::fs::canonicalize(&root) else {
+        return root;
+    };
+    let s = canon.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => canon,
+    }
+}
+
 pub struct Scoop {
     root: PathBuf,
 }
 
 impl Scoop {
     pub fn new(root: PathBuf) -> Scoop {
-        Scoop { root }
+        Scoop {
+            root: resolve_root(root),
+        }
     }
 
     /// `$SCOOP` if set, else `%USERPROFILE%\scoop`, matching scoop's own rule.
@@ -95,7 +116,7 @@ impl Scoop {
             .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("scoop")))
             .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join("scoop")))
             .unwrap_or_else(|| PathBuf::from("scoop"));
-        Scoop { root }
+        Scoop::new(root)
     }
 
     /// Which installed apps have a live process running out of their own tree.

@@ -465,3 +465,43 @@ fn the_running_set_detects_both_signals_at_once() {
         &["kanata_windows_tty_winiov2_arm64"]
     )));
 }
+
+// `std::os::windows::fs::symlink_dir` needs Developer Mode or an elevated
+// process. GitHub's `windows-latest` runners normally allow it, but that
+// cannot be confirmed from a macOS development machine, and this suite's
+// history includes tests that passed for reasons unrelated to what they
+// claimed. Gating to unix is the honest choice: skipped-with-a-stated-reason
+// on Windows CI, rather than a symlink call that might flake -- or silently
+// no-op -- there.
+#[cfg(unix)]
+#[test]
+fn a_root_reached_through_a_symlink_still_matches_running_processes() {
+    // The hole: sysinfo reports resolved paths. A root reached through a
+    // junction, a subst drive or a symlink prefix-compares against the wrong
+    // string, running_apps silently returns nothing, and nodejs and rustup --
+    // which have no other running signal -- become prunable while running.
+    //
+    // A symlink is the portable stand-in for a Windows junction.
+    let real = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(real.path().join("apps/nodejs/current")).unwrap();
+
+    let link_parent = tempfile::tempdir().unwrap();
+    let link = link_parent.path().join("aliased-root");
+    std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+    // The process reports the REAL path, as sysinfo would -- fully resolved.
+    // `real.path()` is not that by itself: on macOS it is `/var/folders/...`,
+    // itself an alias for `/private/var/folders/...` (`/var` -> `/private/var`),
+    // so it has to be canonicalised here for the same reason `resolve_root`
+    // canonicalises the scoop root.
+    let real_resolved = std::fs::canonicalize(real.path()).unwrap();
+    let got = Scoop::new(link).running_apps(&[proc(
+        "node",
+        Some(real_resolved.join("apps/nodejs/current/node.exe")),
+    )]);
+    assert_eq!(
+        got,
+        BTreeSet::from([Name::new("nodejs")]),
+        "aliased root must still match"
+    );
+}

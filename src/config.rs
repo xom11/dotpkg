@@ -38,11 +38,13 @@ pub struct PkgOpts {
     pub arch: Option<String>,
 }
 
+// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
 #[allow(dead_code)]
 pub fn parse(text: &str) -> Result<Config> {
     toml::from_str(text).context("pkg.toml is not valid")
 }
 
+// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
 #[allow(dead_code)]
 pub fn load(path: &Path) -> Result<Config> {
     let text =

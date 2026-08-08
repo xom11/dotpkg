@@ -9,7 +9,9 @@ pub struct Installed {
     pub bucket: Option<String>,
 }
 
+// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
 #[allow(dead_code)]
 pub const SCOOP: &str = "scoop";
+// dead_code: unreachable from main() until Task 6 adds src/lib.rs — remove then.
 #[allow(dead_code)]
 pub const WINGET: &str = "winget";

@@ -306,20 +306,29 @@ fn a_helper_that_the_user_declared_is_managed_normally() {
 #[test]
 fn actions_are_ordered_installs_then_prunes_then_reports() {
     // Install before uninstall: if a run dies partway, an extra package is
-    // easier to live with than a missing one.
+    // easier to live with than a missing one. `python` is here so the
+    // ArchDrift arm below is not just dead code in this match: the design
+    // says drift "joins Unmanaged after the prunes", and that claim needs a
+    // scenario that actually produces one.
     let mut state = State::default();
     state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
 
     let p = plan(
-        &config::parse("[scoop]\npackages = [\"fzf\", \"bat\"]\n").unwrap(),
+        &config::parse(
+            "[scoop]\npackages = [\"fzf\", \"bat\", \"python\"]\n\n\
+             [scoop.opts]\npython = { arch = \"arm64\" }\n",
+        )
+        .unwrap(),
         &lock::parse(
             "[scoop.fzf]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.74.1\"\n\
-             [scoop.bat]\nbucket=\"main\"\ncommit=\"b\"\nversion=\"0.26.1\"\n",
+             [scoop.bat]\nbucket=\"main\"\ncommit=\"b\"\nversion=\"0.26.1\"\n\
+             [scoop.python]\nbucket=\"main\"\ncommit=\"c\"\nversion=\"3.14.5\"\n",
         )
         .unwrap(),
         &[
             installed("aichat", "0.30.0"),
             installed("antigravity", "2.0.6"),
+            installed_arch("python", "3.14.5", Some("64bit")),
         ],
         &state,
         &Running::default(),
@@ -340,7 +349,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["install", "install", "prune", "unmanaged"],
+        vec!["install", "install", "prune", "archdrift", "unmanaged"],
         "got {:?}",
         p.actions
     );

@@ -52,7 +52,9 @@ Copied from the spec and from `docs/plans/2026-08-08-phase1-status-scoop.md`. Ev
 
 ### Task 1: The `Name` and `Running` model types
 
-Both types land in their final shape here, unwired. Tasks 3 and 4 fill in the data; nothing downstream has to change signature twice.
+Both types land in their final shape here, **additively**. `Installed` is not touched in this task: adding a field to it would break `src/backend/scoop.rs`, `src/plan.rs`, `src/render.rs` and both test files in the same commit, and Task 1 could not end green on its own. Task 2 changes `Installed` as part of the sweep that fixes every call site at once.
+
+That is also why `Running::covers` takes a name and a bin list rather than an `&Installed`: the narrower interface keeps `Running` independent of `Installed`, so its signature is final from here and never churns.
 
 **Files:**
 - Modify: `src/model.rs`
@@ -61,9 +63,8 @@ Both types land in their final shape here, unwired. Tasks 3 and 4 fill in the da
 - Consumes: nothing
 - Produces:
   - `pub struct Name` with `Name::new(impl Into<String>) -> Name`, `Name::key(&self) -> &str`, `Display`, `Ord`, `Hash`, `PartialEq<&str>`, serde via `String`
-  - `pub struct Installed { backend: String, name: Name, version: String, arch: Option<String>, bucket: Option<String>, bins: Vec<String> }`
-  - `pub struct Running` with `Running::new(BTreeSet<String>, BTreeSet<Name>) -> Running` and `Running::covers(&self, &Installed) -> bool`
-  - `pub const SCOOP`, `pub const WINGET` (unchanged)
+  - `pub struct Running` with `Running::new(BTreeSet<String>, BTreeSet<Name>) -> Running` and `Running::covers(&self, name: &Name, bins: &[String]) -> bool`
+  - `pub struct Installed`, `pub const SCOOP`, `pub const WINGET` — **unchanged in this task**
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -74,15 +75,8 @@ Append to `src/model.rs`:
 mod tests {
     use super::*;
 
-    fn inst(name: &str, bins: &[&str]) -> Installed {
-        Installed {
-            backend: SCOOP.into(),
-            name: Name::new(name),
-            version: "1.0".into(),
-            arch: None,
-            bucket: None,
-            bins: bins.iter().map(|b| b.to_string()).collect(),
-        }
+    fn bins(v: &[&str]) -> Vec<String> {
+        v.iter().map(|b| b.to_string()).collect()
     }
 
     #[test]
@@ -124,7 +118,7 @@ mod tests {
     #[test]
     fn a_process_named_after_the_package_is_covered() {
         let r = Running::new(BTreeSet::from(["fzf".to_string()]), BTreeSet::new());
-        assert!(r.covers(&inst("fzf", &[])));
+        assert!(r.covers(&Name::new("fzf"), &[]));
     }
 
     #[test]
@@ -132,7 +126,7 @@ mod tests {
         // neovim's executable is nvim.exe. This is the miss that made a running
         // editor plan a clean upgrade.
         let r = Running::new(BTreeSet::from(["nvim".to_string()]), BTreeSet::new());
-        assert!(r.covers(&inst("neovim", &["nvim", "xxd"])));
+        assert!(r.covers(&Name::new("neovim"), &bins(&["nvim", "xxd"])));
     }
 
     #[test]
@@ -140,19 +134,19 @@ mod tests {
         // nodejs declares env_add_path and no bin anywhere, so the path is the
         // only signal there is.
         let r = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("nodejs")]));
-        assert!(r.covers(&inst("nodejs", &[])));
+        assert!(r.covers(&Name::new("nodejs"), &[]));
     }
 
     #[test]
     fn an_idle_package_is_not_covered() {
         let r = Running::new(BTreeSet::from(["chrome".to_string()]), BTreeSet::new());
-        assert!(!r.covers(&inst("neovim", &["nvim", "xxd"])));
+        assert!(!r.covers(&Name::new("neovim"), &bins(&["nvim", "xxd"])));
     }
 
     #[test]
     fn coverage_by_directory_ignores_case_like_the_filesystem() {
         let r = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("NodeJS")]));
-        assert!(r.covers(&inst("nodejs", &[])));
+        assert!(r.covers(&Name::new("nodejs"), &[]));
     }
 }
 ```
@@ -273,20 +267,9 @@ impl fmt::Display for Name {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Installed {
-    pub backend: String,
-    pub name: Name,
-    pub version: String,
-    /// Scoop records this in install.json; winget does not expose it.
-    pub arch: Option<String>,
-    /// Scoop only.
-    pub bucket: Option<String>,
-    /// Lowercased, extension-stripped basenames of every executable this
-    /// package's manifest names. Populated by the backend's scan; empty for a
-    /// package whose manifest names none. See `Scoop::declared_executables`.
-    pub bins: Vec<String>,
-}
+// `Installed` stays exactly as it is in this task. Task 2 changes its `name`
+// to a `Name` and adds `bins`, together with every call site those two edits
+// break -- doing it here would leave the crate uncompilable at this commit.
 
 /// Which packages have a live process. Resolved outside the planner, so
 /// `dotpkg status` can say "skipped, running" before anything is attempted.
@@ -309,20 +292,24 @@ impl Running {
         Running { names, dirs }
     }
 
-    /// True if anything belonging to this package is alive.
+    /// True if anything belonging to this package is alive. `bins` is the
+    /// package's declared executables, as `Installed.bins` will carry them
+    /// from Task 3.
+    ///
+    /// Takes the two values rather than an `&Installed` so that `Running`
+    /// does not depend on a type Task 2 is about to change.
     ///
     /// Over-matching is deliberate. A false positive costs one `!` line the
     /// user clears by closing an app; a false negative costs the app.
-    pub fn covers(&self, inst: &Installed) -> bool {
-        self.dirs.contains(&inst.name)
-            || self.names.contains(inst.name.key())
-            || inst.bins.iter().any(|b| self.names.contains(b))
+    pub fn covers(&self, name: &Name, bins: &[String]) -> bool {
+        self.dirs.contains(name)
+            || self.names.contains(name.key())
+            || bins.iter().any(|b| self.names.contains(b))
     }
 }
-
-pub const SCOOP: &str = "scoop";
-pub const WINGET: &str = "winget";
 ```
+
+Leave `Installed`, `SCOOP` and `WINGET` in the file exactly as they are.
 
 - [ ] **Step 4: Run the tests**
 
@@ -365,8 +352,9 @@ Mechanical, wide, and the one task where a missed call site is a silent regressi
 - Modify: `tests/planner.rs`, `tests/scoop_scan.rs`
 
 **Interfaces:**
-- Consumes: `crate::model::{Name, Running, Installed}` from Task 1
+- Consumes: `crate::model::{Name, Running}` from Task 1
 - Produces:
+  - `Installed { backend: String, name: Name, version: String, arch: Option<String>, bucket: Option<String>, bins: Vec<String> }` — this task is where those two field changes land, together with every call site they break
   - `Config.scoop.packages: Vec<Name>`, `Config.scoop.opts: BTreeMap<Name, PkgOpts>`, `Config.winget.packages: Vec<Name>`
   - `Lock.scoop: BTreeMap<Name, Pin>`, `Lock.winget: BTreeMap<Name, Pin>`
   - `State::owns(&self, backend: &str, name: &Name) -> bool`, `State::set(&mut self, backend: &str, name: &Name, o: Ownership)`
@@ -414,7 +402,28 @@ Add to that file's imports: `use dotpkg::model::{Installed, Name, Running, SCOOP
 Run: `cargo test --test planner a_case_difference`
 Expected: FAIL to compile — `unresolved import dotpkg::model::Name` is not the error; `Name` exists. The error is `mismatched types` at `state.set(SCOOP, &Name::new("fzf"), ...)` because `set` still takes `&str`.
 
-- [ ] **Step 3: Change the type in `src/config.rs`**
+- [ ] **Step 3: Change `Installed` in `src/model.rs`**
+
+Everything else in this task follows from these two edits. Expect the crate not to compile again until Step 9 is done; that is the shape of this task.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub backend: String,
+    pub name: Name,
+    pub version: String,
+    /// Scoop records this in install.json; winget does not expose it.
+    pub arch: Option<String>,
+    /// Scoop only.
+    pub bucket: Option<String>,
+    /// Lowercased, extension-stripped basenames of every executable this
+    /// package's manifest names. Populated by the backend's scan in Task 3;
+    /// empty for a package whose manifest names none.
+    pub bins: Vec<String>,
+}
+```
+
+- [ ] **Step 4: Change the type in `src/config.rs`**
 
 ```rust
 use crate::model::Name;
@@ -440,7 +449,7 @@ pub struct WingetSection {
 
 `Config`, `ScoopSection`, `WingetSection` and `PkgOpts` all derive `PartialEq, Eq`; `Name` provides both, so nothing else changes.
 
-- [ ] **Step 4: Change the type in `src/lock.rs`**
+- [ ] **Step 5: Change the type in `src/lock.rs`**
 
 ```rust
 use crate::model::Name;
@@ -464,7 +473,7 @@ In `parse`, the winget loop's error message interpolates `name`, which now goes 
 
 The existing test `parses_both_backends_into_distinct_pin_shapes` indexes `lock.scoop["fzf"]`. `Index` on `BTreeMap<Name, _>` needs a `&Name`, so change those to `lock.scoop[&Name::new("fzf")]` and `lock.winget[&Name::new("Git.Git")]`, and add `use crate::model::Name;` to the test module.
 
-- [ ] **Step 5: Change the type in `src/state.rs`**
+- [ ] **Step 6: Change the type in `src/state.rs`**
 
 ```rust
 use crate::model::Name;
@@ -502,7 +511,7 @@ fn ownership_is_case_insensitive_because_the_prune_fence_depends_on_it() {
 }
 ```
 
-- [ ] **Step 6: Change the types in `src/plan.rs`**
+- [ ] **Step 7: Change the types in `src/plan.rs`**
 
 Imports become:
 
@@ -543,9 +552,9 @@ Inside, four changes:
 stays as written — `&i.name == name` is now `Name == Name` and folds case.
 
 ```rust
-                if running.covers(cur) {
+                if running.covers(&cur.name, &cur.bins) {
 ```
-replaces `if running.contains(name.as_str())`. Note it now consults the **installed** record, so it sees that record's `bins` as soon as Task 3 fills them.
+replaces `if running.contains(name.as_str())`. Note it now consults the **installed** record rather than the declared name, so it sees that record's `bins` as soon as Task 3 fills them.
 
 ```rust
         if SCOOP_HELPERS.contains(&inst.name.key()) {
@@ -554,7 +563,7 @@ replaces `SCOOP_HELPERS.contains(&inst.name.as_str())`. The helper list stays lo
 
 `state.owns(SCOOP, &inst.name)` needs no change; its parameter type moved with it.
 
-- [ ] **Step 7: Change `src/render.rs` and `src/main.rs`**
+- [ ] **Step 8: Change `src/render.rs` and `src/main.rs`**
 
 `render.rs` needs no edit to its body: `{name:<14}` goes through `Display`, which Task 1 implemented with `f.pad`. Its tests use `name: "ripgrep".into()`, which resolves through `From<&str> for Name`.
 
@@ -567,7 +576,7 @@ replaces `SCOOP_HELPERS.contains(&inst.name.as_str())`. The helper list stays lo
 
 replacing `let running = dotpkg::sys::running_process_names();`. Task 4 replaces this again once path matching exists.
 
-- [ ] **Step 8: Change `src/backend/scoop.rs`**
+- [ ] **Step 9: Change `src/backend/scoop.rs`**
 
 One line, in the `out.installed.push(Installed { ... })` literal:
 
@@ -579,7 +588,7 @@ One line, in the `out.installed.push(Installed { ... })` literal:
 
 and add `Name` to its import: `use crate::model::{Installed, Name, SCOOP};`. `bins` is filled in Task 3.
 
-- [ ] **Step 9: Update `tests/planner.rs` and `tests/scoop_scan.rs`**
+- [ ] **Step 10: Update `tests/planner.rs` and `tests/scoop_scan.rs`**
 
 In `tests/planner.rs`:
 - imports become `use dotpkg::model::{Installed, Name, Running, SCOOP};`
@@ -592,7 +601,7 @@ In `tests/planner.rs`:
 
 In `tests/scoop_scan.rs`, nothing changes: `assert_eq!(got[0].name, "bat")` works through `PartialEq<&str> for Name`, and `a.name.cmp(&b.name)` works through `Ord`.
 
-- [ ] **Step 10: Run the whole suite**
+- [ ] **Step 11: Run the whole suite**
 
 Run: `cargo test --all`
 Expected: PASS — 39 tests (15 unit + 9 new model + 18 planner + 6 scoop_scan, minus overlaps; the exact total is whatever green looks like, and **no test may be deleted to get there**). Confirm the count went up, not down.
@@ -600,7 +609,7 @@ Expected: PASS — 39 tests (15 unit + 9 new model + 18 planner + 6 scoop_scan, 
 Run: `cargo fmt --check && cargo clippy --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 11: Negative control**
+- [ ] **Step 12: Negative control**
 
 Change `Name::new` to `let key = display.clone();`.
 
@@ -609,7 +618,7 @@ Expected: FAIL with `expected no action, got [Install { .. name: FZF .. }, Prune
 
 Restore, re-run, confirm green.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
 git add src tests
@@ -1315,7 +1324,7 @@ In `src/plan.rs`, in the second loop, between the helper check and the ownership
             // Prune is the one action with no second chance: an interrupted
             // upgrade puts the app back, an uninstall does not. So the running
             // check that guards version changes guards this too.
-            if running.covers(inst) {
+            if running.covers(&inst.name, &inst.bins) {
                 actions.push(Action::Skip {
                     backend: SCOOP.into(),
                     name: inst.name.clone(),
@@ -1916,4 +1925,6 @@ Carried into 2b, and listed so each absence is a decision:
 
 **The plan's own code was executed, not just written.** Phase 1 shipped a plan containing a task whose code its own test could not pass. To avoid repeating that, the three riskiest pieces of new Rust here were built and run in a throwaway crate before this document was committed: `Name` (19 assertions, including `[scoop.FZF]` as a TOML section key, `state.json`'s nested JSON map with display case preserved, and `{:<14}` padding through `f.pad`), `declared_executables` against all six real manifest shapes with the exact expected values asserted in Task 3, and `running_apps` against all seven path cases in Task 4. All green. What that does **not** establish is that they integrate correctly with the existing code — that is what Task 2's suite run is for.
 
-**Type consistency.** `Name`, `Running`, `Installed.bins`, `Process` and `Arch` are each defined once and used with the same names throughout. `plan()`'s five-argument signature in Task 2 matches every call site in Tasks 5 and 6. `Running::covers(&Installed)` takes the installed record at both of its call sites, so it sees `bins` from Task 3 without a signature change. `Scoop::running_apps` is declared in Task 4 and called only from `main.rs` in that same task.
+**Type consistency.** `Name`, `Running`, `Installed.bins`, `Process` and `Arch` are each defined once and used with the same names throughout. `plan()`'s five-argument signature in Task 2 matches every call site in Tasks 5 and 6. `Running::covers(&Name, &[String])` is called with the installed record's own fields at both of its call sites, so it sees `bins` from Task 3 without a signature change — and it does not depend on `Installed`, which is what lets Task 1 compile before Task 2 changes that type.
+
+**One plan bug found and fixed before dispatch.** Task 1 originally added `bins` to `Installed` and changed its `name` to a `Name`, which would have broken `src/backend/scoop.rs`, `src/plan.rs`, `src/render.rs` and both test files at that same commit — Task 1 could not have ended green. Those two field changes moved to Task 2, where the sweep fixes every call site in one commit, and `Running::covers` was narrowed to `(&Name, &[String])` so it no longer depends on a type that was about to change. `Scoop::running_apps` is declared in Task 4 and called only from `main.rs` in that same task.

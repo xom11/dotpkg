@@ -4,30 +4,21 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Config {
-    #[serde(default)]
     pub scoop: ScoopSection,
-    #[serde(default)]
     pub winget: WingetSection,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScoopSection {
-    #[serde(default)]
     pub buckets: Vec<String>,
-    #[serde(default)]
     pub packages: Vec<Name>,
-    #[serde(default)]
     pub opts: BTreeMap<Name, PkgOpts>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct WingetSection {
-    #[serde(default)]
     pub packages: Vec<Name>,
 }
 
@@ -67,8 +58,83 @@ pub struct PkgOpts {
     pub arch: Option<Arch>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    #[serde(default)]
+    scoop: RawScoopSection,
+    #[serde(default)]
+    winget: RawWingetSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScoopSection {
+    #[serde(default)]
+    buckets: Vec<String>,
+    #[serde(default)]
+    packages: Vec<String>,
+    #[serde(default)]
+    opts: BTreeMap<String, PkgOpts>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWingetSection {
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+/// Fold raw strings into `Name`s, refusing any two that collide.
+///
+/// `Name` compares case-insensitively, so `fzf` and `FZF` are one package —
+/// but a `Vec` keeps both and the declared loop acts on both, and a map keeps
+/// the first key with the last value. Neither is something a user can see in
+/// their own file, so it is rejected here rather than resolved silently.
+fn fold_names(raw: Vec<String>, what: &str) -> Result<Vec<Name>> {
+    let mut seen: BTreeMap<Name, String> = BTreeMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        let name = Name::new(s.clone());
+        if let Some(first) = seen.get(&name) {
+            anyhow::bail!(
+                "{what} declares the same package twice: {first:?} and {s:?} differ only in case"
+            );
+        }
+        seen.insert(name.clone(), s);
+        out.push(name);
+    }
+    Ok(out)
+}
+
+fn fold_opts(raw: BTreeMap<String, PkgOpts>) -> Result<BTreeMap<Name, PkgOpts>> {
+    let mut spellings: BTreeMap<Name, String> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for (s, opts) in raw {
+        let name = Name::new(s.clone());
+        if let Some(first) = spellings.get(&name) {
+            anyhow::bail!(
+                "[scoop.opts] names the same package twice: {first:?} and {s:?} differ only in case"
+            );
+        }
+        spellings.insert(name.clone(), s);
+        out.insert(name, opts);
+    }
+    Ok(out)
+}
+
 pub fn parse(text: &str) -> Result<Config> {
-    toml::from_str(text).context("pkg.toml is not valid")
+    let raw: RawConfig = toml::from_str(text).context("pkg.toml is not valid")?;
+    Ok(Config {
+        scoop: ScoopSection {
+            buckets: raw.scoop.buckets,
+            packages: fold_names(raw.scoop.packages, "[scoop]")?,
+            opts: fold_opts(raw.scoop.opts)?,
+        },
+        winget: WingetSection {
+            packages: fold_names(raw.winget.packages, "[winget]")?,
+        },
+    })
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -141,5 +207,47 @@ packages = ["Git.Git"]
             msg.contains("arm64"),
             "the error must list the real values: {msg}"
         );
+    }
+
+    #[test]
+    fn two_declared_names_differing_only_in_case_are_rejected() {
+        // Name folds case, so these are one package -- but `packages` is a Vec
+        // and the declared loop iterates it twice, producing two Install
+        // actions for one app and a change_count of 2. Verified against the
+        // merged planner.
+        let err = parse("[scoop]\npackages = [\"fzf\", \"FZF\"]\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fzf") && msg.contains("FZF"),
+            "name both spellings: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_scoop_opts_key_is_rejected_rather_than_silently_clobbered() {
+        // TOML cannot express a literal duplicate key, so serde never sees a
+        // collision -- the collision is created by Name's folding. Measured
+        // behaviour before this fix: one entry, the FIRST key, the LAST value.
+        let err =
+            parse("[scoop.opts]\npython = { arch = \"64bit\" }\nPython = { arch = \"arm64\" }\n")
+                .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("python") && msg.contains("Python"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_winget_name_is_rejected_too() {
+        let err = parse("[winget]\npackages = [\"Git.Git\", \"git.git\"]\n").unwrap_err();
+        assert!(format!("{err:#}").contains("Git.Git"));
+    }
+
+    #[test]
+    fn distinct_names_are_still_accepted() {
+        // The guard must not reject a legitimate config.
+        let cfg = parse("[scoop]\npackages = [\"fzf\", \"bat\", \"ripgrep\"]\n").unwrap();
+        assert_eq!(cfg.scoop.packages.len(), 3);
     }
 }

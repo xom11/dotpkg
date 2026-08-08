@@ -34,7 +34,8 @@ fn a_declared_locked_package_that_is_absent_is_an_install() {
         vec![Action::Install {
             backend: SCOOP.into(),
             name: "fzf".into(),
-            version: "0.74.1".into()
+            version: "0.74.1".into(),
+            arch: None,
         }]
     );
 }
@@ -66,7 +67,10 @@ fn a_newer_installed_version_is_a_downgrade_because_the_lock_is_authoritative() 
             backend: SCOOP.into(),
             name: "fzf".into(),
             from: "0.74.2".into(),
-            to: "0.74.1".into()
+            to: "0.74.1".into(),
+            // No declared [scoop.opts] entry for fzf, so the resolution keeps
+            // what `installed()` says is already there.
+            arch: Some("arm64".into()),
         }]
     );
 }
@@ -86,7 +90,8 @@ fn an_older_installed_version_is_an_upgrade() {
             backend: SCOOP.into(),
             name: "fzf".into(),
             from: "0.74.0".into(),
-            to: "0.74.1".into()
+            to: "0.74.1".into(),
+            arch: Some("arm64".into()),
         }]
     );
 }
@@ -235,6 +240,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
                 backend: SCOOP.into(),
                 name: "fzf".into(),
                 version: "0.74.1".into(),
+                arch: None,
             },
             Action::Skip {
                 backend: WINGET.into(),
@@ -329,7 +335,8 @@ fn a_helper_that_the_user_declared_is_managed_normally() {
             backend: SCOOP.into(),
             name: "7zip".into(),
             from: "26.01".into(),
-            to: "26.02".into()
+            to: "26.02".into(),
+            arch: Some("arm64".into()),
         }]
     );
 }
@@ -723,6 +730,64 @@ fn an_owned_undeclared_helper_is_pruned_rather_than_silently_kept_forever() {
         "an unowned helper must still be invisible: {:?}",
         p.actions
     );
+}
+
+/// One `[scoop.<name>]` block with a syntactically valid 40-hex commit.
+/// The planner never looks at the commit, but `lock::parse` and (from Task 4)
+/// `lock_coherence_guard` both do.
+fn pin(name: &str, version: &str) -> String {
+    format!(
+        "[scoop.{name}]\nbucket = \"main\"\ncommit = \"{}\"\nversion = \"{version}\"\n\n",
+        "a".repeat(40)
+    )
+}
+
+#[test]
+fn the_architecture_an_install_will_use_is_decided_in_the_plan_not_in_the_executor() {
+    // Three cases in one: declared wins, otherwise the installed value is
+    // preserved, and `keep` means "pass no -a at all".
+    let declared = config::parse(
+        "[scoop]\npackages = [\"python\", \"stylua\", \"kanata\"]\n\
+         [scoop.opts]\npython = { arch = \"arm64\" }\nkanata = { arch = \"keep\" }\n",
+    )
+    .unwrap();
+    let lock = lock::parse(
+        &[
+            pin("python", "3.14.6"),
+            pin("stylua", "2.5.3"),
+            pin("kanata", "1.13.0"),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let installed = vec![
+        installed_arch("python", "3.14.5", Some("64bit")),
+        installed_arch("stylua", "2.5.2", Some("64bit")),
+        installed_arch("kanata", "1.12.0", Some("arm64")),
+    ];
+
+    let p = plan(
+        &declared,
+        &lock,
+        &installed,
+        &State::default(),
+        &Running::default(),
+    );
+
+    let arch_of = |n: &str| -> Option<String> {
+        p.actions.iter().find_map(|a| match a {
+            Action::Upgrade { name, arch, .. } if *name == Name::new(n) => Some(arch.clone()),
+            _ => None,
+        })?
+    };
+    assert_eq!(arch_of("python").as_deref(), Some("arm64"), "declared wins");
+    assert_eq!(
+        arch_of("stylua").as_deref(),
+        Some("64bit"),
+        "an undeclared package keeps the architecture it already has -- reinstalling \
+         it as arm64 would be an unasked-for change"
+    );
+    assert_eq!(arch_of("kanata"), None, "`keep` means pass no -a at all");
 }
 
 #[test]

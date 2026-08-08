@@ -12,6 +12,7 @@ pub fn render(plan: &Plan) -> String {
                 backend,
                 name,
                 version,
+                ..
             } => {
                 format!("  + {backend:<6} {name:<14} {version:<24} (install)")
             }
@@ -20,6 +21,7 @@ pub fn render(plan: &Plan) -> String {
                 name,
                 from,
                 to,
+                ..
             } => {
                 format!(
                     "  ^ {backend:<6} {name:<14} {:<24} (upgrade)",
@@ -31,6 +33,7 @@ pub fn render(plan: &Plan) -> String {
                 name,
                 from,
                 to,
+                ..
             } => {
                 format!(
                     "  v {backend:<6} {name:<14} {:<24} (downgrade, from lock)",
@@ -234,6 +237,7 @@ mod tests {
                         backend: SCOOP.into(),
                         name: "ripgrep".into(),
                         version: "14.1.0".into(),
+                        arch: None,
                     },
                     outcome: ready_to_fetch("ripgrep", "14.1.0"),
                 },
@@ -243,6 +247,7 @@ mod tests {
                         name: "bat".into(),
                         from: "0.25.0".into(),
                         to: "0.26.1".into(),
+                        arch: None,
                     },
                     outcome: ready_to_fetch("bat", "0.26.1"),
                 },
@@ -251,6 +256,7 @@ mod tests {
                         backend: SCOOP.into(),
                         name: "fzf".into(),
                         version: "0.75.0".into(),
+                        arch: None,
                     },
                     outcome: Outcome::Failed {
                         why: "commit a28d0c56 is not in bucket main".into(),
@@ -262,6 +268,7 @@ mod tests {
                         name: "neovim".into(),
                         from: "0.10.0".into(),
                         to: "0.11.0".into(),
+                        arch: None,
                     },
                     outcome: Outcome::Failed {
                         why: "download failed: hash mismatch".into(),
@@ -331,6 +338,7 @@ mod tests {
                     name: "fzf".into(),
                     from: "0.74.2".into(),
                     to: "0.74.1".into(),
+                    arch: None,
                 },
                 outcome: ready_to_fetch("fzf", "0.74.1"),
             }],
@@ -349,6 +357,7 @@ mod tests {
                         backend: SCOOP.into(),
                         name: "ripgrep".into(),
                         version: "14.1.0".into(),
+                        arch: None,
                     },
                     outcome: ready_to_fetch("ripgrep", "14.1.0"),
                 },
@@ -395,18 +404,21 @@ mod tests {
                     backend: SCOOP.into(),
                     name: "ripgrep".into(),
                     version: "14.1.0".into(),
+                    arch: None,
                 },
                 Action::Upgrade {
                     backend: WINGET.into(),
                     name: "Brave.Brave".into(),
                     from: "1.85".into(),
                     to: "1.86".into(),
+                    arch: None,
                 },
                 Action::Downgrade {
                     backend: SCOOP.into(),
                     name: "fzf".into(),
                     from: "0.74.2".into(),
                     to: "0.74.1".into(),
+                    arch: None,
                 },
                 Action::Prune {
                     backend: SCOOP.into(),

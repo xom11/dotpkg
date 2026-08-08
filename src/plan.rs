@@ -32,18 +32,21 @@ pub enum Action {
         backend: String,
         name: Name,
         version: String,
+        arch: Option<String>,
     },
     Upgrade {
         backend: String,
         name: Name,
         from: String,
         to: String,
+        arch: Option<String>,
     },
     Downgrade {
         backend: String,
         name: Name,
         from: String,
         to: String,
+        arch: Option<String>,
     },
     Prune {
         backend: String,
@@ -171,11 +174,24 @@ pub fn plan(
         };
         let want = pin.version();
 
+        // Resolved here, not in the executor, so the architecture an install
+        // will actually use is visible in the plan the user confirms.
+        //
+        // Declared wins; otherwise keep what is installed, because
+        // reinstalling an undeclared package under a different architecture is
+        // a change nobody asked for. `Arch::Keep` yields None, which means
+        // "pass no -a".
+        let arch: Option<String> = match declared.scoop.opts.get(name).and_then(|o| o.arch) {
+            Some(a) => a.as_scoop().map(str::to_string),
+            None => current.and_then(|c| c.arch.clone()),
+        };
+
         match current {
             None => actions.push(Action::Install {
                 backend: SCOOP.into(),
                 name: name.clone(),
                 version: want.to_string(),
+                arch: arch.clone(),
             }),
             Some(cur) if cur.version == want => {}
             Some(cur) => {
@@ -193,6 +209,7 @@ pub fn plan(
                         name: name.clone(),
                         from: cur.version.clone(),
                         to: want.to_string(),
+                        arch: arch.clone(),
                     });
                 } else {
                     actions.push(Action::Downgrade {
@@ -200,6 +217,7 @@ pub fn plan(
                         name: name.clone(),
                         from: cur.version.clone(),
                         to: want.to_string(),
+                        arch: arch.clone(),
                     });
                 }
             }

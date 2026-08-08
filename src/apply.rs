@@ -267,9 +267,24 @@ pub fn prepare(plan: &Plan, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> 
 /// plan it was given, because the whole point of the phase is that one
 /// package's problem is reported, not fatal to the run.
 fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &Path) -> Outcome {
-    let (Action::Install { backend, name, .. }
-    | Action::Upgrade { backend, name, .. }
-    | Action::Downgrade { backend, name, .. }) = action
+    let (Action::Install {
+        backend,
+        name,
+        arch,
+        ..
+    }
+    | Action::Upgrade {
+        backend,
+        name,
+        arch,
+        ..
+    }
+    | Action::Downgrade {
+        backend,
+        name,
+        arch,
+        ..
+    }) = action
     else {
         // classify() is the only caller, and it returns Intent::NeedsArtifact
         // only for the three variants matched above. Kept as a Failed
@@ -295,8 +310,7 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
         };
     };
     let staged = scoop.stage(staging_root, name, pin).and_then(|manifest| {
-        // `None` for now: Task 8 threads the lock's real architecture through.
-        scoop.download(&manifest, None)?;
+        scoop.download(&manifest, arch.as_deref())?;
         Ok(manifest)
     });
     match staged {
@@ -320,18 +334,21 @@ mod tests {
                 backend: SCOOP.into(),
                 name: Name::new("a"),
                 version: "1".into(),
+                arch: None,
             },
             Action::Upgrade {
                 backend: SCOOP.into(),
                 name: Name::new("a"),
                 from: "1".into(),
                 to: "2".into(),
+                arch: None,
             },
             Action::Downgrade {
                 backend: SCOOP.into(),
                 name: Name::new("a"),
                 from: "2".into(),
                 to: "1".into(),
+                arch: None,
             },
         ] {
             assert!(matches!(classify(&a), Intent::NeedsArtifact), "{a:?}");
@@ -414,6 +431,7 @@ mod tests {
                     backend: SCOOP.into(),
                     name: Name::new("a"),
                     version: "1".into(),
+                    arch: None,
                 },
                 outcome: Outcome::ReadyToFetch {
                     manifest: PathBuf::from("/stage/a/1/a.json"),
@@ -428,6 +446,7 @@ mod tests {
                     backend: SCOOP.into(),
                     name: Name::new("a"),
                     version: "1".into(),
+                    arch: None,
                 },
                 outcome: Outcome::Failed {
                     why: "hash mismatch".into(),
@@ -549,6 +568,7 @@ mod tests {
                     backend: SCOOP.into(),
                     name: Name::new("tool"),
                     version: "1.0.0".into(),
+                    arch: None,
                 },
                 Action::Prune {
                     backend: SCOOP.into(),
@@ -628,6 +648,7 @@ mod tests {
                 backend: WINGET.into(),
                 name: Name::new("Git.Git"),
                 version: "2.55.0".into(),
+                arch: None,
             }],
         };
 
@@ -692,6 +713,7 @@ mod tests {
                 backend: SCOOP.into(),
                 name: Name::new("tool"),
                 version: "1.0.0".into(),
+                arch: None,
             }],
         };
 

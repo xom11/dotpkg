@@ -617,6 +617,13 @@ pub fn download_verdict(stdout: &str) -> FetchVerdict {
     if dead {
         return FetchVerdict::UrlDead;
     }
+    // Any unrecognized ERROR line means scoop encountered something that failed.
+    // This is the fail-closed direction: report unknown errors as Unproven
+    // rather than overlook them.
+    let has_unrecognized_error = clean.lines().any(|l| l.trim().starts_with("ERROR"));
+    if has_unrecognized_error {
+        return FetchVerdict::Unproven;
+    }
     let verified = clean.lines().any(|l| {
         l.trim_start().starts_with("Checking hash of ") && l.trim_end().ends_with("... ok.")
     });
@@ -776,6 +783,53 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
         let mixed = "Checking hash of a.zip ... ok.\n\
                      Checking hash of b.zip ... ERROR Hash check failed!\n";
         assert_eq!(download_verdict(mixed), FetchVerdict::HashFailed);
+    }
+
+    #[test]
+    fn a_verified_line_does_not_excuse_an_unrecognised_error_on_another_url() {
+        // A successful hash check does not mean the entire download succeeded.
+        // If scoop reports any unrecognized ERROR line, the download is not
+        // complete and verified.
+        let mixed = "Checking hash of a.zip ... ok.\n\
+                     ERROR Something else entirely went wrong for b.zip\n";
+        assert_eq!(download_verdict(mixed), FetchVerdict::Unproven);
+    }
+
+    #[test]
+    fn tail_returns_short_input_unchanged() {
+        let short = "line 1\nline 2\nline 3";
+        assert_eq!(tail(short), short);
+    }
+
+    #[test]
+    fn tail_keeps_only_the_last_20_lines_of_long_input() {
+        let noisy: String = (0..500).map(|i| format!("progress {i}\n")).collect();
+        let stdout = format!("{noisy}ERROR the final error\n");
+        let result = tail(&stdout);
+        assert!(
+            result.contains("ERROR the final error"),
+            "must keep the tail"
+        );
+        assert!(!result.contains("progress 0\n"), "must drop the head");
+        // "last 20 lines" in the output message + error = max 21 lines
+        assert!(
+            result.lines().count() <= 21,
+            "got {} lines",
+            result.lines().count()
+        );
+    }
+
+    #[test]
+    fn tail_produces_a_non_empty_message_even_when_input_is_empty() {
+        let result = tail("");
+        assert!(
+            !result.trim().is_empty(),
+            "empty input must still say something"
+        );
+        assert!(
+            result.contains("nothing"),
+            "should explain what happened: {result}"
+        );
     }
 
     // -- ensure_plain_component ------------------------------------------

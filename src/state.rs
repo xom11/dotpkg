@@ -36,6 +36,12 @@ impl State {
             .insert(name.clone(), o);
     }
 
+    /// How many packages dotpkg owns for one backend. The mass-prune guard
+    /// needs the number, not the names.
+    pub fn owned_count(&self, backend: &str) -> usize {
+        self.0.get(backend).map(|m| m.len()).unwrap_or(0)
+    }
+
     pub fn load_or_empty(path: &Path) -> Result<State> {
         match std::fs::read_to_string(path) {
             Ok(text) => serde_json::from_str(&text)
@@ -116,5 +122,14 @@ mod tests {
         let mut s = State::default();
         s.set(SCOOP, &Name::new("FZF"), Ownership::Installed);
         assert!(s.owns(SCOOP, &Name::new("fzf")));
+    }
+
+    #[test]
+    fn owned_count_reports_per_backend() {
+        let mut s = State::default();
+        s.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        s.set(SCOOP, &Name::new("bat"), Ownership::Adopted);
+        assert_eq!(s.owned_count(SCOOP), 2);
+        assert_eq!(s.owned_count("winget"), 0);
     }
 }

@@ -1349,7 +1349,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Negative control**
 
-Delete the `if running.covers(inst)` branch, leaving the unconditional `prunes.push`.
+Delete the `if running.covers(&inst.name, &inst.bins)` branch, leaving the unconditional `prunes.push`.
 
 Run: `cargo test --test planner a_running_package`
 Expected: FAIL, both tests. Paste in. Restore, confirm green.

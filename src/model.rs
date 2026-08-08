@@ -228,6 +228,13 @@ impl Running {
             || self.names.contains(inst.name.key())
             || inst.bins.iter().any(|b| self.names.contains(b))
     }
+
+    /// The name-and-directory halves of `covers`, for a caller that has only a
+    /// package name. The `bins` half cannot be consulted here, so this is
+    /// strictly weaker: use `covers` wherever an `Installed` is available.
+    pub fn covers_name(&self, name: &Name) -> bool {
+        self.dirs.contains(name) || self.names.contains(name.key())
+    }
 }
 
 #[cfg(test)]

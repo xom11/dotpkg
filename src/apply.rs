@@ -1,8 +1,9 @@
 use crate::backend::scoop::Scoop;
 use crate::config::Config;
+use crate::execute::Step;
 use crate::lock::Lock;
 use crate::lock::Pin;
-use crate::model::SCOOP;
+use crate::model::{Name, SCOOP};
 use crate::plan::{Action, Plan, SkipReason};
 use crate::state::State;
 use anyhow::Result;
@@ -331,6 +332,60 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
         Err(e) => Outcome::Failed {
             why: format!("{e:#}"),
         },
+    }
+}
+
+/// Turn a finished `Preparation` into the steps the executor will run, plus
+/// the packages that could not become steps and why.
+pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
+    let mut steps = Vec::new();
+    let mut unusable = Vec::new();
+    for p in &prep.prepared {
+        // Branch on the ACTION, never on the outcome: `Outcome::ReadyToRemove`
+        // is still attachable to an `Install`, and nothing in the type system
+        // binds the two.
+        match (&p.action, &p.outcome) {
+            (Action::Install { name, arch, .. }, Outcome::ReadyToFetch { manifest }) => {
+                steps.push(Step::Install {
+                    app: name.clone(),
+                    staged: manifest.clone(),
+                    arch: arch.clone(),
+                })
+            }
+            (
+                Action::Upgrade { name, arch, .. } | Action::Downgrade { name, arch, .. },
+                Outcome::ReadyToFetch { manifest },
+            ) => steps.push(Step::Replace {
+                app: name.clone(),
+                staged: manifest.clone(),
+                arch: arch.clone(),
+            }),
+            (Action::Prune { name, .. }, Outcome::ReadyToRemove) => {
+                steps.push(Step::Remove { app: name.clone() })
+            }
+            (a, Outcome::Failed { why }) => unusable.push((action_name(a), why.clone())),
+            (a, Outcome::NotLocked) => unusable.push((
+                action_name(a),
+                "no lock entry -- run `dotpkg update`".to_string(),
+            )),
+            _ => {}
+        }
+    }
+    (steps, unusable)
+}
+
+/// Every `Action` variant names a backend and a package; mirrors
+/// `render::action_backend_name`, but returns an owned `Name` since
+/// `plan_to_steps` needs one it can put in an owned `Vec`.
+fn action_name(action: &Action) -> Name {
+    match action {
+        Action::Install { name, .. }
+        | Action::Upgrade { name, .. }
+        | Action::Downgrade { name, .. }
+        | Action::Prune { name, .. }
+        | Action::Skip { name, .. }
+        | Action::Unmanaged { name, .. }
+        | Action::ArchDrift { name, .. } => name.clone(),
     }
 }
 

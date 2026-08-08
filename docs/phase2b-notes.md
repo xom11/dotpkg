@@ -88,7 +88,15 @@ expecting a way around the above.
 
 ## Must not reach an `apply` that can execute
 
-These are safe today only because `status` acts on nothing.
+**All three items in this section were closed by Phase 2b-1**, and the first
+turned out to be wider than recorded here — the same folding bug also lived in
+`pkg.lock` and `state.json`, where a colliding pair silently kept the first key
+and the *last* value. The whole-branch review found that by running it. Folding
+now happens once, in `crate::model`, for every `Name`-keyed map.
+
+The original text is kept below because the *shapes* still matter: they are
+what a future `Name`-keyed map will reproduce if it deserializes directly
+instead of folding.
 
 **Two declared names differing only in case produce two `Install` actions.**
 `packages = ["fzf", "FZF"]` collapses to one entry in the declared set — `Name`
@@ -193,3 +201,73 @@ described an earlier state of the machine. This is the number 2b's decision
 about whether `apply` should act on drift must be taken against — reinstalling
 seven packages is a real cost, and every reinstall is an uninstall plus an
 install.
+
+---
+
+# Carried into Phase 2b-2 (the executor)
+
+Added 2026-08-08, after Phase 2b-1 shipped `apply --prepare`. Everything above
+this line is either closed or still open as marked; everything below is new.
+
+## What 2b-1 established that 2b-2 depends on
+
+`apply --prepare` recovers each locked manifest with `git show`, stages it at
+`%LOCALAPPDATA%\dotpkg\manifests\<app>\<version>\<app>.json`, and fetches it
+with `scoop download`, which verifies hashes. Dogfooded against the real
+`~/scoop`: 23 of 25 declared packages attempted (2 correctly skipped as
+running), all recovered, all versions matched, all 24 fetches verified, and a
+deliberately corrupted commit failed loudly while staging nothing and leaving
+the other 22 untouched.
+
+**The plan's prediction that upstream rot would break some fetches did not
+hold**, even under a deliberate adversarial probe against the smallest bucket
+and an older, never-cached release. Recorded as a falsified prediction rather
+than smoothed over. It may simply mean these particular pins are young.
+
+## Things that will bite the executor
+
+**`Outcome::ReadyToRemove` is still attachable to an `Install`.** The split from
+`Ready { manifest: Option<PathBuf> }` killed the ambiguity where `None` meant
+both "prune" and a fallback, but the type still does not bind an outcome to an
+action variant. **Branch on `item.action`, never on the outcome alone.**
+
+**Nothing produced by real code is asserted to be `ReadyToFetch`.** The only
+test that stages for real lands in `Failed`, because there is no scoop binary on
+the test platform. The manifest path that variant now guarantees is asserted
+only in hand-built values.
+
+**`tests/cli.rs`'s `Snapshot` records path names, not content.** Its comment
+claims a written state file shows up as a change, but the fixture writes
+`state.json` before the snapshot, so an **in-place rewrite of that exact file is
+invisible** — and writing `state.json` is precisely what 2b-2 adds. Compare
+content or mtime before relying on it.
+
+**`main.rs`'s Apply arm is the third inline copy of load → scan → plan.** 2b-2
+makes that arm destructive. Extract a testable driver rather than adding a
+fourth.
+
+**`commit` is still unvalidated where it reaches git argv, and the reason it is
+harmless today is not the obvious one.** `git show --output=<file>` *does* write
+a file — measured — so "the subcommands are read-only" is false. What actually
+protects it: `git cat-file -e` runs first and rejects any `-`-leading value, and
+`git show`'s target is forcibly suffixed with `:bucket/<name>.json`, which fails
+to open. Phase 3 writes that field from bucket data, so validate it there rather
+than inheriting this reasoning.
+
+**`mass_prune_guard` checks scoop only.** `Config` already has a
+`WingetSection`. The function reads like "the fence" and is not one yet; it must
+grow a backend loop in the same commit as the winget backend.
+
+**Staging paths are not content-addressed.** Re-pinning the same version to a
+different commit silently overwrites the file that an installed app's
+`install.json` already points at.
+
+## Method, for whoever runs the next dogfood
+
+**A lock that exactly matches the installed versions gives `apply --prepare`
+zero actions.** The natural lock to generate for a dogfood is therefore a no-op,
+and a separate deliberately-divergent "exercise" lock is needed to test
+anything. Budget for it rather than rediscovering it.
+
+**The medium-integrity scheduled-task workaround is still required** — see the
+section above. It has now been used successfully twice.

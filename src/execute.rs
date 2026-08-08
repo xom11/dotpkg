@@ -87,11 +87,17 @@ pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
 pub enum StepOutcome {
     Done,
     /// `touched` is true when the machine was already altered before this
-    /// failure happened: today, only a `Step::Replace` whose uninstall
-    /// verified `Absent` before its install then failed. The package is
-    /// genuinely gone from disk at that point -- neither "done" nor "as it
-    /// was" -- and `Execution::exit_code` must not fold that into "nothing
-    /// changed".
+    /// failure happened. Two shapes set it: a `Step::Replace` whose
+    /// uninstall verified `Absent` before its install then failed, and any
+    /// install (fresh, or the second half of a replace) whose `verdict`
+    /// disagreement is evidence of residue -- `HalfInstalled`,
+    /// `ContentDiffers`, `LineEndingsDiffer`, or `Unreadable` (which means
+    /// "unknown" and is treated as touched in the safe direction, so an
+    /// operator looks). `NotInstalled` alone means the machine is genuinely
+    /// as it was. A `Step::Remove` sets it the mirror way: `StillPresent` is
+    /// untouched, `Unreadable` is touched. Either way, the package this
+    /// describes is neither "done" nor "as it was", and
+    /// `Execution::exit_code` must not fold that into "nothing changed".
     Failed {
         why: String,
         touched: bool,
@@ -108,10 +114,10 @@ pub enum StepOutcome {
 pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) -> StepOutcome {
     match step {
         Step::Install { app, staged, arch } | Step::Replace { app, staged, arch } => {
-            // Set true only once `Replace`'s uninstall half is PROVEN by
-            // `verdict`, not merely attempted: a failure at or before that
-            // point leaves the machine exactly as it was, and a failure
-            // after it leaves the package genuinely gone.
+            // Starts false and only ever moves to true, never back: two
+            // independent checks below can set it, and both mean the same
+            // thing -- scoop wrote SOMETHING to disk before this step gave
+            // up.
             let mut touched = false;
             if matches!(step, Step::Replace { .. }) {
                 if let Err(e) = m.uninstall(app) {
@@ -120,6 +126,10 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                         touched,
                     };
                 }
+                // Set true only once the uninstall half is PROVEN by
+                // `verdict`, not merely attempted: a failure at or before
+                // this point leaves the machine exactly as it was, and a
+                // failure after it leaves the package genuinely gone.
                 if let Err(d) = verdict(root, app, &Expected::Absent) {
                     return StepOutcome::Failed {
                         why: format!("{app}: uninstall did not happen -- {d}"),
@@ -143,6 +153,22 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // installed`, exit 0, and no change -- which would then pass
                 // no check dotpkg has.
                 if d != Disagreement::NotInstalled {
+                    // Important 1: every other `Disagreement` reachable here
+                    // -- `HalfInstalled`, `ContentDiffers`,
+                    // `LineEndingsDiffer` -- means scoop wrote something to
+                    // disk, even for a plain `Install` with no uninstall
+                    // half of its own: a hash-mismatched half-install
+                    // leaves `apps/<app>/<version>/`, and a different
+                    // manifest actually installed leaves a package on the
+                    // machine dotpkg never asked for. `NotInstalled` is the
+                    // only variant that means the machine is genuinely as
+                    // it was, which is why it alone is excluded here.
+                    // `Unreadable` also reaches this arm (it is not
+                    // `NotInstalled`) and means dotpkg does not know --
+                    // treated as touched in the safe direction, so an
+                    // operator looks instead of being told there is
+                    // nothing to see.
+                    touched = true;
                     return StepOutcome::Failed {
                         why: format!("{app}: install did not happen -- {d}"),
                         touched,
@@ -155,6 +181,11 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                     };
                 }
                 if let Err(d2) = verdict(root, app, &want) {
+                    // Same reasoning as the first check above: only a
+                    // second `NotInstalled` still means untouched.
+                    if d2 != Disagreement::NotInstalled {
+                        touched = true;
+                    }
                     return StepOutcome::Failed {
                         why: format!("{app}: install did not happen, even on retry -- {d2}"),
                         touched,
@@ -175,9 +206,17 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 };
             }
             if let Err(d) = verdict(root, app, &Expected::Absent) {
+                // `StillPresent` means the uninstall simply did not happen:
+                // the app is exactly where it was, so the machine is
+                // untouched. `Unreadable` means `verdict` could not look at
+                // all -- unknown, and the safe reading is "assume touched"
+                // so an operator looks rather than being told nothing
+                // happened. `Expected::Absent` cannot produce any other
+                // `Disagreement` variant (see `verdict`'s match arm).
+                let touched = matches!(d, Disagreement::Unreadable(_));
                 return StepOutcome::Failed {
                     why: format!("{app}: uninstall did not happen -- {d}"),
-                    touched: false,
+                    touched,
                 };
             }
             state.remove(SCOOP, app);
@@ -240,11 +279,14 @@ impl Execution {
             .count()
     }
     /// How many `Failed` results happened only after the machine was already
-    /// altered -- today, only a `Step::Replace` whose uninstall verified
-    /// `Absent` before its install then failed. Separate from `changed()`,
-    /// which means "verified fully done": a package counted here is neither
-    /// done nor as it was, and `exit_code` must not call that "nothing
-    /// changed" just because it isn't `Done` either.
+    /// altered -- see `StepOutcome::Failed`'s doc comment for the exact
+    /// shapes. Separate from `changed()`, which means "verified fully done":
+    /// a package counted here is neither done nor as it was.
+    /// `render_execution` is the one place left that reads this directly, to
+    /// choose its wording between "nothing was changed" and "some packages
+    /// were changed and some were not" -- `exit_code` itself no longer needs
+    /// it (Important 6): every outstanding package is exit 1 now, touched or
+    /// not.
     pub fn touched(&self) -> usize {
         self.results
             .iter()
@@ -257,21 +299,30 @@ impl Execution {
             .filter(|(_, r)| matches!(r, ItemResult::Held(_)))
             .count()
     }
-    /// 0 = everything verified · 1 = something changed and something failed ·
-    /// 2 = nothing changed, and something was refused or failed.
+    /// Defined by what the operator must do next, not by what happened
+    /// internally (Important 6):
     ///
-    /// The distinction 2 buys is the one a caller most needs: "go look at the
-    /// machine" versus "nothing to look at". `refused` and "changed
-    /// something" can never both be true: a refusal means `execute` returned
-    /// `Err` before performing a single step, so nothing in `self` could have
-    /// changed.
+    /// - **0** -- the plan is fully realised on disk and nothing is
+    ///   outstanding.
+    /// - **1** -- something is outstanding: a package failed, was held, or
+    ///   (via the floor `main.rs` applies on top of this) could not be
+    ///   prepared. The machine may or may not actually have changed --
+    ///   `render_execution` is where that distinction is still drawn, in the
+    ///   wording, not in the exit code.
+    /// - **2** -- refused before anything was attempted; nothing changed.
     ///
-    /// `touched()` counts alongside `changed()` here for the same reason it
-    /// exists at all: a `Replace` whose uninstall really removed the package
-    /// before its install failed has changed the machine, even though no
-    /// result is `Done`. Reporting 2 for that shape would tell an operator
-    /// there is nothing to look at, which is the single worst thing this
-    /// code could say about a machine that just lost a package.
+    /// This used to also return 2 for a failure with `changed() == 0 &&
+    /// touched() == 0` -- "nothing to look at" -- but that rule made a
+    /// package held by the running re-sampler exit the same way as a
+    /// converged machine: 0. A user who leaves an editor open every night
+    /// then sees permanent, silent success. `held()` folds into "outstanding"
+    /// here for exactly that reason, and a plain untouched failure now reads
+    /// the same as a touched one: both still need the operator to look at
+    /// why, even when the answer turns out to be "nothing changed".
+    ///
+    /// `refused` and "changed something" can never both be true: a refusal
+    /// means `execute` returned `Err` before performing a single step, so
+    /// nothing in `self` could have changed.
     pub fn exit_code(&self, refused: bool) -> i32 {
         debug_assert!(
             !(refused && self.changed() > 0),
@@ -280,10 +331,7 @@ impl Execution {
         if refused {
             return 2;
         }
-        if self.failed() > 0 {
-            if self.changed() == 0 && self.touched() == 0 {
-                return 2;
-            }
+        if self.failed() > 0 || self.held() > 0 {
             return 1;
         }
         0
@@ -312,17 +360,36 @@ pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
             }
             Step::Remove { .. } => continue,
         };
-        let a = match arch {
-            Some(a) => format!("-a {a} "),
-            None => String::new(),
-        };
-        // `%` is expanded by cmd even *inside* double quotes, so an
-        // unescaped `%` in a staged path (`C:\Users\a%b\...`) would make the
-        // recovery line reference an undefined batch variable instead of the
-        // manifest dotpkg actually staged. Doubling it to `%%` is how a
-        // batch file spells a literal `%`.
-        let escaped = staged.display().to_string().replace('%', "%%");
-        let _ = writeln!(text, "scoop install -u {a}\"{escaped}\"\r");
+        // Built from `install_argv` -- the exact argv the executor itself
+        // runs -- rather than typed out a second time here. A flag added to
+        // `install_argv` (like `-u`, which keeps a scoop self-update out of
+        // the uninstall/install window) then cannot silently drop out of
+        // just this line: measured, hand-duplicating it left a mutation that
+        // deleted `-u` from only the recovery line green across the whole
+        // suite, while the same deletion in `install_argv` itself turned
+        // red immediately.
+        let argv = crate::backend::scoop::install_argv(staged, arch.as_deref());
+        let last = argv.len() - 1;
+        let mut line = String::from("scoop");
+        for (i, part) in argv.iter().enumerate() {
+            line.push(' ');
+            if i == last {
+                // `%` is expanded by cmd even *inside* double quotes, so an
+                // unescaped `%` in a staged path (`C:\Users\a%b\...`) would
+                // make the recovery line reference an undefined batch
+                // variable instead of the manifest dotpkg actually staged.
+                // Doubling it to `%%` is how a batch file spells a literal
+                // `%`. Only the manifest path -- always argv's last element
+                // -- can contain one; the rest is scoop's own flags and an
+                // architecture name.
+                line.push('"');
+                line.push_str(&part.replace('%', "%%"));
+                line.push('"');
+            } else {
+                line.push_str(part);
+            }
+        }
+        let _ = writeln!(text, "{line}\r");
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;

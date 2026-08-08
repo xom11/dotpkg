@@ -666,10 +666,15 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
         dropped_ghosts: Vec::new(),
         recovery_write_failed: None,
     };
+    // Important 6: exit codes are defined by what the operator must do next,
+    // not by what happened internally. A failure is outstanding whether or
+    // not it touched the machine -- the package dotpkg was asked to install
+    // still is not there, and 2 is reserved for a refusal before anything
+    // was attempted at all.
     assert_eq!(
         untouched_failure.exit_code(false),
-        2,
-        "nothing changed at all, so there is nothing to look at"
+        1,
+        "a failure is outstanding even when it changed nothing"
     );
 
     // Important 3: a `Failed` result can still mean the machine changed, if
@@ -705,6 +710,24 @@ fn exit_code_asserts_a_refused_run_changed_nothing() {
         recovery_write_failed: None,
     };
     let _ = bad.exit_code(true);
+}
+
+#[test]
+fn a_held_only_run_is_outstanding_and_exits_1_not_0() {
+    // Important 6: under the old rule a package held by the running
+    // re-sampler exited 0 -- the same code as a converged machine. The
+    // nightly case this fixes is a user who leaves their editor open every
+    // night: a scheduled run would report success forever. `held()` alone,
+    // with `failed() == 0` and `changed() == 0`, must still be exit 1.
+    let held_only = Execution {
+        results: vec![(
+            Name::new("kanata"),
+            ItemResult::Held("started running since the plan was made".into()),
+        )],
+        dropped_ghosts: Vec::new(),
+        recovery_write_failed: None,
+    };
+    assert_eq!(held_only.exit_code(false), 1);
 }
 
 #[test]
@@ -770,6 +793,217 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
     assert!(
         rendered.contains("Some packages were changed and some were not"),
         "the summary must not call this 'nothing changed' either: {rendered}"
+    );
+}
+
+// -- Important 1: a fresh Install that leaves residue must also be touched --
+//
+// The `Replace` shape (uninstall really ran, install then lied) was already
+// covered by the test above. A fresh `Install` has no uninstall half at all,
+// so before this fix `touched` stayed false no matter what the install half
+// left behind -- reporting `Failed { touched: false }` for a package that is
+// now genuinely, if imperfectly, on disk.
+
+#[test]
+fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
+    // Demonstrated live with scoop's measured half-install residue: a hash
+    // mismatch leaves `apps/<app>/<version>/` with no `current/manifest.json`
+    // and still exits 0. Before this fix: `changed()=0 failed()=1 touched()=0`,
+    // `exit_code(false) = 2`, and the FAILED line right above the summary
+    // directly contradicted "Nothing was changed".
+    struct HalfInstaller<'a> {
+        tree: &'a Tree,
+    }
+    impl Mutator for HalfInstaller<'_> {
+        fn uninstall(&self, _app: &Name) -> anyhow::Result<CommandReport> {
+            unreachable!("a plain Install has no uninstall half")
+        }
+        fn install(&self, manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            let app = manifest.file_stem().unwrap().to_string_lossy().into_owned();
+            let version = manifest
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            self.tree.half_install(&app, &version);
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: "Checking hash of fzf.zip ... ERROR Hash check failed!\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    let fake = HalfInstaller { tree: &t };
+    let mut state = State::default();
+
+    let ex = execute(
+        t.root(),
+        vec![Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        }],
+        &fake,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(ex.failed(), 1, "{:?}", ex.results);
+    assert!(
+        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        "the half-install really left residue on disk: {:?}",
+        ex.results
+    );
+    assert_eq!(
+        ex.exit_code(false),
+        1,
+        "residue on disk means something to look at, not exit 2's nothing-changed"
+    );
+    let rendered = dotpkg::render::render_execution(&ex);
+    assert!(
+        !rendered.contains("Nothing was changed"),
+        "the summary must not contradict the FAILED line above it: {rendered}"
+    );
+}
+
+#[test]
+fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned() {
+    // The worse of the two shapes Important 1 names: scoop installed A
+    // manifest, just not the one dotpkg staged and hash-verified. The
+    // package really is on the machine now -- installed with an unverified
+    // artifact -- and before this fix it reported `Failed { touched: false }`,
+    // so dotpkg would neither flag it for the operator nor ever record it.
+    struct WrongManifestInstaller<'a> {
+        tree: &'a Tree,
+    }
+    impl Mutator for WrongManifestInstaller<'_> {
+        fn uninstall(&self, _app: &Name) -> anyhow::Result<CommandReport> {
+            unreachable!("a plain Install has no uninstall half")
+        }
+        fn install(&self, manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            let app = manifest.file_stem().unwrap().to_string_lossy().into_owned();
+            let cur = self.tree.root().join("apps").join(app).join("current");
+            std::fs::create_dir_all(&cur).unwrap();
+            // Deliberately NOT `std::fs::read(manifest)`: a different
+            // manifest is exactly what scoop, measured, can install over a
+            // rev-locked bucket tip (see `verify.rs`'s own content-swap
+            // test).
+            std::fs::write(
+                cur.join("manifest.json"),
+                r#"{"version":"1.0.0","url":"https://evil/v1.zip"}"#,
+            )
+            .unwrap();
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    let fake = WrongManifestInstaller { tree: &t };
+    let mut state = State::default();
+
+    let ex = execute(
+        t.root(),
+        vec![Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        }],
+        &fake,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(ex.failed(), 1, "{:?}", ex.results);
+    assert!(
+        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        "a different manifest was really installed: {:?}",
+        ex.results
+    );
+    assert_eq!(ex.exit_code(false), 1);
+    let rendered = dotpkg::render::render_execution(&ex);
+    assert!(!rendered.contains("Nothing was changed"), "{rendered}");
+    assert!(
+        !state.owns(SCOOP, &Name::new("fzf")),
+        "a failed install must not be recorded as owned, even though something landed on disk"
+    );
+}
+
+// -- Important 5: the resolved architecture must reach Mutator::install ----
+//
+// `verdict` structurally cannot catch a wrong-architecture install:
+// architecture is not in manifest.json, so the bytes match and `verdict`
+// returns `Ok` regardless. `install.json` is the only record, and nothing in
+// this suite asserted the `arch` argument that reaches `Mutator::install` at
+// all before this test -- `m.install(staged, arch.as_deref())` and
+// `m.install(staged, None)` were equally green.
+
+#[test]
+fn the_resolved_architecture_reaches_mutator_install() {
+    struct ArchSpy<'a> {
+        tree: &'a Tree,
+        seen: RefCell<Vec<Option<String>>>,
+    }
+    impl Mutator for ArchSpy<'_> {
+        fn uninstall(&self, app: &Name) -> anyhow::Result<CommandReport> {
+            let _ = std::fs::remove_dir_all(self.tree.root().join("apps").join(app.key()));
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+        fn install(&self, manifest: &Path, arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            self.seen.borrow_mut().push(arch.map(str::to_string));
+            let app = manifest.file_stem().unwrap().to_string_lossy().into_owned();
+            let cur = self.tree.root().join("apps").join(app).join("current");
+            std::fs::create_dir_all(&cur).unwrap();
+            std::fs::write(cur.join("manifest.json"), std::fs::read(manifest).unwrap()).unwrap();
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    let fake = ArchSpy {
+        tree: &t,
+        seen: RefCell::new(Vec::new()),
+    };
+    let mut state = State::default();
+
+    let out = run_step(
+        t.root(),
+        &fake,
+        &mut state,
+        &Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: Some("arm64".into()),
+        },
+    );
+
+    assert_eq!(out, StepOutcome::Done, "{out:?}");
+    assert_eq!(
+        fake.seen.borrow().as_slice(),
+        [Some("arm64".to_string())],
+        "the resolved architecture must reach Mutator::install"
     );
 }
 

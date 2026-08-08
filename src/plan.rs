@@ -223,13 +223,11 @@ pub fn plan(
         if declared_scoop.contains(&inst.name) {
             continue;
         }
-        if SCOOP_HELPERS.contains(&inst.name.key()) {
-            continue;
-        }
         if state.owns(SCOOP, &inst.name) {
-            // Prune is the one action with no second chance: an interrupted
-            // upgrade puts the app back, an uninstall does not. So the running
-            // check that guards version changes guards this too.
+            // Ownership outranks the helper list. The list exists to stop a
+            // helper scoop installed for itself being reported as a stray; a
+            // helper *dotpkg* installed is dotpkg's to release, and skipping
+            // it here left it unreleasable and unmentioned forever.
             if running.covers(inst) {
                 actions.push(Action::Skip {
                     backend: SCOOP.into(),
@@ -243,7 +241,7 @@ pub fn plan(
                     version: inst.version.clone(),
                 });
             }
-        } else {
+        } else if !SCOOP_HELPERS.contains(&inst.name.key()) {
             reports.push(Action::Unmanaged {
                 backend: SCOOP.into(),
                 name: inst.name.clone(),
@@ -266,8 +264,11 @@ pub fn plan(
 /// **Its result is load-bearing only for the arrow `status` prints.** The
 /// decision to change a package is made by `cur.version == want` above; this
 /// function only picks `Upgrade` vs `Downgrade` for the display. So its edge
-/// cases — `1.0.0-rc1` vs `1.0.0` compare equal, since both reduce to `[1,0,0]`
-/// once the non-digits are stripped — are cosmetic today.
+/// cases are cosmetic today — but they are not the edge cases this comment
+/// used to claim. `parts` keeps **every** numeric run, so `1.0.0-rc1` reduces
+/// to `[1,0,0,1]`, not `[1,0,0]`: a prerelease sorts *after* its own release,
+/// and the displayed arrow is therefore inverted for suffixed versions.
+/// `tests/planner.rs` pins this as a fact rather than leaving it as a claim.
 ///
 /// That stops being true the moment anything *gates* on the distinction: an
 /// `apply` that refuses downgrades without `--allow-downgrade`, a policy that

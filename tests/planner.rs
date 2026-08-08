@@ -693,3 +693,63 @@ fn a_package_can_be_both_an_upgrade_and_a_drift() {
     assert_eq!(p.change_count(), 1);
     assert_eq!(p.drift_count(), 1);
 }
+
+#[test]
+fn an_owned_undeclared_helper_is_pruned_rather_than_silently_kept_forever() {
+    // The helper list exists to stop dotpkg reporting scoop's own extraction
+    // tools as strays. It must not also stop dotpkg releasing a helper it
+    // installed itself: `plan.rs`'s skip sat above the ownership check, so an
+    // owned, undeclared 7zip produced no line of any kind.
+    let declared = config::parse("[scoop]\npackages = [\"fzf\"]\n").unwrap();
+    let lock = lock::parse("").unwrap();
+    let installed = vec![installed("7zip", "26.01"), installed("dark", "3.14.1")];
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("7zip"), Ownership::Installed);
+
+    let p = plan(&declared, &lock, &installed, &state, &Running::default());
+
+    assert!(
+        p.actions.iter().any(|a| matches!(
+            a, Action::Prune { name, .. } if *name == Name::new("7zip")
+        )),
+        "an owned helper must be prunable: {:?}",
+        p.actions
+    );
+    assert!(
+        !p.actions.iter().any(|a| matches!(
+            a, Action::Prune { name, .. } | Action::Unmanaged { name, .. }
+                if *name == Name::new("dark")
+        )),
+        "an unowned helper must still be invisible: {:?}",
+        p.actions
+    );
+}
+
+#[test]
+fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
+    // src/plan.rs's own doc comment claimed 1.0.0-rc1 and 1.0.0 reduce to the
+    // same [1,0,0] and compare equal. `parts` keeps every numeric run, so rc1
+    // becomes [1,0,0,1], and the displayed arrow was inverted for every
+    // suffixed version.
+    let declared = config::parse("[scoop]\npackages = [\"tool\"]\n").unwrap();
+    let lock = lock::parse(
+        "[scoop.tool]\nbucket = \"main\"\ncommit = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let installed = vec![installed("tool", "1.0.0-rc1")];
+
+    let p = plan(
+        &declared,
+        &lock,
+        &installed,
+        &State::default(),
+        &Running::default(),
+    );
+
+    assert!(
+        matches!(p.actions.first(), Some(Action::Downgrade { .. })),
+        "1.0.0-rc1 -> 1.0.0 is [1,0,0,1] -> [1,0,0], which this function calls a \
+         downgrade; the comment claiming they compare equal was wrong: {:?}",
+        p.actions
+    );
+}

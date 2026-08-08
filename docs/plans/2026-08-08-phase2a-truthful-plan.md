@@ -1875,6 +1875,8 @@ Record the verbatim output, then answer:
 2. **Are `neovim` and `ripgrep` matched by their real executables?** These are safe to start and kill: `nvim --headless` and `rg` against a large tree both exit on demand and hold nothing. With one running and a lock entry forcing a version change, each must print `!` rather than an upgrade or downgrade line.
 3. **Is `nodejs` caught by path matching alone?** Start a `node` process that sleeps, e.g. `node -e "setTimeout(()=>{}, 120000)"`, and kill it afterwards. `nodejs` names no executable in its manifest, so a `!` line here comes from the path signal and nothing else. This is the case that justified putting path matching in 2a. `rustup`/`cargo` is the same shape and may be used instead or as well, provided nothing long-running is left behind.
 
+   **Start those processes from inside the medium-integrity scheduled task, not from the `ssh` session.** A process launched from the elevated session runs at High IL, and `sysinfo` running at Medium cannot read `exe()` for it — so path matching would see nothing and the run would manufacture a false negative of exactly the shape Phase 1 already produced once. Getting this wrong would make question 3 report failure for a feature that works.
+
    Every process started for this run must be killed before the task finishes, and the record must list them.
 4. **Do all thirty apps still scan, with no new warnings** compared with the Phase 1 run?
 5. **Does `~ scoop stylua 64bit, declared arm64` appear**, and does the summary line carry `1 architecture drift`?

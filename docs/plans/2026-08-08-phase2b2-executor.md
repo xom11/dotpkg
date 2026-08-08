@@ -187,21 +187,50 @@ impl Snapshot {
 Run: `cargo test --test cli` — expected: 4 passed.
 Run: `cargo test --all` — expected: 148 passed, 0 failed.
 
-- [ ] **Step 5: Negative control — prove the new test can fail**
+- [ ] **Step 5: Enforce the no-fake-scoop constraint where it cannot false-positive**
 
-Revert `digest` to `fn digest(_: &Path) -> u64 { 0 }`, run
-`cargo test --test cli the_snapshot_notices -- --exact`. Record that it fails
-with `a rewrite of an existing file must show up as a change`. Restore.
+The spec asks for a source scan over `tests/` forbidding the literal `shims`.
+**That scan does not work:** `tests/prepare.rs:496` already contains `shims` in
+a comment, so it would fail on arrival and be deleted rather than fixed.
+Enforce the actual property instead — that no fixture ever puts a file where
+`Scoop::scoop_exe()` looks — as the first lines of `Fixture::run`:
 
-- [ ] **Step 6: Commit**
+```rust
+    fn run(&self, args: &[&str]) -> Output {
+        // A `#!/bin/sh` file at this path would buy a green "end-to-end" test
+        // on macOS, where `execve` ignores the `.cmd`, that means something
+        // entirely different on a Windows runner. Checked here rather than by
+        // scanning the test sources, which cannot tell a comment from a call.
+        assert!(
+            !self.scoop.path().join("shims").join("scoop.cmd").exists(),
+            "no test may provide a fake scoop binary"
+        );
+        // ... the existing body, unchanged
+```
+
+- [ ] **Step 6: Negative controls — prove both additions can fail**
+
+1. Revert `digest` to `fn digest(_: &Path) -> u64 { 0 }`, run
+   `cargo test --test cli the_snapshot_notices -- --exact`. Record that it
+   fails with `a rewrite of an existing file must show up as a change`.
+   Restore.
+2. In one test, create `<scoop root>/shims/scoop.cmd` before calling `run`.
+   Record that the new assertion fires with `no test may provide a fake scoop
+   binary`. Remove the file and the temporary line.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add tests/cli.rs
-git commit -m "Make the cli Snapshot compare content, not just path names
+git commit -m "Make the cli Snapshot compare content, and forbid a fake scoop binary
 
 Measured: injecting the state.json write Phase 2b-2 adds left the cli
 suite 3/3 green while the file's content was replaced. Every later
-'nothing was touched' assertion in this phase depends on this."
+'nothing was touched' assertion in this phase depends on this.
+
+The no-fake-scoop rule is enforced in Fixture::run rather than by the
+source scan the spec suggested: tests/prepare.rs already contains the
+literal 'shims' in a comment, so that scan would fail on arrival."
 ```
 
 ---
@@ -637,9 +666,10 @@ fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
     let scoop = Scoop::new(root.path().to_path_buf());
 
     for rev in ["main", "HEAD", "@", "refs/heads/main"] {
-        let err = scoop
-            .stage(stage_dir.path(), &Name::new("tool"), &pin("main", rev, "2.0.0"))
-            .unwrap_or_else(|_| panic!("{rev:?} must not be accepted as a pin"));
+        let Err(err) = scoop.stage(stage_dir.path(), &Name::new("tool"), &pin("main", rev, "2.0.0"))
+        else {
+            panic!("{rev:?} must not be accepted as a pin");
+        };
         let msg = format!("{err:#}");
         assert!(msg.contains(rev), "name the offending value: {msg}");
         assert!(msg.contains("hex"), "say what a commit must look like: {msg}");
@@ -659,11 +689,6 @@ fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
     let _ = shas;
 }
 ```
-
-The `unwrap_or_else(|_| panic!(...))` above is deliberate: `stage` returns
-`Result<PathBuf>`, so this reads the `Ok` case as the failure. Write it as
-`let Err(err) = scoop.stage(..) else { panic!("{rev:?} must not be accepted") };`
-if that is clearer in review.
 
 ```rust
 #[test]
@@ -1610,14 +1635,25 @@ Add to `src/backend/scoop.rs`'s `mod tests`:
         // The argv tests above are only honest if there is exactly one
         // construction site per command. An inline `.args([...])` would slip
         // past all of them.
+        //
+        // `git` argv are exempt: they are built inline on purpose in
+        // `git_show` and `resolve_spelling`, and neither is a scoop
+        // invocation. Verified at plan time: exactly two such sites exist
+        // (`git_ok` takes a slice variable, so it does not match).
         let src = include_str!("scoop.rs");
         let inline = src.matches(".args([").count();
         assert_eq!(
-            inline, 0,
-            "build every argv in a *_argv function so the tests above cover it"
+            inline, 2,
+            "the two inline .args([..]) belong to git (git_show, resolve_spelling); \
+             build every SCOOP argv in a *_argv function so the tests above cover it"
         );
     }
 ```
+
+The `2` was checked against the tree, not assumed:
+`grep -c '\.args(\[' src/backend/scoop.rs` → 2, at lines 426 and 469. If your
+count differs, the file changed — say so in the task report rather than
+editing the number to match.
 
 - [ ] **Step 2: Run and watch them fail**
 
@@ -2396,7 +2432,8 @@ adopted package stays adopted."
 
 **Interfaces:**
 - Produces:
-  - `pub struct ExecOptions { pub keep_going: bool, pub recovery_path: Option<PathBuf> }`
+  - `pub struct ExecOptions { pub recovery_path: Option<PathBuf> }` — note
+    there is no `keep_going` here; see Step 3 for why.
   - `pub enum ItemResult { Done, Failed(String), Held(String) }`
   - `pub struct Execution { pub results: Vec<(Name, ItemResult)>, pub dropped_ghosts: Vec<Name> }`
   - `impl Execution { pub fn changed(&self) -> usize; pub fn failed(&self) -> usize; pub fn held(&self) -> usize; pub fn exit_code(&self, refused: bool) -> i32 }`
@@ -2544,12 +2581,18 @@ use crate::model::Running;
 
 #[derive(Debug, Default, Clone)]
 pub struct ExecOptions {
-    /// Run the ready installs even though the preparation was not ok. Never
-    /// releases a removal.
-    pub keep_going: bool,
     /// Where to write the recovery script before the first mutation.
     pub recovery_path: Option<PathBuf>,
 }
+```
+
+**`keep_going` is deliberately NOT a field here.** It decides which steps get
+built, and `main.rs` has already applied it by the time `execute` is called —
+carrying it in would be a flag the function receives and never reads, which is
+both dead and misleading about where the decision lives. If a later change
+needs `execute` itself to branch on it, add it then, with the branch.
+
+```rust
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemResult {
@@ -3403,7 +3446,6 @@ the spec fixes:
             }
 
             let opts = dotpkg::execute::ExecOptions {
-                keep_going,
                 recovery_path: staging_root.parent().map(|p| p.join("recover.cmd")),
             };
             let mut ex = dotpkg::execute::execute(

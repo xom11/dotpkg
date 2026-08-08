@@ -139,7 +139,7 @@ fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
     // stage_text's version check passes too and the pin silently means latest.
     let root = tempfile::tempdir().unwrap();
     let stage_dir = tempfile::tempdir().unwrap();
-    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0", "2.0.0"]);
+    bucket_repo(root.path(), "main", "tool.json", &["1.0.0", "2.0.0"]);
     let scoop = Scoop::new(root.path().to_path_buf());
 
     for rev in ["main", "HEAD", "@", "refs/heads/main"] {
@@ -169,7 +169,6 @@ fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
         !stage_dir.path().join("tool").exists(),
         "nothing may be staged for a refused pin"
     );
-    let _ = shas;
 }
 
 #[test]

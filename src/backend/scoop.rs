@@ -746,4 +746,48 @@ mod tests {
             );
         }
     }
+
+    // -- ensure_commit_hash ------------------------------------------
+
+    #[test]
+    fn a_real_sha1_or_sha256_commit_hash_is_accepted() {
+        let sha1 = "a".repeat(40);
+        let sha256 = "a".repeat(64);
+        for good in [sha1.as_str(), sha256.as_str()] {
+            ensure_commit_hash(&Name::new("tool"), good)
+                .unwrap_or_else(|e| panic!("{good:?} must be accepted: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn every_shape_that_is_not_a_lowercase_hex_hash_is_refused() {
+        // Both halves of the predicate covered independently: an all-hex
+        // string of the wrong length (abc123, 39 chars, 41 chars), and a
+        // string of the right length that is not all-hex (uppercase, a
+        // non-hex letter, a trailing space). Measured: deleting either half
+        // of `ensure_commit_hash`'s `ok` alone left the full suite green,
+        // because every fixture that is all-hex is also 40 or 64 characters
+        // and every fixture of the wrong length is also non-hex -- so no
+        // single case here may be dropped without losing that independence.
+        let len39 = "a".repeat(39);
+        let len41 = "a".repeat(41);
+        let upper40 = "A".repeat(40);
+        let nonhex40 = "z".repeat(40);
+        let trailing_space = format!("{} ", "a".repeat(39));
+        for bad in [
+            "abc123",
+            len39.as_str(),
+            len41.as_str(),
+            upper40.as_str(),
+            nonhex40.as_str(),
+            trailing_space.as_str(),
+        ] {
+            let err = ensure_commit_hash(&Name::new("tool"), bad).expect_err("must be refused");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("hex"),
+                "say what a commit must look like: {bad:?} -> {msg}"
+            );
+        }
+    }
 }

@@ -6,7 +6,6 @@ use crate::model::SCOOP;
 use crate::plan::{Action, Plan, SkipReason};
 use crate::state::State;
 use anyhow::Result;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Refuse a plan built from a config that declares nothing while dotpkg owns
@@ -51,14 +50,15 @@ pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
 /// `Scoop::stage` re-checks the same rules, deliberately: this guard gives a
 /// good whole-run message, and `stage` is a public API that Phase 3 will call
 /// from somewhere else. Neither is allowed to be the only one.
-pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> Result<()> {
-    let buckets: BTreeSet<&str> = declared
-        .scoop
-        .buckets
-        .iter()
-        .map(|b| b.split_once('=').map(|(n, _)| n).unwrap_or(b.as_str()))
-        .collect();
-
+///
+/// Deliberately does not check the lock's bucket against `pkg.toml`'s
+/// declared buckets: that is a per-package concern (Task 11 owns it, once a
+/// parsed `BucketDecl` gives it a case-folded name to compare against), not a
+/// whole-run one. A whole-run version of that check deadlocks -- drop a
+/// package and its bucket line from `pkg.toml` together, and the stale lock
+/// entry would fail every later `apply` before the plan is even built,
+/// including the prune that would otherwise clear it.
+pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
     for (name, pin) in &lock.scoop {
         let Pin::ScoopCommit {
             bucket,
@@ -77,11 +77,6 @@ pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> Result<()> {
             })
             .and_then(|()| crate::backend::scoop::ensure_commit_hash(name, commit))
             .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
-        anyhow::ensure!(
-            buckets.contains(bucket.as_str()),
-            "pkg.lock [scoop.{name}] names bucket {bucket:?}, which pkg.toml does not declare. \
-             Add it to [scoop] buckets, or run `dotpkg update`."
-        );
     }
     Ok(())
 }
@@ -788,9 +783,6 @@ mod tests {
     fn the_lock_coherence_guard_refuses_every_shape_that_is_decidable_without_io() {
         use crate::lock::Pin;
 
-        let declared =
-            crate::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
-
         let bad_commit = {
             let mut l = Lock::default();
             l.scoop.insert(
@@ -803,12 +795,20 @@ mod tests {
             );
             l
         };
-        let msg = format!(
-            "{:#}",
-            lock_coherence_guard(&declared, &bad_commit).unwrap_err()
-        );
+        let msg = format!("{:#}", lock_coherence_guard(&bad_commit).unwrap_err());
         assert!(msg.contains("tool") && msg.contains("main"), "{msg}");
         assert!(msg.contains("dotpkg update"), "say how to fix it: {msg}");
+        assert!(
+            msg.contains("hex"),
+            "say what a commit must look like, not just that it's wrong: {msg}"
+        );
+        // Without this, "tool" and "main" are also satisfied by the
+        // undeclared-bucket-style message this guard used to produce, so the
+        // two asserts above would pass for the wrong reason.
+        assert!(
+            !msg.contains("is not in bucket"),
+            "refused for its shape, not for being absent: {msg}"
+        );
 
         let winget_pin_in_scoop_map = {
             let mut l = Lock::default();
@@ -820,25 +820,21 @@ mod tests {
             );
             l
         };
-        assert!(lock_coherence_guard(&declared, &winget_pin_in_scoop_map).is_err());
+        assert!(lock_coherence_guard(&winget_pin_in_scoop_map).is_err());
 
-        let undeclared_bucket = {
+        let path_escaping_bucket = {
             let mut l = Lock::default();
             l.scoop.insert(
                 Name::new("tool"),
                 Pin::ScoopCommit {
-                    bucket: "nowhere".into(),
+                    bucket: "../evil".into(),
                     commit: "a".repeat(40),
                     version: "1.0.0".into(),
                 },
             );
             l
         };
-        let msg = format!(
-            "{:#}",
-            lock_coherence_guard(&declared, &undeclared_bucket).unwrap_err()
-        );
-        assert!(msg.contains("nowhere"), "name the bucket: {msg}");
+        assert!(lock_coherence_guard(&path_escaping_bucket).is_err());
     }
 
     #[test]
@@ -846,8 +842,6 @@ mod tests {
         // Positive control: without it, a guard that always errors passes the
         // test above.
         use crate::lock::Pin;
-        let declared =
-            crate::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
         let mut lock = Lock::default();
         lock.scoop.insert(
             Name::new("tool"),
@@ -857,7 +851,7 @@ mod tests {
                 version: "1.0.0".into(),
             },
         );
-        lock_coherence_guard(&declared, &lock).unwrap();
+        lock_coherence_guard(&lock).unwrap();
     }
 
     #[test]

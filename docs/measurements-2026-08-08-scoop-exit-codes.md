@@ -138,13 +138,14 @@ Checking hash of fzf-0.74.1-windows_arm64.zip ... ok.
 INFO  Downloading 'fzf' [64bit]
 Downloading https://github.com/junegunn/fzf/releases/download/v0.74.1/fzf-0.74.1-windows_amd64.zip (2.1 MB)...
 Checking hash of fzf-0.74.1-windows_amd64.zip ... ok.
-'fzf' (0.74.1) was installed successfully!
+'fzf' (0.74.1) was downloaded successfully!
 ```
 
-(Line above transcribed exactly as captured — "downloaded" is what the
-`download` subcommand actually printed in the other three cases; this
-confirms `-a` changes which artifact is fetched, which is the basis for
-"`-a` is mandatory" in the executor design.)
+Two different artifacts — `fzf-0.74.1-windows_arm64.zip` (1.9 MB) versus
+`fzf-0.74.1-windows_amd64.zip` (2.1 MB) — and two distinct cache entries
+(confirmed under "M1 (internal label) — cache reuse" below) is the evidence
+that `-a` changes which artifact is fetched, which is the basis for "`-a` is
+mandatory" in the executor design.
 
 `scoop install -u -a arm64` on the fzf manifest into the empty probe root
 installed successfully:
@@ -221,7 +222,7 @@ confirming a prefetch that omits `-a` warms the wrong one.
       | Unlinking ~\AppData\Local\Temp\dotpkg-probe-root\apps\fzf\current
       | 'fzf' was uninstalled.
 apps/fzf still exists = False
-shims/ after uninstall: (empty)
+shims/ after uninstall:
 cache after uninstall: fzf#0.74.1#54d353d.zip, fzf#0.74.1#bd3be84.zip
 persist/ exists = False
 ```
@@ -231,14 +232,22 @@ Uninstall is clean: `apps/<app>` is gone entirely, the cache is kept,
 
 ### M10a (internal label) — wall-clock timing, warm cache
 
-| Step | Wall time |
+| Step | Wall time (as labelled in the raw capture) |
 |---|---|
-| reinstall fzf from warm cache | 3.92 s (install-only: 6.01 s once, includes a `Checking hash` line) |
+| reinstall fzf from warm cache — per-command timer (`wall:`) | 3.92 s |
+| the same reinstall — a second, separately-reported figure (`install-only wall =`) | 6.01 s |
 | uninstall fzf | 4.66 s |
-| reinstall fzf again | 3.79 s |
+| install fzf (second reinstall) | 3.79 s |
 | **full uninstall+install window** | **11.63 s** |
 
-Spawn-dominated at this package size, not extraction-dominated.
+The 3.92 s and 6.01 s rows are both real numbers from the capture, both
+attached to the same "reinstall fzf from warm cache" command block, one
+right after the other. The raw output does not explain why they differ, and
+nothing here guesses — reported as two figures, not reconciled into one.
+
+Spawn-dominated at this package size, not extraction-dominated — the
+conclusion `docs/specs/2026-08-08-phase2b2-executor-design.md` draws from
+these same numbers.
 
 ### M11 — download failure modes, exit code vs. stdout/stderr
 
@@ -487,7 +496,7 @@ exists = True
 current exists = False
 current\manifest.json exists = False
 current\install.json exists = False
-shims/ now: (empty)
+shims/ now:
 ```
 
 Only the downloaded (bad-hash) archive is present. No `current` junction, no
@@ -524,7 +533,8 @@ compared:
 | `powershell.exe -File scoop.ps1 download <badhash manifest>` | 0 |
 | `powershell.exe -Command "& scoop.ps1 download <badhash manifest>; Write-Host ('LASTEXITCODE=' + $LASTEXITCODE)"` | 0, and the script printed `LASTEXITCODE=0` explicitly |
 
-All three end with the same stdout tail:
+The first two (`.cmd` and `powershell -File`) end with an identical captured
+tail:
 
 ```
 Expected:    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -534,6 +544,26 @@ Please try again or create a new issue by using the following link and paste you
 https:////
 'badhash' (0.74.1) was downloaded successfully!
 ```
+
+The third (`powershell -Command`, echoing `$LASTEXITCODE`) was captured with
+one line fewer at the top of this tail — it starts at `Actual:`, with no
+`Expected:` line — and one line more at the bottom, the explicit proof this
+sub-test exists for:
+
+```
+Actual:      b688ecafa2d1fdb0af3383f25d6d122866c13ad7cc996e9f735bf90e6c75f83f
+ERROR
+Please try again or create a new issue by using the following link and paste your console output:
+https:////
+'badhash' (0.74.1) was downloaded successfully!
+LASTEXITCODE=0
+```
+
+The raw capture does not say why the `Expected:` line is missing from the
+third one specifically — most likely a fixed-size tail-capture window pushed
+out by the appended `LASTEXITCODE=0` line, but that is not stated in the
+source, so it is not asserted here. What all three agree on, unambiguously,
+is the exit code: `0`.
 
 **It is not the `.cmd` shim.** `scoop.ps1` itself, invoked directly by
 PowerShell with no `.cmd` wrapper in the path at all, sets `$LASTEXITCODE` to
@@ -601,10 +631,12 @@ about — a pinned manifest pulling a dependency at latest, over the network,
 inside the mutation window — is not live on this machine, on this bucket, on
 this day. It could still exist elsewhere; nothing here proves `depends`
 support is unnecessary in general, only that it was never exercised in any
-measurement this project has run. `docs/phase2b1-prepare-design.md`'s
-dogfood and `docs/specs/2026-08-08-phase2b2-executor-design.md` both record
-falsified predictions the same way, by name, rather than dropping them; this
-is the third.
+measurement this project has run. This follows the same convention
+`docs/phase2b-notes.md` already set for the Phase 2b-1 dogfood's "upstream
+rot would break some fetches" prediction — named as falsified, not dropped —
+and is the same finding
+`docs/specs/2026-08-08-phase2b2-executor-design.md` already summarises under
+"Everything else measured the same day", now given its full record here.
 
 ## Corrections to `docs/phase2b-notes.md`
 

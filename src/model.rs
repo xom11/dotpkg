@@ -327,4 +327,32 @@ mod tests {
         let r = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("NodeJS")]));
         assert!(r.covers(&installed("nodejs", &[])));
     }
+
+    #[test]
+    fn covers_name_checks_both_the_names_half_and_the_dirs_half() {
+        // covers_name has no unit test of its own -- dropping either half of
+        // its `||` leaves the whole suite green. The `dirs` half is the only
+        // signal for a package that names no executable at all (nodejs,
+        // rustup on the author's machine), so a caller with only a name (not
+        // a full `Installed`) must still be able to see it.
+        let by_name = Running::new(BTreeSet::from(["fzf".to_string()]), BTreeSet::new());
+        assert!(
+            by_name.covers_name(&Name::new("fzf")),
+            "the names half must be checked"
+        );
+        assert!(
+            !by_name.covers_name(&Name::new("nodejs")),
+            "an unrelated name must not be covered"
+        );
+
+        let by_dir = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("nodejs")]));
+        assert!(
+            by_dir.covers_name(&Name::new("nodejs")),
+            "the dirs half must be checked"
+        );
+        assert!(
+            !by_dir.covers_name(&Name::new("fzf")),
+            "an unrelated directory must not be covered"
+        );
+    }
 }

@@ -337,6 +337,15 @@ fn stage_and_fetch(action: &Action, lock: &Lock, scoop: &Scoop, staging_root: &P
 
 /// Turn a finished `Preparation` into the steps the executor will run, plus
 /// the packages that could not become steps and why.
+///
+/// `Outcome::Skipped` (today, only ever a running process at prepare time, or
+/// a backend not yet implemented) is routed into the same `unusable` list as
+/// `Failed` and `NotLocked`, rather than a third return: all three are the
+/// same shape from a caller's point of view -- "no step, and a reason the
+/// user must be shown" -- and `Preparation::is_ok` already keeps its own,
+/// separate count of which of them refuse the whole run, so `unusable` does
+/// not need to repeat that distinction to be useful to a caller that just
+/// wants to report what didn't become a step and why.
 pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
     let mut steps = Vec::new();
     let mut unusable = Vec::new();
@@ -368,6 +377,7 @@ pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
                 action_name(a),
                 "no lock entry -- run `dotpkg update`".to_string(),
             )),
+            (a, Outcome::Skipped { why }) => unusable.push((action_name(a), why.clone())),
             _ => {}
         }
     }
@@ -977,5 +987,226 @@ mod tests {
         for p in &prep.prepared {
             assert_eq!(p.outcome, Outcome::Report);
         }
+    }
+
+    // -- plan_to_steps() -------------------------------------------------
+    //
+    // Unverified before this round: the reviewer enumerated all 42 (action x
+    // outcome) pairs and found the behaviour correct but untested -- swapping
+    // an arm so that an `Install` carrying a stray `ReadyToRemove` becomes a
+    // `Step::Remove` kept every existing test green.
+
+    #[test]
+    fn the_three_ready_shapes_produce_their_matching_steps() {
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Install {
+                        backend: SCOOP.into(),
+                        name: Name::new("fzf"),
+                        version: "1.0.0".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::ReadyToFetch {
+                        manifest: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                    },
+                },
+                Prepared {
+                    action: Action::Upgrade {
+                        backend: SCOOP.into(),
+                        name: Name::new("bat"),
+                        from: "1".into(),
+                        to: "2".into(),
+                        arch: Some("arm64".into()),
+                    },
+                    outcome: Outcome::ReadyToFetch {
+                        manifest: PathBuf::from("/stage/bat/2/bat.json"),
+                    },
+                },
+                Prepared {
+                    action: Action::Downgrade {
+                        backend: SCOOP.into(),
+                        name: Name::new("ripgrep"),
+                        from: "2".into(),
+                        to: "1".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::ReadyToFetch {
+                        manifest: PathBuf::from("/stage/ripgrep/1/ripgrep.json"),
+                    },
+                },
+                Prepared {
+                    action: Action::Prune {
+                        backend: SCOOP.into(),
+                        name: Name::new("aichat"),
+                        version: "0.30.0".into(),
+                    },
+                    outcome: Outcome::ReadyToRemove,
+                },
+            ],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(unusable.is_empty(), "{unusable:?}");
+        assert_eq!(
+            steps,
+            vec![
+                Step::Install {
+                    app: Name::new("fzf"),
+                    staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                    arch: None,
+                },
+                Step::Replace {
+                    app: Name::new("bat"),
+                    staged: PathBuf::from("/stage/bat/2/bat.json"),
+                    arch: Some("arm64".into()),
+                },
+                Step::Replace {
+                    app: Name::new("ripgrep"),
+                    staged: PathBuf::from("/stage/ripgrep/1/ripgrep.json"),
+                    arch: None,
+                },
+                Step::Remove {
+                    app: Name::new("aichat"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_install_action_carrying_a_stray_readytoremove_produces_nothing() {
+        // The invariant `plan_to_steps` exists to hold: branch on the ACTION,
+        // never on the outcome alone. Nothing in the type system stops an
+        // `Outcome::ReadyToRemove` from being attached to an `Install` --
+        // this is exactly the pair a version that matched on the outcome by
+        // itself would turn into a `Step::Remove` for a package nobody asked
+        // to remove.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: Name::new("fzf"),
+                    version: "1.0.0".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToRemove,
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert!(unusable.is_empty(), "{unusable:?}");
+    }
+
+    #[test]
+    fn a_prune_action_carrying_a_stray_readytofetch_produces_nothing() {
+        // The mirror image of the test above.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Prune {
+                    backend: SCOOP.into(),
+                    name: Name::new("aichat"),
+                    version: "0.30.0".into(),
+                },
+                outcome: Outcome::ReadyToFetch {
+                    manifest: PathBuf::from("/stage/aichat/0.30.0/aichat.json"),
+                },
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert!(unusable.is_empty(), "{unusable:?}");
+    }
+
+    #[test]
+    fn failed_and_not_locked_land_in_unusable_with_their_reasons() {
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Install {
+                        backend: SCOOP.into(),
+                        name: Name::new("fzf"),
+                        version: "1.0.0".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::Failed {
+                        why: "hash mismatch".into(),
+                    },
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("bat"),
+                        reason: SkipReason::NotLocked,
+                    },
+                    outcome: Outcome::NotLocked,
+                },
+            ],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![
+                (Name::new("fzf"), "hash mismatch".to_string()),
+                (
+                    Name::new("bat"),
+                    "no lock entry -- run `dotpkg update`".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_running_skip_lands_in_unusable_too() {
+        // The fix for Important 5: `Outcome::Skipped` reached neither list --
+        // it fell into the wildcard arm and vanished, even though it is
+        // exactly "a package that could not become a step, and why", the
+        // same shape `unusable` already exists to hold for `Failed` and
+        // `NotLocked`.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Skip {
+                    backend: SCOOP.into(),
+                    name: Name::new("kanata"),
+                    reason: SkipReason::Running,
+                },
+                outcome: Outcome::Skipped {
+                    why: "running -- stop it first".into(),
+                },
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![(Name::new("kanata"), "running -- stop it first".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_report_outcome_produces_neither_a_step_nor_an_unusable_entry() {
+        // `Report` (`Unmanaged`, `ArchDrift`) is the one outcome that is
+        // neither ready nor an error dotpkg caused -- it must land in the
+        // wildcard arm, not `unusable`, or a caller printing `unusable` as
+        // "packages that need attention" would wrongly nag about packages
+        // dotpkg never touched at all.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Unmanaged {
+                    backend: SCOOP.into(),
+                    name: Name::new("antigravity"),
+                    version: "2.0.6".into(),
+                },
+                outcome: Outcome::Report,
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert!(unusable.is_empty(), "{unusable:?}");
     }
 }

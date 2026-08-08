@@ -175,6 +175,13 @@ pub enum ItemResult {
 pub struct Execution {
     pub results: Vec<(Name, ItemResult)>,
     pub dropped_ghosts: Vec<Name>,
+    /// `Some(reason)` when `write_recovery` failed. Deliberately not a
+    /// refusal -- the run still went ahead, because `execute` does not get
+    /// to decide that a missing safety net outweighs the packages the user
+    /// asked for -- but a warning printed once, above minutes of scoop
+    /// output, and never recorded anywhere `Execution` is read back from, is
+    /// as good as no warning at all. The caller decides what to do with it.
+    pub recovery_write_failed: Option<String>,
 }
 
 impl Execution {
@@ -196,12 +203,19 @@ impl Execution {
             .filter(|(_, r)| matches!(r, ItemResult::Held(_)))
             .count()
     }
-    /// 0 everything verified · 1 something changed and something failed ·
-    /// 2 refused, nothing changed.
+    /// 0 = everything verified · 1 = something changed and something failed ·
+    /// 2 = nothing changed, and something was refused or failed.
     ///
     /// The distinction 2 buys is the one a caller most needs: "go look at the
-    /// machine" versus "nothing to look at".
+    /// machine" versus "nothing to look at". `refused` and "changed
+    /// something" can never both be true: a refusal means `execute` returned
+    /// `Err` before performing a single step, so nothing in `self` could have
+    /// changed.
     pub fn exit_code(&self, refused: bool) -> i32 {
+        debug_assert!(
+            !(refused && self.changed() > 0),
+            "a refused run cannot also have changed something"
+        );
         if refused {
             return 2;
         }
@@ -241,7 +255,13 @@ pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
             Some(a) => format!("-a {a} "),
             None => String::new(),
         };
-        let _ = writeln!(text, "scoop install -u {a}\"{}\"\r", staged.display());
+        // `%` is expanded by cmd even *inside* double quotes, so an
+        // unescaped `%` in a staged path (`C:\Users\a%b\...`) would make the
+        // recovery line reference an undefined batch variable instead of the
+        // manifest dotpkg actually staged. Doubling it to `%%` is how a
+        // batch file spells a literal `%`.
+        let escaped = staged.display().to_string().replace('%', "%%");
+        let _ = writeln!(text, "scoop install -u {a}\"{escaped}\"\r");
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -273,29 +293,48 @@ pub fn root_looks_like_scoop(root: &Path) -> Result<(), String> {
 /// Run every step, in order, verifying each. One package's failure never
 /// stops another's.
 ///
-/// Callers must have passed `root_looks_like_scoop` first; `main.rs` does.
+/// Refuses via `root_looks_like_scoop` at the very top, before anything else
+/// -- including before the recovery file is written. This used to be a
+/// precondition documented as the caller's job ("`main.rs` does"); it wasn't
+/// actually being called anywhere, which left the exact hazard it exists for
+/// -- every uninstall verifying as successful against a wrong or typo'd
+/// `$SCOOP` -- wide open. Defence belongs at the point of use.
+///
+/// `running` is a sampler, not a snapshot: it is called again immediately
+/// before each step's mutation, not once at the top. A single `&Running`
+/// captured before `execute` starts would only ever re-confirm what the
+/// planner already knew when it built the plan -- any package running at
+/// that moment was already turned into `Skip{Running}` upstream, so it never
+/// reaches here as a `Step` at all. The case this sampler exists for is a
+/// package that starts running *during* the run: a prefetch of two dozen
+/// packages can take minutes, and a user who opens their editor partway
+/// through must not have it uninstalled out from under them.
 pub fn execute(
     root: &Path,
     steps: Vec<Step>,
     m: &dyn Mutator,
     state: &mut State,
-    running: &Running,
+    running: &dyn Fn() -> Running,
     opts: &ExecOptions,
-) -> Execution {
+) -> Result<Execution, String> {
+    root_looks_like_scoop(root)?;
+
     let steps = order(steps);
     let mut ex = Execution::default();
 
     if let Some(p) = &opts.recovery_path {
         if let Err(e) = write_recovery(p, &steps) {
-            eprintln!("warning: could not write the recovery script: {e:#}");
+            let msg = format!("{e:#}");
+            eprintln!("warning: could not write the recovery script: {msg}");
+            ex.recovery_write_failed = Some(msg);
         }
     }
 
     for step in &steps {
         let app = step.app().clone();
-        // Re-checked here, not only at plan time: `running` was sampled before
-        // the prefetch, which takes minutes.
-        if running.covers_name(&app) {
+        // Called here, per step -- not hoisted out of the loop. See the
+        // function doc for why a snapshot cannot do this job.
+        if running().covers_name(&app) {
             ex.results.push((
                 app,
                 ItemResult::Held(
@@ -310,5 +349,5 @@ pub fn execute(
         };
         ex.results.push((app, r));
     }
-    ex
+    Ok(ex)
 }

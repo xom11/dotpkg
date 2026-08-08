@@ -4,7 +4,7 @@
 use dotpkg::execute::*;
 use dotpkg::model::{Name, Running, SCOOP};
 use dotpkg::state::{Ownership, State};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 const BODY_A: &str = r#"{"version":"1.0.0","url":"https://good/v1.zip"}"#;
@@ -413,9 +413,10 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
         ],
         &fake,
         &mut state,
-        &Running::default(),
+        &|| Running::default(),
         &ExecOptions::default(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(ex.failed(), 1);
     assert_eq!(
@@ -487,9 +488,10 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
         ],
         &fake,
         &mut state,
-        &Running::default(),
+        &|| Running::default(),
         &ExecOptions::default(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert_eq!(
@@ -504,38 +506,75 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
 
 #[test]
 fn a_package_that_started_running_between_the_plan_and_the_mutation_is_skipped() {
-    // `running` is sampled once, before roughly two dozen downloads. A user
-    // who opens their editor during the prefetch must not have it uninstalled.
+    // `running` must be RE-sampled immediately before each step, not
+    // snapshotted once at the top: a package that was quiet at plan time (so
+    // the planner never turned it into `Skip{Running}`, and it exists here as
+    // a `Step` at all) can start running while an earlier step in the same
+    // run is still downloading -- a prefetch of two dozen packages can take
+    // minutes. The sampler below proves the RE-sample and not just the
+    // check: it reports nothing running on its first call and reports
+    // `nvim-ish` from its second call onward, so only a fresh call made for
+    // THIS step -- not a value captured once when `execute` started -- can
+    // see it.
     let t = Tree::new();
+    let staged = t.stage("aichat", "1.0.0", BODY_A);
     t.install("nvim-ish", BODY_A);
     let fake = Fake::honest(&t);
     let mut state = State::default();
     state.set(SCOOP, &Name::new("nvim-ish"), Ownership::Installed);
-    let running = Running::new(
-        std::collections::BTreeSet::from(["nvim-ish".to_string()]),
-        Default::default(),
-    );
+
+    let calls = Cell::new(0usize);
+    let running = || {
+        let n = calls.get();
+        calls.set(n + 1);
+        if n == 0 {
+            Running::default()
+        } else {
+            Running::new(
+                std::collections::BTreeSet::from(["nvim-ish".to_string()]),
+                Default::default(),
+            )
+        }
+    };
 
     let ex = execute(
         t.root(),
-        vec![Step::Remove {
-            app: Name::new("nvim-ish"),
-        }],
+        vec![
+            Step::Install {
+                app: Name::new("aichat"),
+                staged,
+                arch: None,
+            },
+            Step::Remove {
+                app: Name::new("nvim-ish"),
+            },
+        ],
         &fake,
         &mut state,
         &running,
         &ExecOptions::default(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(ex.held(), 1, "{:?}", ex.results);
     assert_eq!(
-        fake.calls(),
-        Vec::<String>::new(),
-        "nothing may be run for it"
+        ex.changed(),
+        1,
+        "aichat installs before nvim-ish starts running: {:?}",
+        ex.results
+    );
+    assert!(
+        !fake.calls().iter().any(|c| c.contains("nvim-ish")),
+        "nothing may be run against the package that started running: {:?}",
+        fake.calls()
     );
     assert!(
         state.owns(SCOOP, &Name::new("nvim-ish")),
         "and it stays owned"
+    );
+    assert!(
+        calls.get() >= 2,
+        "the sampler must be re-invoked per step to prove re-sampling, not a single snapshot"
     );
 }
 
@@ -594,12 +633,27 @@ fn a_run_that_changed_nothing_and_a_run_that_changed_something_exit_differently(
             (Name::new("b"), ItemResult::Failed("no".into())),
         ],
         dropped_ghosts: Vec::new(),
+        recovery_write_failed: None,
     };
     assert_eq!(
         mixed.exit_code(false),
         1,
         "something changed and something failed"
     );
+}
+
+#[test]
+#[should_panic(expected = "cannot also have changed something")]
+fn exit_code_asserts_a_refused_run_changed_nothing() {
+    // Minor 7's debug_assert: `refused` and "changed something" can never
+    // both be true, because a refusal means `execute` returned `Err` before
+    // performing a single step.
+    let bad = Execution {
+        results: vec![(Name::new("a"), ItemResult::Done)],
+        dropped_ghosts: Vec::new(),
+        recovery_write_failed: None,
+    };
+    let _ = bad.exit_code(true);
 }
 
 #[test]
@@ -629,9 +683,10 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
         }],
         &fake,
         &mut state,
-        &Running::default(),
+        &|| Running::default(),
         &ExecOptions::default(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert!(
@@ -668,4 +723,201 @@ fn a_root_with_an_apps_directory_looks_like_scoop() {
     let t = Tree::new();
     t.empty_apps();
     root_looks_like_scoop(t.root()).unwrap();
+}
+
+// -- Critical 1: the recovery file exists BEFORE execute's first mutation --
+//
+// `write_recovery` alone (tested above) proves content and that removals are
+// excluded from it -- nothing about ORDER, and nothing about `execute` ever
+// calling it at all. Replacing the whole recovery block in `execute` with
+// `let _ = &opts.recovery_path;` left every other test green.
+
+#[test]
+fn the_recovery_file_exists_on_disk_before_executes_first_mutation() {
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    let recovery_path = t.root().join("recover.cmd");
+
+    // A mutator whose every call asserts the recovery file is already
+    // there. If `execute` writes it after the fact, or not at all, the
+    // very first call -- `install`, since there is nothing to uninstall for
+    // a plain `Install` -- panics instead of the assertion below firing.
+    struct AssertRecoveryAlreadyExists<'a> {
+        tree: &'a Tree,
+        recovery_path: PathBuf,
+    }
+    impl Mutator for AssertRecoveryAlreadyExists<'_> {
+        fn uninstall(&self, app: &Name) -> anyhow::Result<CommandReport> {
+            assert!(
+                self.recovery_path.exists(),
+                "the recovery file must exist before ANY mutation, including uninstall"
+            );
+            let _ = std::fs::remove_dir_all(self.tree.root().join("apps").join(app.key()));
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+        fn install(&self, manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            assert!(
+                self.recovery_path.exists(),
+                "the recovery file must exist before the FIRST mutation"
+            );
+            let app = manifest.file_stem().unwrap().to_string_lossy().into_owned();
+            let cur = self.tree.root().join("apps").join(&app).join("current");
+            std::fs::create_dir_all(&cur).unwrap();
+            std::fs::write(cur.join("manifest.json"), std::fs::read(manifest).unwrap()).unwrap();
+            Ok(CommandReport {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let fake = AssertRecoveryAlreadyExists {
+        tree: &t,
+        recovery_path: recovery_path.clone(),
+    };
+    let mut state = State::default();
+
+    let ex = execute(
+        t.root(),
+        vec![Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        }],
+        &fake,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions {
+            recovery_path: Some(recovery_path.clone()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(ex.changed(), 1, "{:?}", ex.results);
+    assert!(recovery_path.exists());
+}
+
+// -- Critical 2: root_looks_like_scoop must actually be called -------------
+
+#[test]
+fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutator_even_once() {
+    let t = Tree::new();
+    // Deliberately no `t.empty_apps()`: this is the wrong-or-typo'd-`$SCOOP`
+    // shape `root_looks_like_scoop` exists to catch.
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    let fake = Fake::honest(&t);
+    let mut state = State::default();
+
+    let err = execute(
+        t.root(),
+        vec![Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        }],
+        &fake,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(err.contains("apps directory"), "{err}");
+    assert_eq!(
+        fake.calls(),
+        Vec::<String>::new(),
+        "the mutator must never be called against a root that does not look like scoop"
+    );
+    assert_eq!(state.owned_count(SCOOP), 0);
+}
+
+// -- Important 6: a recovery-write failure is recorded, not just printed ---
+
+#[test]
+fn a_recovery_file_that_cannot_be_written_is_recorded_but_does_not_stop_the_run() {
+    let t = Tree::new();
+    let staged = t.stage("fzf", "1.0.0", BODY_A);
+    t.empty_apps();
+    // `path.parent()` is a FILE, not a directory: `create_dir_all` over it
+    // fails, so `write_recovery` fails for real rather than by mocking.
+    let blocker = t.root().join("blocker");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let recovery_path = blocker.join("recover.cmd");
+
+    let fake = Fake::honest(&t);
+    let mut state = State::default();
+
+    let ex = execute(
+        t.root(),
+        vec![Step::Install {
+            app: Name::new("fzf"),
+            staged,
+            arch: None,
+        }],
+        &fake,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions {
+            recovery_path: Some(recovery_path),
+        },
+    )
+    .unwrap();
+
+    assert!(
+        ex.recovery_write_failed.is_some(),
+        "the failure must be recorded, not just printed: {:?}",
+        ex.recovery_write_failed
+    );
+    assert_eq!(
+        ex.changed(),
+        1,
+        "a missing recovery file must not stop the run -- that decision belongs to the caller: {:?}",
+        ex.results
+    );
+}
+
+// -- Minor 8: a literal `%` in a staged path survives the recovery file ----
+
+#[test]
+fn a_percent_in_a_staged_path_is_escaped_and_the_path_stays_quoted() {
+    // `%` is expanded by cmd even *inside* double quotes, so an unescaped
+    // one turns the recovery line into a reference to an undefined batch
+    // variable instead of the staged manifest. The previous test's
+    // assertions were bare `contains` checks that pass whether or not the
+    // path is quoted at all, so quoting itself was unasserted.
+    let t = Tree::new();
+    let staged = t
+        .root()
+        .join("stage")
+        .join("weird app%name")
+        .join("1.0.0")
+        .join("weird.json");
+    let out = t.root().join("recover.cmd");
+
+    write_recovery(
+        &out,
+        &[Step::Install {
+            app: Name::new("weird"),
+            staged: staged.clone(),
+            arch: None,
+        }],
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    let escaped = staged.display().to_string().replace('%', "%%");
+    let quoted = format!("\"{escaped}\"");
+    assert!(
+        text.contains(&quoted),
+        "expected an escaped, quoted path: {text}"
+    );
+    assert!(
+        !text.contains(&format!("\"{}\"", staged.display())),
+        "the raw % must not survive unescaped inside quotes: {text}"
+    );
 }

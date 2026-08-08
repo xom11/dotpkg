@@ -131,6 +131,67 @@ fn a_commit_the_bucket_does_not_have_fails_and_stages_nothing() {
 }
 
 #[test]
+fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
+    // Measured against real git: `cat-file -e main^{commit}` accepts `main`,
+    // `HEAD`, `@` and `refs/heads/main` -- it resolves any revision, not only
+    // an object name -- and `git show main:bucket/tool.json` then returns the
+    // TIP. When the tip carries the same version (a url/hash correction),
+    // stage_text's version check passes too and the pin silently means latest.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0", "2.0.0"]);
+    let scoop = Scoop::new(root.path().to_path_buf());
+
+    for rev in ["main", "HEAD", "@", "refs/heads/main"] {
+        let Err(err) = scoop.stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", rev, "2.0.0"),
+        ) else {
+            panic!("{rev:?} must not be accepted as a pin");
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains(rev), "name the offending value: {msg}");
+        assert!(
+            msg.contains("hex"),
+            "say what a commit must look like: {msg}"
+        );
+        // The neighbouring failure this must NOT be confused with. Without
+        // this line, deleting the hex check leaves the test green whenever the
+        // revision also happens to be missing from the bucket -- which is the
+        // shape of negative control that has burned this project twice.
+        assert!(
+            !msg.contains("is not in bucket"),
+            "refused for its shape, not for being absent: {msg}"
+        );
+    }
+    assert!(
+        !stage_dir.path().join("tool").exists(),
+        "nothing may be staged for a refused pin"
+    );
+    let _ = shas;
+}
+
+#[test]
+fn a_real_commit_hash_is_still_accepted() {
+    // The positive control. Without it, `ensure_commit_hash` returning Err
+    // unconditionally passes the test above.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0", "2.0.0"]);
+    let scoop = Scoop::new(root.path().to_path_buf());
+
+    let staged = scoop
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .expect("a real 40-hex commit must still work");
+    assert!(staged.exists());
+}
+
+#[test]
 fn a_manifest_absent_at_the_pinned_commit_does_not_fall_back_to_the_working_tree() {
     // The commit here IS real -- `cat-file -e` passes -- but the app's
     // manifest was not added until a LATER commit than the one the lock
@@ -269,7 +330,11 @@ fn a_missing_bucket_is_named_rather_than_guessed_at() {
         .stage(
             stage_dir.path(),
             &Name::new("tool"),
-            &pin("extras", "abc123", "1.0.0"),
+            // A real commit shape (40 hex), not a placeholder: since
+            // ensure_commit_hash now runs before the bucket-exists check, a
+            // short dummy like the old "abc123" would fail there first and
+            // this test would stop proving what it is named for.
+            &pin("extras", &"a".repeat(40), "1.0.0"),
         )
         .unwrap_err();
     let msg = format!("{err:#}");

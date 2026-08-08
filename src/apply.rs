@@ -1,10 +1,12 @@
 use crate::backend::scoop::Scoop;
 use crate::config::Config;
 use crate::lock::Lock;
+use crate::lock::Pin;
 use crate::model::SCOOP;
 use crate::plan::{Action, Plan, SkipReason};
 use crate::state::State;
 use anyhow::Result;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Refuse a plan built from a config that declares nothing while dotpkg owns
@@ -40,6 +42,47 @@ pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
         "pkg.toml declares no scoop packages but dotpkg owns {owned}. \
          Refusing to prune everything. If the file is right, pass --allow-empty-config."
     );
+    Ok(())
+}
+
+/// Refuse a lock that is incoherent in a way decidable without touching the
+/// disk, before the plan is built and before anything is staged.
+///
+/// `Scoop::stage` re-checks the same rules, deliberately: this guard gives a
+/// good whole-run message, and `stage` is a public API that Phase 3 will call
+/// from somewhere else. Neither is allowed to be the only one.
+pub fn lock_coherence_guard(declared: &Config, lock: &Lock) -> Result<()> {
+    let buckets: BTreeSet<&str> = declared
+        .scoop
+        .buckets
+        .iter()
+        .map(|b| b.split_once('=').map(|(n, _)| n).unwrap_or(b.as_str()))
+        .collect();
+
+    for (name, pin) in &lock.scoop {
+        let Pin::ScoopCommit {
+            bucket,
+            commit,
+            version,
+        } = pin
+        else {
+            anyhow::bail!(
+                "pkg.lock [scoop.{name}] holds a winget pin. Run `dotpkg update` to rewrite it."
+            );
+        };
+        crate::backend::scoop::ensure_plain_component(name, "bucket", bucket)
+            .and_then(|()| crate::backend::scoop::ensure_plain_component(name, "version", version))
+            .and_then(|()| {
+                crate::backend::scoop::ensure_plain_component(name, "package name", name.key())
+            })
+            .and_then(|()| crate::backend::scoop::ensure_commit_hash(name, commit))
+            .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
+        anyhow::ensure!(
+            buckets.contains(bucket.as_str()),
+            "pkg.lock [scoop.{name}] names bucket {bucket:?}, which pkg.toml does not declare. \
+             Add it to [scoop] buckets, or run `dotpkg update`."
+        );
+    }
     Ok(())
 }
 
@@ -493,7 +536,11 @@ mod tests {
             Name::new("tool"),
             Pin::ScoopCommit {
                 bucket: "extras".into(),
-                commit: "abc123".into(),
+                // A real commit shape (40 hex), not a placeholder: since
+                // ensure_commit_hash now runs before the bucket-exists check,
+                // a short dummy like the old "abc123" would fail there first
+                // and this test would stop proving what it is named for.
+                commit: "a".repeat(40),
                 version: "1.0.0".into(),
             },
         );
@@ -532,9 +579,9 @@ mod tests {
         // tests/prepare.rs, for the same measured reason: with the
         // bucket-exists check in `stage()` deleted outright, `contains
         // ("extras")` alone stayed green here, because the next error down
-        // ("commit abc123 is not in bucket \"extras\"") also names the
-        // bucket -- while telling the user their commit is broken when what
-        // they actually need is `scoop bucket add`.
+        // (a commit-not-in-bucket message) also names the bucket -- while
+        // telling the user their commit is broken when what they actually
+        // need is `scoop bucket add`.
         assert!(
             why.contains("not present at"),
             "name why it failed, not just what: {why}"
@@ -735,6 +782,82 @@ mod tests {
             panic!("expected Skipped, got {:?}", prep.prepared[0].outcome);
         };
         assert!(why.contains("running"), "got {why}");
+    }
+
+    #[test]
+    fn the_lock_coherence_guard_refuses_every_shape_that_is_decidable_without_io() {
+        use crate::lock::Pin;
+
+        let declared =
+            crate::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
+
+        let bad_commit = {
+            let mut l = Lock::default();
+            l.scoop.insert(
+                Name::new("tool"),
+                Pin::ScoopCommit {
+                    bucket: "main".into(),
+                    commit: "main".into(),
+                    version: "1.0.0".into(),
+                },
+            );
+            l
+        };
+        let msg = format!(
+            "{:#}",
+            lock_coherence_guard(&declared, &bad_commit).unwrap_err()
+        );
+        assert!(msg.contains("tool") && msg.contains("main"), "{msg}");
+        assert!(msg.contains("dotpkg update"), "say how to fix it: {msg}");
+
+        let winget_pin_in_scoop_map = {
+            let mut l = Lock::default();
+            l.scoop.insert(
+                Name::new("tool"),
+                Pin::WingetVersion {
+                    version: "1".into(),
+                },
+            );
+            l
+        };
+        assert!(lock_coherence_guard(&declared, &winget_pin_in_scoop_map).is_err());
+
+        let undeclared_bucket = {
+            let mut l = Lock::default();
+            l.scoop.insert(
+                Name::new("tool"),
+                Pin::ScoopCommit {
+                    bucket: "nowhere".into(),
+                    commit: "a".repeat(40),
+                    version: "1.0.0".into(),
+                },
+            );
+            l
+        };
+        let msg = format!(
+            "{:#}",
+            lock_coherence_guard(&declared, &undeclared_bucket).unwrap_err()
+        );
+        assert!(msg.contains("nowhere"), "name the bucket: {msg}");
+    }
+
+    #[test]
+    fn a_coherent_lock_passes_the_guard() {
+        // Positive control: without it, a guard that always errors passes the
+        // test above.
+        use crate::lock::Pin;
+        let declared =
+            crate::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("tool"),
+            Pin::ScoopCommit {
+                bucket: "main".into(),
+                commit: "a".repeat(40),
+                version: "1.0.0".into(),
+            },
+        );
+        lock_coherence_guard(&declared, &lock).unwrap();
     }
 
     #[test]

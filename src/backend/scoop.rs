@@ -316,7 +316,7 @@ impl Backend for Scoop {
 /// blocklist of the escapes someone thought of. A leading `-` is refused for a
 /// different reason: these strings are also handed to `git` and to `scoop`,
 /// where a leading dash reads as an option rather than a name.
-fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()> {
+pub fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()> {
     let usable = !value.is_empty()
         && value != "."
         && value != ".."
@@ -328,6 +328,31 @@ fn ensure_plain_component(app: &Name, what: &str, value: &str) -> Result<()> {
         "{app}: the lock's {what} {value:?} cannot be used as a path component -- \
          it must not be empty, `.`, `..`, absolute, start with `-`, or contain \
          `/`, `\\` or `:`"
+    );
+    Ok(())
+}
+
+/// Refuse a `commit` that is not a hash.
+///
+/// Measured against real git: `git cat-file -e <rev>^{commit}` accepts `main`,
+/// `HEAD`, `@` and `refs/heads/main` — it resolves any revision expression,
+/// not only an object name. So `commit = "main"` passes the existence check,
+/// `git show main:bucket/<app>.json` returns the bucket **tip**, and the only
+/// remaining backstop is `stage_text`'s version equality — which a same-version
+/// URL/hash correction passes. The lock then means "latest", which
+/// `docs/specs/2026-08-08-design.md` calls worse than having no lock at all.
+///
+/// 40 hex characters for SHA-1, 64 for SHA-256, lowercase as git writes them.
+pub fn ensure_commit_hash(app: &Name, commit: &str) -> Result<()> {
+    let ok = (commit.len() == 40 || commit.len() == 64)
+        && commit
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    anyhow::ensure!(
+        ok,
+        "{app}: the lock's commit {commit:?} is not a commit hash -- it must be \
+         40 (or 64) lowercase hex characters. A branch or tag name resolves to \
+         whatever the bucket points at today, which is not a pin."
     );
     Ok(())
 }
@@ -360,6 +385,7 @@ impl Scoop {
         ensure_plain_component(app, "bucket", bucket)?;
         ensure_plain_component(app, "package name", app.key())?;
         ensure_plain_component(app, "version", version)?;
+        ensure_commit_hash(app, commit)?;
 
         let bucket_dir = self.root.join("buckets").join(bucket);
         anyhow::ensure!(

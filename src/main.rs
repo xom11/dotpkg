@@ -88,6 +88,7 @@ fn main() -> Result<()> {
             if !allow_empty_config {
                 dotpkg::apply::mass_prune_guard(&declared, &state)?;
             }
+            dotpkg::apply::lock_coherence_guard(&declared, &locked)?;
 
             let scoop = Scoop::discover();
             let scan = scoop.scan()?;

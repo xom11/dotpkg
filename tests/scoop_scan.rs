@@ -56,6 +56,22 @@ fn skips_the_scoop_directory_itself() {
 }
 
 #[test]
+fn skips_the_scoop_directory_itself_regardless_of_case() {
+    // A case-different `apps/Scoop` is still scoop managing itself. Scanning
+    // it as a package would make it a stray, and in Phase 2b a prune target.
+    let dir = tempfile::tempdir().unwrap();
+    app(dir.path(), "Scoop", "0.5.3", "64bit", "main");
+    app(dir.path(), "fzf", "0.74.2", "arm64", "main");
+
+    let got = Scoop::new(dir.path().to_path_buf())
+        .scan()
+        .unwrap()
+        .installed;
+    assert_eq!(got.len(), 1, "got {got:?}");
+    assert_eq!(got[0].name, "fzf");
+}
+
+#[test]
 fn an_app_installed_by_an_older_scoop_has_no_install_json_and_still_scans() {
     // install.json only appeared in later scoop versions. Treating "unknown
     // architecture" as "wrong architecture" would make dotpkg want to reinstall

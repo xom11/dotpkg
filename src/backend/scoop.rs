@@ -170,8 +170,10 @@ impl Backend for Scoop {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // apps/scoop is scoop managing itself.
-            if name == SCOOP {
+            // apps/scoop is scoop managing itself. Case-insensitive: this is a
+            // raw directory name, not a `Name`, and the filesystem that wrote
+            // it does not care about case either.
+            if name.eq_ignore_ascii_case(SCOOP) {
                 continue;
             }
 

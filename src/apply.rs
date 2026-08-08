@@ -184,14 +184,23 @@ pub struct Prepared {
 
 /// The result of one `apply --prepare` run, whole.
 ///
-/// **What `is_ok() == false` obliges an executor to do:** treat the run as
-/// refused and perform *none* of its actions -- not the ready ones either.
-/// That is what Phase 2b-1 ships (`main` prints this and exits 1 without an
-/// executor existing at all), and the conservative reading of a design that
-/// does not say. Phase 2b-2 may decide to narrow it -- "install the ready
-/// ones, report the rest" is a defensible product choice -- but it is a
-/// decision that must be written down and tested there, not inherited by
-/// accident from this type's shape.
+/// **What `is_ok() == false` means for `main`, as shipped in Phase 2b-2:** by
+/// default, refuse the whole run and perform *none* of its actions -- not the
+/// ready ones either. That is `main.rs`'s `!preparation.is_ok() && !keep_going`
+/// gate: it prints how many packages could not be prepared, exits 2, and
+/// `execute` is never called -- pinned by
+/// `a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs`
+/// in `tests/cli.rs`, which also proves it via the absence of the `scoop.cmd`
+/// reachability sentinel that a real mutation attempt would leave behind.
+///
+/// `--keep-going` narrows that in exactly one direction: install and replace
+/// whatever IS ready, and report the rest, instead of refusing outright.
+/// Removals are never part of that narrowing. `gate_removals` holds every
+/// `Step::Remove` back whenever `is_ok()` is false -- `--keep-going` included,
+/// and no other flag opens that gate either -- because every newly typed
+/// package name is `NotLocked` until `update` exists, which makes "installs
+/// nothing, deletes something" the one shape a not-ok preparation can produce
+/// today.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Preparation {
     pub prepared: Vec<Prepared>,

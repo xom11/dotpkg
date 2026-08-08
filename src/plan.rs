@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::lock::Lock;
-use crate::model::{Installed, SCOOP};
+use crate::model::{Installed, SCOOP, WINGET};
 use crate::state::State;
 use std::collections::BTreeSet;
 
@@ -19,6 +19,11 @@ pub enum SkipReason {
     /// Declared in pkg.toml with no pkg.lock entry. `apply` must refuse rather
     /// than resolve a version itself.
     NotLocked,
+    /// Declared for a backend this build cannot act on yet. Reported rather
+    /// than dropped: the spec's rule is "never degrade silently", and the whole
+    /// product of `status` is the printed plan. A user who follows the spec's
+    /// own example pkg.toml and gets `nothing to do` has been lied to.
+    BackendNotImplemented,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +158,18 @@ pub fn plan(
                 }
             }
         }
+    }
+
+    // Declared winget packages. There is no winget scan in Phase 1 and none is
+    // wanted here — the backend lands in Phase 4. What must not happen in the
+    // meantime is silence: dropping these would print `nothing to do` to a user
+    // whose pkg.toml declares seventeen of them.
+    for name in &declared.winget.packages {
+        actions.push(Action::Skip {
+            backend: WINGET.into(),
+            name: name.clone(),
+            reason: SkipReason::BackendNotImplemented,
+        });
     }
 
     // Installed but undeclared: prune if owned, report if not, ignore helpers.

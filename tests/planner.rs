@@ -1,6 +1,6 @@
 use dotpkg::config;
 use dotpkg::lock;
-use dotpkg::model::{Installed, SCOOP};
+use dotpkg::model::{Installed, SCOOP, WINGET};
 use dotpkg::plan::{plan, Action, SkipReason};
 use dotpkg::state::{Ownership, State};
 
@@ -151,6 +151,65 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
         "a running package that already matches the lock needs no line: got {:?}",
         p.actions
     );
+}
+
+#[test]
+fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
+    // The winget backend is Phase 4 and stays deferred. Reporting it is not:
+    // the spec's example pkg.toml declares `[winget]`, and a user who copies
+    // it must not be told `nothing to do`. Silence is the one answer that is
+    // indistinguishable from "dotpkg never read your file".
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Git.Git\", \"Brave.Brave\"]\n").unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &State::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![
+            Action::Skip {
+                backend: WINGET.into(),
+                name: "Git.Git".into(),
+                reason: SkipReason::BackendNotImplemented,
+            },
+            Action::Skip {
+                backend: WINGET.into(),
+                name: "Brave.Brave".into(),
+                reason: SkipReason::BackendNotImplemented,
+            },
+        ]
+    );
+    assert_eq!(p.skip_count(), 2);
+}
+
+#[test]
+fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
+    let p = plan(
+        &config::parse("[scoop]\npackages = [\"fzf\"]\n\n[winget]\npackages = [\"Git.Git\"]\n")
+            .unwrap(),
+        &lock::parse(LOCK_FZF_741).unwrap(),
+        &[],
+        &State::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![
+            Action::Install {
+                backend: SCOOP.into(),
+                name: "fzf".into(),
+                version: "0.74.1".into(),
+            },
+            Action::Skip {
+                backend: WINGET.into(),
+                name: "Git.Git".into(),
+                reason: SkipReason::BackendNotImplemented,
+            },
+        ]
+    );
+    assert_eq!(p.change_count(), 1);
 }
 
 #[test]

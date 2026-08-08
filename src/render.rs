@@ -48,8 +48,11 @@ pub fn render(plan: &Plan) -> String {
                 reason,
             } => {
                 let why = match reason {
-                    SkipReason::Running => "running -- stop it first",
-                    SkipReason::NotLocked => "no lock entry -- run `dotpkg update`",
+                    SkipReason::Running => "running -- stop it first".to_string(),
+                    SkipReason::NotLocked => "no lock entry -- run `dotpkg update`".to_string(),
+                    SkipReason::BackendNotImplemented => {
+                        format!("{backend} backend not implemented until phase 4")
+                    }
                 };
                 format!("  ! {backend:<6} {name:<14} {why}")
             }
@@ -80,7 +83,7 @@ pub fn render(plan: &Plan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SCOOP;
+    use crate::model::{SCOOP, WINGET};
 
     #[test]
     fn an_empty_plan_says_so_rather_than_printing_nothing() {
@@ -97,7 +100,7 @@ mod tests {
                     version: "14.1.0".into(),
                 },
                 Action::Upgrade {
-                    backend: "winget".into(),
+                    backend: WINGET.into(),
                     name: "Brave.Brave".into(),
                     from: "1.85".into(),
                     to: "1.86".into(),
@@ -118,6 +121,11 @@ mod tests {
                     name: "kanata".into(),
                     reason: SkipReason::Running,
                 },
+                Action::Skip {
+                    backend: WINGET.into(),
+                    name: "Git.Git".into(),
+                    reason: SkipReason::BackendNotImplemented,
+                },
                 Action::Unmanaged {
                     backend: SCOOP.into(),
                     name: "antigravity".into(),
@@ -131,8 +139,28 @@ mod tests {
         assert!(out.contains("v scoop  fzf"));
         assert!(out.contains("- scoop  aichat"));
         assert!(out.contains("! scoop  kanata"));
+        assert!(out.contains("! winget Git.Git"));
         assert!(out.contains("? scoop  antigravity"));
-        assert!(out.contains("4 change(s), 1 skipped"));
+        assert!(out.contains("4 change(s), 2 skipped"));
+    }
+
+    #[test]
+    fn a_declared_winget_package_says_why_it_is_not_acted_on() {
+        // The user must be able to tell "dotpkg saw this and cannot act yet"
+        // apart from "dotpkg never saw it". A blank line does neither.
+        let plan = Plan {
+            actions: vec![Action::Skip {
+                backend: WINGET.into(),
+                name: "Brave.Brave".into(),
+                reason: SkipReason::BackendNotImplemented,
+            }],
+        };
+        let out = render(&plan);
+        assert!(out.contains("Brave.Brave"), "got: {out}");
+        assert!(
+            out.contains("winget backend not implemented until phase 4"),
+            "got: {out}"
+        );
     }
 
     #[test]

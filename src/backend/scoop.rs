@@ -883,6 +883,21 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
     }
 
     #[test]
+    fn the_success_sentence_alone_is_not_a_verified_hash() {
+        // Important 4: the function's own doc calls treating "was downloaded
+        // successfully!" as the success marker the single most dangerous
+        // mistake available here. BAD_HASH and OK_CACHED cannot discriminate
+        // that mutant -- BAD_HASH trips the earlier ERROR branch, and
+        // OK_CACHED contains both strings. This reaches a real shape: a
+        // manifest with a `url` and no `hash` prints exactly this sentence,
+        // no hash line, no ERROR at all.
+        assert_eq!(
+            download_verdict("'fzf' (1.0.0) was downloaded successfully!\n"),
+            FetchVerdict::Unproven
+        );
+    }
+
+    #[test]
     fn silence_is_failure_because_scoop_cannot_signal_it_any_other_way() {
         assert_eq!(download_verdict(""), FetchVerdict::Unproven);
         assert_eq!(

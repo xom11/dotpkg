@@ -327,3 +327,32 @@ fn windows_paths_with_backslashes_and_a_resolved_version_dir_match() {
     )]);
     assert_eq!(got, BTreeSet::from([Name::new("neovim")]));
 }
+
+#[test]
+fn a_manifest_that_is_not_a_file_warns_rather_than_vanishing() {
+    // The READ branch, as distinct from the parse branch already covered.
+    // Reverting that branch to swallow every error left the whole suite green,
+    // which is what makes this test worth its lines.
+    //
+    // Making manifest.json a DIRECTORY is the portable trigger: it yields a
+    // non-NotFound error on every platform, unlike a permission denial.
+    let dir = tempfile::tempdir().unwrap();
+    app(dir.path(), "fzf", "0.74.2", "arm64", "main");
+    fs::create_dir_all(
+        dir.path()
+            .join("apps")
+            .join("unreadable")
+            .join("current")
+            .join("manifest.json"),
+    )
+    .unwrap();
+
+    let scan = Scoop::new(dir.path().to_path_buf()).scan().unwrap();
+    assert_eq!(scan.installed.len(), 1, "got {:?}", scan.installed);
+    assert_eq!(scan.warnings.len(), 1, "got {:?}", scan.warnings);
+    assert!(
+        scan.warnings[0].contains("unreadable"),
+        "the warning must name the app: {:?}",
+        scan.warnings
+    );
+}

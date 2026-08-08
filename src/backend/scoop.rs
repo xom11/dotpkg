@@ -154,7 +154,18 @@ impl Backend for Scoop {
         };
 
         let mut out = Scan::default();
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                // Same class as an unreadable manifest four lines down: a
+                // directory we were told about and cannot look at is a fact
+                // about this machine, not an absence.
+                Err(e) => {
+                    out.warnings
+                        .push(format!("cannot read an entry of {}: {e}", apps.display()));
+                    continue;
+                }
+            };
             if !entry.path().is_dir() {
                 continue;
             }

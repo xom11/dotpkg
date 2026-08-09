@@ -249,6 +249,34 @@ impl Preparation {
     pub fn is_ok(&self) -> bool {
         self.failed_count() == 0 && self.not_locked_count() == 0
     }
+
+    /// Every package skipped at prepare time because its own process is
+    /// running, by name and reason -- not because `is_ok()` needs widening
+    /// (it does not: a running package is benign and must not gate removals
+    /// or refuse the run), but because this is still outstanding work the
+    /// user asked for and did not get, and `main.rs` needs a way to say so
+    /// both in the closing table and in the exit code.
+    ///
+    /// Deliberately narrower than `skipped_count()`, which also counts a
+    /// declared winget package (`SkipReason::BackendNotImplemented`). That
+    /// skip is permanent and structural until Phase 4 ships -- every single
+    /// run reports it, forever -- and must never floor an otherwise-clean
+    /// exit code the way a `Running` skip does.
+    pub fn running_skips(&self) -> Vec<(Name, String)> {
+        self.prepared
+            .iter()
+            .filter_map(|p| match (&p.action, &p.outcome) {
+                (
+                    Action::Skip {
+                        reason: SkipReason::Running,
+                        ..
+                    },
+                    Outcome::Skipped { why },
+                ) => Some((action_name(&p.action), why.clone())),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Walk the plan and try to make every `NeedsArtifact` action ready: recover
@@ -1164,6 +1192,46 @@ mod tests {
             panic!("expected Skipped, got {:?}", prep.prepared[0].outcome);
         };
         assert!(why.contains("running"), "got {why}");
+    }
+
+    #[test]
+    fn running_skips_finds_the_running_package_but_not_the_backend_not_implemented_one() {
+        // Both are `Outcome::Skipped` and `skipped_count()` counts both --
+        // this is the narrower query `main.rs` needs, which must find only
+        // the one shape that is outstanding work rather than a permanent,
+        // every-run-forever fact about an unimplemented backend.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let lock = Lock::default();
+        let declared = Config::default();
+        let plan = Plan {
+            actions: vec![
+                Action::Skip {
+                    backend: SCOOP.into(),
+                    name: Name::new("kanata"),
+                    reason: SkipReason::Running,
+                },
+                Action::Skip {
+                    backend: WINGET.into(),
+                    name: Name::new("Git.Git"),
+                    reason: SkipReason::BackendNotImplemented,
+                },
+            ],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        assert_eq!(
+            prep.skipped_count(),
+            2,
+            "the positive control: both really are Skipped outcomes"
+        );
+
+        let running = prep.running_skips();
+        assert_eq!(
+            running,
+            vec![(Name::new("kanata"), "running -- stop it first".to_string())]
+        );
     }
 
     #[test]

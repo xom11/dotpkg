@@ -300,6 +300,19 @@ fn main() -> Result<()> {
                 ));
             }
 
+            // A package skipped at prepare time because its own process was
+            // running never becomes a `Step`, so `execute` never sees it and
+            // the closing table would otherwise say nothing about it at all
+            // -- the same blind spot the loop above closes for a held
+            // removal, but for a package that never even tried. Pushed in
+            // here, not inside `execute` itself, because `execute` only ever
+            // sees the steps a preparation actually produced.
+            let running_skips = preparation.running_skips();
+            for (app, why) in running_skips.iter().cloned() {
+                ex.results
+                    .push((app, dotpkg::execute::ItemResult::Held(why)));
+            }
+
             // Report only what a fresh scan confirms.
             let after = <Scoop as Backend>::scan(&d.scoop)?;
             let present: Vec<_> = after.installed.iter().map(|i| i.name.clone()).collect();
@@ -324,7 +337,18 @@ fn main() -> Result<()> {
             // A package that failed to PREPARE never becomes a Step, so `ex`
             // cannot see it. Without this floor, `--keep-going` reports
             // success for a run that left a declared package uninstalled.
-            let code = if code == 0 && !preparation.is_ok() {
+            //
+            // A package SKIPPED at prepare time because its own process was
+            // running floors the same way, and for the same reason: it is
+            // outstanding work the user asked for and did not get. It is
+            // pushed into `ex` above as `Held`, which already makes
+            // `exit_code` return 1 -- but this checks `preparation` directly,
+            // rather than trusting that push alone, for the same reason the
+            // line above does not trust `ex` alone: a skipped package is a
+            // fact about the plan, not about what `execute` happened to see,
+            // and 0 would tell a scheduled task the machine is fine for as
+            // long as the editor stays open.
+            let code = if code == 0 && (!preparation.is_ok() || !running_skips.is_empty()) {
                 1
             } else {
                 code

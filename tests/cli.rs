@@ -21,7 +21,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use tempfile::TempDir;
 
 /// A scoop root, a state directory and a working directory, wired together.
@@ -779,4 +779,174 @@ fn a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs() 
          stdout: {stdout} stderr: {stderr}"
     );
     f.assert_nothing_was_touched(before);
+}
+
+// -- a declared package skipped as running must not exit 0 --------------
+//
+// `SkipReason::Running`'s path-based signal (`Scoop::running_apps`, read
+// straight from `src/backend/scoop.rs`) keys off a live process whose real
+// executable sits under `<root>/apps/<name>/...`. That is read from the
+// actual OS process table (`sysinfo`, via `dotpkg::sys::running_processes`),
+// which is not a seam this suite may fake -- doing so would prove nothing
+// about the code path this test exists to exercise. What follows instead
+// spawns a REAL, live process at exactly that path: a second copy of the
+// `dotpkg` binary itself, pointed at a second, disposable scoop root where
+// it has one owned prune ready and no `--yes`, so it blocks forever inside
+// `apply::confirm`'s `read_line` -- on a stdin pipe this fixture never
+// writes to or closes -- for as long as `RunningMarker` is kept alive.
+
+/// A real, live process whose own executable resolves under
+/// `<scoop_root>/apps/<app>/...`, for as long as this value lives. `Drop`
+/// kills it, so a failed assertion in the test that owns one never leaks a
+/// blocked background process past the end of the run.
+struct RunningMarker {
+    child: Child,
+    _work: TempDir,
+    _scoop: TempDir,
+    _local: TempDir,
+}
+
+impl Drop for RunningMarker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Copies the `dotpkg` binary under test to
+/// `<scoop_root>/apps/<app>/current/`, then spawns that copy pointed at its
+/// own, entirely separate scoop root and state -- one owned, installed,
+/// undeclared package ("old"), which plans as a single ready `Prune` and
+/// nothing else, so the spawned process reaches `apply`'s confirmation
+/// prompt (no `--yes` is passed to it) and blocks there. Its own plan is
+/// irrelevant to the test that calls this; only its executable's path and
+/// the fact that it stays alive are.
+fn spawn_running_marker(scoop_root: &Path, app: &str) -> RunningMarker {
+    // Canonicalized before use, not just for tidiness: `Scoop::new` (what the
+    // `apply` under test actually runs against) canonicalizes `$SCOOP` too
+    // (`resolve_root`, `src/backend/scoop.rs`), and on macOS a `tempfile`
+    // directory lives under `/var`, which is itself a symlink to
+    // `/private/var`. `sysinfo` reports a live process's executable path
+    // fully resolved -- `/private/var/...` -- so without matching that here,
+    // the marker's own reported path and the scoop root `running_apps`
+    // compares it against would differ only in that one symlink hop, and the
+    // prefix match this whole fixture depends on would silently never fire.
+    let scoop_root = scoop_root
+        .canonicalize()
+        .expect("the fixture's scoop root must already exist");
+    let marker_dir = scoop_root.join("apps").join(app).join("current");
+    fs::create_dir_all(&marker_dir).unwrap();
+    let marker_bin = marker_dir.join("dotpkg.exe");
+    fs::copy(env!("CARGO_BIN_EXE_dotpkg"), &marker_bin)
+        .expect("the compiled dotpkg binary must be copyable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&marker_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let work = tempfile::tempdir().unwrap();
+    let scoop = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    fs::write(work.path().join("pkg.toml"), "").unwrap();
+    let state_dir = local.path().join("dotpkg");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("state.json"),
+        r#"{"scoop":{"old":"adopted"}}"#,
+    )
+    .unwrap();
+    let cur = scoop.path().join("apps").join("old").join("current");
+    fs::create_dir_all(&cur).unwrap();
+    fs::write(cur.join("manifest.json"), r#"{"version":"0.1.0"}"#).unwrap();
+
+    let child = Command::new(&marker_bin)
+        .args(["apply", "--allow-empty-config"])
+        .current_dir(work.path())
+        .env("SCOOP", scoop.path())
+        .env("LOCALAPPDATA", local.path())
+        .env_remove("XDG_STATE_HOME")
+        // Piped and never written to or closed: `confirm()` reading EOF
+        // (`Ok(0)`) would read as a "no" answer and let the child exit
+        // immediately, which is the one thing this fixture must not do
+        // while the outer `apply` under test is sampling the process table.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the copied dotpkg binary must be spawnable");
+    RunningMarker {
+        child,
+        _work: work,
+        _scoop: scoop,
+        _local: local,
+    }
+}
+
+#[test]
+fn a_declared_package_skipped_as_running_is_outstanding_not_success() {
+    // The hole: `SkipReason::Running` -> `Intent::Skip` -> `Outcome::Skipped`
+    // never fails `Preparation::is_ok()` (deliberately -- a running package
+    // must not gate a removal or refuse the run) and never becomes a `Step`,
+    // so `execute` never sees it either. Before the `main.rs` fix, nothing
+    // put it in `ex.results`, and `ex.exit_code(false)` returned 0 for a run
+    // that left a declared package entirely untouched.
+    //
+    // aichat is declared and locked at 2.0.0 but installed at 1.0.0, so a
+    // version change would normally be planned -- except its own executable
+    // is a genuinely live process under this fixture's own scoop root, which
+    // routes it to `Action::Skip { reason: Running }` instead.
+    let f = Fixture::new("[scoop]\npackages = [\"aichat\"]\n", "{}");
+    fs::write(
+        f.work.path().join("pkg.lock"),
+        format!(
+            "[scoop.aichat]\nbucket = \"main\"\ncommit = \"{}\"\nversion = \"2.0.0\"\n",
+            "a".repeat(40)
+        ),
+    )
+    .unwrap();
+    f.install_app("aichat", "1.0.0");
+    let _marker = spawn_running_marker(f.scoop.path(), "aichat");
+
+    // `--yes` is safe here and changes nothing about what is under test: the
+    // plan has zero installs, replacements or removals (aichat is Skipped,
+    // not Replaced), so there is no prune for `--yes` to fast-path around --
+    // only the trivial "0/0/0, continue?" question, which this bypasses.
+    let out = f.run(&["apply", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a declared package left skipped-as-running is outstanding work, not success: \
+         stdout: {stdout} stderr: {stderr}"
+    );
+    // The preparation table (printed before the confirmation question) is
+    // not what this pins -- it already named the skip before this fix
+    // existed. This is the CLOSING table, `render_execution`'s output,
+    // printed after `execute` returns: the exact line `main.rs` must push
+    // into `Execution` for the exit code to be explainable at all.
+    let closing_line = format!(
+        "  held    scoop  {:<13}running -- stop it first\n",
+        "aichat"
+    );
+    assert!(
+        stdout.contains(&closing_line),
+        "the closing table must name the skipped package, not just count it: {stdout}"
+    );
+    assert!(
+        stdout.contains("0 verified on disk, 0 failed, 1 held."),
+        "the held count in the closing table must reflect the skip: {stdout}"
+    );
+    assert!(
+        !stdout.contains("FAILED") && !stderr.contains("FAILED"),
+        "a running skip is benign, not a failure: stdout: {stdout} stderr: {stderr}"
+    );
+    // The package that was never touched must still be exactly where it
+    // was -- a running skip is a refusal to act, not a partial one.
+    assert!(
+        f.scoop.path().join("apps").join("aichat").exists(),
+        "a skipped package must not have been removed"
+    );
 }

@@ -81,8 +81,10 @@ Defined by what the operator must do next, not by what happened internally.
 - **0** — the plan is fully realised on disk and nothing is outstanding.
 - **1** — something is outstanding: a package failed, was held (by the
   running re-sampler, or because another package in the run could not be
-  prepared), or could not be prepared at all. The machine may or may not
-  have actually changed.
+  prepared), could not be prepared at all, or was skipped because its own
+  process was running. That last one is not a failure and never gates a
+  removal or refuses the run — the user can close the app and rerun — but it
+  is still outstanding: the machine may or may not have actually changed.
 - **2** — refused before anything was attempted; nothing changed. A guard
   fired, the user said no, or no answer was available.
 

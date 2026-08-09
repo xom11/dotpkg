@@ -317,19 +317,34 @@ impl Execution {
     ///   outstanding.
     /// - **1** -- something is outstanding: a package failed, was held, or
     ///   (via the floor `main.rs` applies on top of this) could not be
-    ///   prepared. The machine may or may not actually have changed --
-    ///   `render_execution` is where that distinction is still drawn, in the
-    ///   wording, not in the exit code.
+    ///   prepared, or was skipped because its own process was running. The
+    ///   machine may or may not actually have changed -- `render_execution`
+    ///   is where that distinction is still drawn, in the wording, not in
+    ///   the exit code.
     /// - **2** -- refused before anything was attempted; nothing changed.
     ///
     /// This used to also return 2 for a failure with `changed() == 0 &&
     /// touched() == 0` -- "nothing to look at" -- but that rule made a
     /// package held by the running re-sampler exit the same way as a
-    /// converged machine: 0. A user who leaves an editor open every night
-    /// then sees permanent, silent success. `held()` folds into "outstanding"
-    /// here for exactly that reason, and a plain untouched failure now reads
-    /// the same as a touched one: both still need the operator to look at
-    /// why, even when the answer turns out to be "nothing changed".
+    /// converged machine: 0. `held()` folds into "outstanding" here for
+    /// exactly that reason, and a plain untouched failure now reads the same
+    /// as a touched one: both still need the operator to look at why, even
+    /// when the answer turns out to be "nothing changed".
+    ///
+    /// **This method alone only ever sees a re-sampler hold** -- a process
+    /// that started running *during* the run (see `execute`'s own doc
+    /// comment). The far more common nightly shape -- an editor already open
+    /// before `apply` was even invoked -- is `SkipReason::Running` at plan
+    /// time: the package never becomes a `Step`, so it never reaches
+    /// `self.results` on its own, and this method would return 0 for it.
+    /// `main.rs` is what actually closes that gap, on both ends: it pushes
+    /// the same `Held` shape into `Execution` before the closing table is
+    /// printed, *and* floors the exit code independently of that push,
+    /// straight from `Preparation`. Earlier revisions of this comment cited
+    /// the editor-left-open story as something `held()` folding into
+    /// "outstanding" had already handled here; it had not -- only the
+    /// re-sampler case had, which is a narrower and rarer shape than the
+    /// nightly one that motivated the story in the first place.
     ///
     /// `refused` and "changed something" can never both be true: a refusal
     /// means `execute` returned `Err` before performing a single step, so

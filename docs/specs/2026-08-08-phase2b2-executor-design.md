@@ -398,8 +398,9 @@ Exit codes become three, defined by what the operator must do next, not by
 what happened internally:
 
 - **0** — the plan is fully realised on disk and nothing is outstanding.
-- **1** — something is outstanding: a package failed, was held, or could not
-  be prepared. The machine may or may not have actually changed.
+- **1** — something is outstanding: a package failed, was held, could not
+  be prepared, or was skipped because its own process was running. The
+  machine may or may not have actually changed.
 - **2** — refused before anything was attempted; nothing changed. A guard
   fired, the user said no, or no answer was available.
 
@@ -412,6 +413,21 @@ untouched failure inside `execute` -- `changed() == 0 && touched() == 0` --
 also exited 2, indistinguishable from a refusal that never attempted
 anything. Both are "the operator must look", so both are 1 now; 2 is
 reserved for the one shape that is provably `execute`-never-called.
+
+**Revised again, live on the real machine, after this phase's own first
+merge:** `SkipReason::Running` at *plan* time -- the far more common shape,
+an editor already open before `apply` even starts, as opposed to the
+re-sampler's "opened mid-run" -- exited **0**. `Preparation::is_ok()`
+deliberately does not count a `Skipped` outcome (a running package must not
+gate a removal or refuse the run), so nothing upstream of `execute` failed;
+`plan_to_steps` correctly keeps the package out of `steps`, so `execute`
+never sees it and its `Execution` has nothing to fold into `held()` either.
+The fix is entirely in `main.rs`, not in `Execution` or `Preparation::is_ok()`:
+`Preparation` gains `running_skips()`, narrower than `skipped_count()`
+because a declared winget package is also `Skipped` and is permanent,
+structural, and never outstanding. `main.rs` pushes each running skip into
+`Execution` as `Held` so the closing table names it, and floors the exit code
+straight from `Preparation` rather than trusting that push alone.
 
 The closing summary reports only what the re-scan confirms. It never says
 "N upgraded". An empty or implausibly shrunk re-scan is reported as an error

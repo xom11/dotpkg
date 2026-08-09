@@ -82,3 +82,279 @@ fn blob_version(body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     v.get("version")?.as_str().map(str::to_string)
 }
+
+use crate::backend::Backend;
+use crate::config::Config;
+use crate::lock::{Lock, Pin};
+use crate::state::{Ownership, State};
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    pub adopted: Vec<(Name, Matched)>,
+    pub refused: Vec<(Name, String)>,
+}
+
+/// Adopt every named package. Per package it is all or nothing; across
+/// packages a refusal is reported and the rest proceed, the same shape as
+/// `prepare`.
+///
+/// **Write order: `pkg.lock`, then `pkg.toml`, then `state.json`.** Every
+/// prefix of that order is inert:
+///
+/// - lock only: an entry for an undeclared package. `plan()` never reads it
+///   and the next whole-run `update` drops it.
+/// - lock + `pkg.toml`: declared, locked, and installed at the locked version,
+///   so `plan()` emits nothing at all.
+/// - all three: adopted.
+///
+/// The dangerous order is `state.json` first, which makes the package
+/// `installed ∧ ¬declared ∧ owned` -- a **prune candidate** (`src/plan.rs`).
+/// This mirrors the executor's own reasoning about claiming ownership late.
+pub fn run(
+    scoop_root: &Path,
+    names: &[Name],
+    config_path: &Path,
+    lock_path: &Path,
+    state_path: &Path,
+) -> Result<Outcome> {
+    let scoop = crate::backend::scoop::Scoop::new(scoop_root.to_path_buf());
+    let scan = Backend::scan(&scoop)?;
+    let mut out = Outcome::default();
+
+    for name in names {
+        // Re-read all three every iteration: each package's write must land
+        // before the next one's guard reads it, or adopting two packages in
+        // one command would lose the first.
+        let declared = crate::config::load(config_path)?;
+        let mut lock = crate::lock::load_or_empty(lock_path)?;
+        // No special-casing here: a state.json this cannot read (a directory
+        // sitting at that path, a permission denial, corrupt JSON) is a
+        // condition dotpkg cannot understand, so the whole package refuses --
+        // via this `?` -- before anything is written, rather than proceeding
+        // on a guessed-empty ownership record. Defaulting to "nothing owned"
+        // here would let `adopt` write pkg.lock and edit pkg.toml on a false
+        // belief and discover the problem only at the final `state.save`.
+        let mut state = State::load_or_empty(state_path)?;
+
+        match adopt_one(
+            scoop_root,
+            &scan,
+            &declared,
+            &lock,
+            &state,
+            name,
+            config_path,
+        ) {
+            Err(why) => out.refused.push((name.clone(), why)),
+            Ok((bucket_name, found, config_text)) => {
+                lock.scoop.insert(
+                    name.clone(),
+                    Pin::ScoopCommit {
+                        bucket: bucket_name.to_string(),
+                        commit: found.commit.clone(),
+                        version: found.version.clone(),
+                    },
+                );
+                state.set(crate::model::SCOOP, name, Ownership::Adopted);
+                write_in_order(
+                    || crate::lock::save(&lock, lock_path),
+                    || crate::config_edit::save(config_path, &config_text),
+                    || state.save(state_path),
+                )?;
+                out.adopted.push((name.clone(), found.matched));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The write order itself, behind a seam: lock, then pkg.toml, then
+/// state.json, stopping at the first failure. `run` always calls this with
+/// closures over the real `lock::save` / `config_edit::save` / `State::save`
+/// -- the only reason this exists separately is so the ORDER is directly
+/// observable in a test, by injecting closures that record each call, rather
+/// than only inferable from what a real interrupted write leaves behind.
+///
+/// `tests/adopt.rs`'s `a_failed_last_write_leaves_a_prefix_that_plan_does_
+/// nothing_about` (`#[cfg(unix)]`, a real filesystem failure) and this
+/// module's own `write_in_order_calls_lock_then_pkg_toml_then_state...`
+/// (portable, a fake) are complementary: one proves the sequence survives a
+/// real interrupted write; the other proves the sequence itself, on every
+/// platform this crate ships to, including the one -- Windows -- that a
+/// `#[cfg(unix)]` test cannot reach at all.
+fn write_in_order(
+    write_lock: impl FnOnce() -> Result<()>,
+    write_pkg_toml: impl FnOnce() -> Result<()>,
+    write_state: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    write_lock()?;
+    write_pkg_toml()?;
+    write_state()?;
+    Ok(())
+}
+
+/// Everything that can refuse, before anything is written. Returns the pieces
+/// the caller needs, so no partial state can exist between a check and a write.
+#[allow(clippy::too_many_arguments)]
+fn adopt_one(
+    scoop_root: &Path,
+    scan: &crate::backend::Scan,
+    declared: &Config,
+    lock: &Lock,
+    state: &State,
+    name: &Name,
+    config_path: &Path,
+) -> std::result::Result<(Name, Found, String), String> {
+    let Some(inst) = scan
+        .installed
+        .iter()
+        .find(|i| i.backend == crate::model::SCOOP && &i.name == name)
+    else {
+        return Err(format!(
+            "{name} is not installed. `adopt` brings an existing package under \
+             management; to install one, declare it and run `dotpkg update` then \
+             `dotpkg apply`."
+        ));
+    };
+    if state.owns(crate::model::SCOOP, name) {
+        return Err(format!("{name} is already managed by dotpkg"));
+    }
+
+    let already = lock.scoop.get(name).and_then(|p| match p {
+        Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
+        Pin::WingetVersion { .. } => None,
+    });
+    // install.json's `bucket` is a legitimate hint here and nowhere else:
+    // adopt targets packages dotpkg has never touched, and it is dotpkg's own
+    // installs that lose the field.
+    let hint = already.or(inst.bucket.as_deref());
+    let (bucket_name, dir, rev) = match bucket::choose_bucket(scoop_root, declared, name, hint) {
+        bucket::BucketChoice::Chosen { name: b, dir, tip } => (b, dir, tip.rev),
+        bucket::BucketChoice::Ambiguous { candidates } => {
+            let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
+            return Err(format!(
+                "{} declared buckets carry {name} ({}). Say which with \
+                     `[scoop.opts] {name} = {{ bucket = \"...\" }}`.",
+                candidates.len(),
+                names.join(", ")
+            ));
+        }
+        bucket::BucketChoice::NotFound { searched } => {
+            let names: Vec<String> = searched.iter().map(|s| s.to_string()).collect();
+            return Err(format!(
+                "no declared bucket has {name} (searched: {})",
+                names.join(", ")
+            ));
+        }
+    };
+
+    let installed_manifest = std::fs::read(
+        scoop_root
+            .join("apps")
+            .join(inst.name.to_string())
+            .join("current")
+            .join("manifest.json"),
+    )
+    .unwrap_or_default();
+
+    let found = match resolve_installed(&dir, name, &inst.version, &installed_manifest, &rev) {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            // Measured: a shallow clone gives exactly this answer with no
+            // other signal, and the user cannot tell the two apart.
+            let shallow = if bucket::is_shallow(&dir) {
+                format!(
+                    " -- and bucket {bucket_name} is a SHALLOW clone, so most of its \
+                     history is not on this machine. `git -C {} fetch --unshallow` \
+                     and try again.",
+                    dir.display()
+                )
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "no commit in bucket {bucket_name} carries {name} {}{}",
+                inst.version, shallow
+            ));
+        }
+        Err(e) => return Err(format!("{e:#}")),
+    };
+
+    // Prepared, not written: the caller writes all three in order only once
+    // every refusal above has been passed.
+    let text = std::fs::read_to_string(config_path).map_err(|e| format!("{e}"))?;
+    let config_text = if declared.scoop.packages.contains(name) {
+        text
+    } else {
+        crate::config_edit::add_scoop_package(&text, name).map_err(|e| format!("{e:#}"))?
+    };
+
+    Ok((bucket_name, found, config_text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// The seam itself, exercised directly and portably: no filesystem, no
+    /// `#[cfg(unix)]`, so this runs -- and would catch a regression -- on
+    /// Windows, the one platform `a_failed_last_write_leaves_a_prefix_that_
+    /// plan_does_nothing_about` (tests/adopt.rs) cannot reach.
+    #[test]
+    fn write_in_order_calls_lock_then_pkg_toml_then_state_and_stops_on_the_third() {
+        let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
+        let result = write_in_order(
+            || {
+                log.borrow_mut().push("lock");
+                Ok(())
+            },
+            || {
+                log.borrow_mut().push("pkg.toml");
+                Ok(())
+            },
+            || {
+                log.borrow_mut().push("state.json");
+                anyhow::bail!("state.json write failed")
+            },
+        );
+
+        assert!(result.is_err(), "the third write's failure must propagate");
+        assert_eq!(
+            *log.borrow(),
+            vec!["lock", "pkg.toml", "state.json"],
+            "the recorded order must be exactly lock, then pkg.toml, then \
+             state.json -- with the first two recorded (they ran) and the \
+             third also recorded (it ran and failed), and nothing after it"
+        );
+    }
+
+    /// A failure on the FIRST write must stop before the other two ever run
+    /// -- the "all or nothing per package" promise, observed through the
+    /// same seam rather than only through `Outcome`.
+    #[test]
+    fn write_in_order_stops_immediately_when_the_first_write_fails() {
+        let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
+        let result = write_in_order(
+            || {
+                log.borrow_mut().push("lock");
+                anyhow::bail!("lock write failed")
+            },
+            || {
+                log.borrow_mut().push("pkg.toml");
+                Ok(())
+            },
+            || {
+                log.borrow_mut().push("state.json");
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            *log.borrow(),
+            vec!["lock"],
+            "pkg.toml and state.json must never have been called"
+        );
+    }
+}

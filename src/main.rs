@@ -82,6 +82,22 @@ enum Command {
         /// entry is dropped.
         packages: Vec<String>,
     },
+    /// Bring already-installed packages under management. Writes pkg.lock,
+    /// pkg.toml and state.json; installs and removes nothing.
+    Adopt {
+        #[arg(long, default_value = "pkg.toml")]
+        config: PathBuf,
+        #[arg(long, default_value = "pkg.lock")]
+        lock: PathBuf,
+        /// Where dotpkg records what it owns. Must be absolute if given.
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// The packages to adopt. At least one -- there is deliberately no
+        /// "adopt everything", which would be one keystroke from letting a
+        /// later pkg.toml edit delete the whole machine.
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
 }
 
 /// Print a refusal and exit 2.
@@ -441,6 +457,43 @@ fn main() -> Result<()> {
                 dotpkg::lock::save(&u.lock, &lock)?;
             }
             if u.failed_count() > 0 {
+                std::process::exit(1);
+            }
+        }
+        Command::Adopt {
+            config,
+            lock,
+            state,
+            packages,
+        } => {
+            let state_path = state.unwrap_or_else(State::default_path);
+            if !state_path.is_absolute() {
+                refuse(anyhow::anyhow!(
+                    "the state file resolves to {}, which is relative to the current \
+                     directory. Pass --state with an absolute path.",
+                    state_path.display()
+                ));
+            }
+            // A directory at exactly this path is almost always a truncated
+            // --state (the state directory, not state.json inside it), and
+            // `State::load_or_empty` would otherwise report it as a generic
+            // I/O error surfacing from inside state.rs. Named here, before
+            // anything runs, rather than left to whichever package happens
+            // to hit it first.
+            if state_path.is_dir() {
+                refuse(anyhow::anyhow!(
+                    "the state file resolves to {}, which is a directory. Pass \
+                     --state with the file itself, e.g. .../state.json.",
+                    state_path.display()
+                ));
+            }
+            let names =
+                dotpkg::model::fold_names(packages, "the packages named on the command line")?;
+            let scoop = Scoop::discover();
+            let out = dotpkg::adopt::run(scoop.root(), &names, &config, &lock, &state_path)?;
+            print!("{}", dotpkg::render::render_adopt(&out));
+            std::io::stdout().flush().ok();
+            if !out.refused.is_empty() {
                 std::process::exit(1);
             }
         }

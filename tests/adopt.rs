@@ -175,3 +175,648 @@ fn an_app_the_bucket_has_never_had_resolves_to_none() {
         None
     );
 }
+
+use dotpkg::state::{Ownership, State};
+
+/// The three-file write, and the property that every prefix of it is inert.
+#[test]
+fn adopt_writes_the_lock_then_pkg_toml_then_state_and_each_prefix_is_safe() {
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    let c = f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "# hand written\n[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+    )
+    .unwrap();
+
+    // An installed, unowned aichat.
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert_eq!(
+        out.adopted[0],
+        (Name::new("aichat"), Matched::Content),
+        "the installed manifest is the bucket's own bytes: the matched rule \
+         reported to the caller must say so, not merely say 'adopted'"
+    );
+
+    // All three files, and only the intended change in each. Not just
+    // "an entry exists" -- the exact bucket/commit/version dotpkg's next
+    // `apply` will stage from.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert_eq!(
+        lock.scoop[&Name::new("aichat")],
+        dotpkg::lock::Pin::ScoopCommit {
+            bucket: "main".to_string(),
+            commit: c,
+            version: "0.30.0".to_string(),
+        },
+        "the exact pin `apply` will later stage from"
+    );
+
+    let cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        cfg_text.contains("# hand written"),
+        "comments survive: {cfg_text}"
+    );
+    let cfg = dotpkg::config::parse(&cfg_text).unwrap();
+    assert!(cfg.scoop.packages.contains(&Name::new("aichat")));
+    assert!(cfg.scoop.packages.contains(&Name::new("fzf")));
+
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(
+        state.ownership(dotpkg::model::SCOOP, &Name::new("aichat")),
+        Some(Ownership::Adopted),
+        "adopt is the first writer of this variant"
+    );
+}
+
+#[test]
+fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
+    // The two failure modes the three-file rule exists to prevent, asserted
+    // through the shipped planner rather than by reasoning about it.
+    //
+    // state.json alone => installed, owned, undeclared => Prune.
+    // state.json + pkg.toml => declared, unlocked => Skip{NotLocked}, which
+    // makes the next apply refuse the whole run at exit 2.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    let declared = dotpkg::config::load(&config_path).unwrap();
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    let state = State::load_or_empty(&state_path).unwrap();
+    let scoop = dotpkg::backend::scoop::Scoop::new(f.scoop_root());
+    let scan = dotpkg::backend::Backend::scan(&scoop).unwrap();
+    let plan = dotpkg::plan::plan(
+        &declared,
+        &lock,
+        &scan.installed,
+        &state,
+        &dotpkg::model::Running::default(),
+    );
+
+    for a in &plan.actions {
+        match a {
+            dotpkg::plan::Action::Prune { name, .. } => {
+                panic!("an adopted package must never be a prune candidate: {name}")
+            }
+            dotpkg::plan::Action::Skip { name, reason, .. }
+                if *reason == dotpkg::plan::SkipReason::NotLocked =>
+            {
+                panic!("an adopted package must not be NotLocked: {name}")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_package_whose_version_is_not_in_the_bucket_writes_nothing_at_all() {
+    // All-or-nothing per package. A partial adopt is the shape the write order
+    // is designed around, and the refusal path must not produce one.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    let original = "[scoop]\nbuckets = [\"main\"]\npackages = []\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    // Installed at a version the bucket has never had.
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(cur.join("manifest.json"), r#"{"version":"9.9.9"}"#).unwrap();
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 0);
+    assert_eq!(out.refused.len(), 1);
+    let (name, why) = &out.refused[0];
+    assert_eq!(name, &Name::new("aichat"));
+    assert!(why.contains("9.9.9"), "name the version: {why}");
+    assert!(why.contains("main"), "name the bucket searched: {why}");
+    // `f.bucket("main")` is a full clone, not a shallow one -- the shallow
+    // hint must not fire when shallowness is not actually the cause.
+    assert!(
+        !why.contains("shallow"),
+        "a full clone must not be misdiagnosed as shallow: {why}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        original,
+        "pkg.toml untouched"
+    );
+    assert!(!lock_path.exists(), "no lock written");
+    assert!(!state_path.exists(), "no state written");
+}
+
+#[test]
+fn a_refusal_names_shallowness_when_that_is_the_likely_cause() {
+    // Measured: a shallow clone produces exactly the same "not found" with no
+    // other signal, and the user has no way to tell the two apart.
+    let f = Fixture::new();
+    let upstream = f.bucket("upstream");
+    f.commit(&upstream, "aichat.json", "0.29.0", "v029");
+    f.commit(&upstream, "aichat.json", "0.30.0", "v030");
+    let shallow = f.scoop_root().join("buckets").join("main");
+    git(
+        f.home.path(),
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", upstream.display()),
+            &shallow.to_string_lossy(),
+        ],
+    );
+
+    let config_path = f.home.path().join("pkg.toml");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(cur.join("manifest.json"), r#"{"version":"0.29.0"}"#).unwrap();
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &f.home.path().join("pkg.lock"),
+        &f.home.path().join("state.json"),
+    )
+    .unwrap();
+
+    let (_, why) = &out.refused[0];
+    assert!(
+        why.contains("shallow"),
+        "a shallow bucket is the likely cause and must be named: {why}"
+    );
+}
+
+#[test]
+fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
+    let f = Fixture::new();
+    f.bucket("main");
+    let config_path = f.home.path().join("pkg.toml");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("nothere")],
+        &config_path,
+        &f.home.path().join("pkg.lock"),
+        &f.home.path().join("state.json"),
+    )
+    .unwrap();
+    let (_, why) = &out.refused[0];
+    assert!(
+        why.contains("not installed"),
+        "adopt brings an EXISTING package under management: {why}"
+    );
+}
+
+// Gated `#[cfg(unix)]`, not because the mechanism is a Windows/Unix
+// distinction in principle, but because inducing a write failure while
+// leaving the *read* of the same path untouched needs a permission change,
+// and this crate already has precedent (tests/cli.rs, tests/scoop_scan.rs)
+// for keeping that kind of fixture unix-only rather than guessing at a
+// Windows equivalent that might flake or silently no-op in CI.
+//
+// A directory placed AT `state_path` itself (the first version of this test)
+// does not isolate "only the last write fails": `State::load_or_empty` hard
+// errors on `ErrorKind::IsADirectory`, the same as any other unreadable
+// state.json, and that read happens before ANY of the three writes are
+// attempted, in every ordering. So that fixture cannot tell "the write
+// order is safe" apart from "adopt correctly refuses when it cannot even
+// read state.json" -- see `an_unreadable_state_file_refuses_the_whole_
+// package_before_anything_is_written` below for that second, real property.
+// Making ONLY the write fail requires state_path's PARENT to reject the
+// write while state_path itself stays absent (so the read is a plain,
+// successful "not found").
+#[cfg(unix)]
+#[test]
+fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
+    // The write order is lock -> pkg.toml -> state.json, and the claim is that
+    // every PREFIX of it is inert. That claim is testable, not merely
+    // arguable: force the last write to fail and look at what survives.
+    //
+    // Under this order the survivor is lock + pkg.toml: declared, locked, and
+    // installed at the locked version, so plan() emits nothing at all.
+    //
+    // Under the state-first order the survivor would be state.json + pkg.lock
+    // -- owned and undeclared -- which src/plan.rs turns into a Prune.
+    // `the_forbidden_write_order_leaves_a_shape_plan_turns_into_a_prune`
+    // (portable, no cfg(unix) needed) covers that consequence directly.
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    // state_path itself does not exist yet -- reading it returns NotFound,
+    // i.e. an ordinary empty state, exactly as a first-ever adopt would see.
+    // Its PARENT is what is made unwritable, right before the call, so only
+    // `State::save`'s temp-file creation fails -- not the read above it.
+    let state_dir = f.home.path().join("statedir");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    );
+    // Restored before any assertion can early-return/panic and leave a
+    // read-only directory behind for the OS to clean up.
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "the state write must genuinely have failed"
+    );
+
+    // The first two writes stand.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert!(
+        lock.scoop.contains_key(&Name::new("aichat")),
+        "the lock was written first"
+    );
+    let declared = dotpkg::config::load(&config_path).unwrap();
+    assert!(
+        declared.scoop.packages.contains(&Name::new("aichat")),
+        "pkg.toml was written second"
+    );
+    assert!(
+        !state_path.exists(),
+        "state.json must NOT have been written"
+    );
+
+    // And what survives is inert.
+    let scoop = dotpkg::backend::scoop::Scoop::new(f.scoop_root());
+    let scan = dotpkg::backend::Backend::scan(&scoop).unwrap();
+    let plan = dotpkg::plan::plan(
+        &declared,
+        &lock,
+        &scan.installed,
+        &State::default(),
+        &dotpkg::model::Running::default(),
+    );
+    for a in &plan.actions {
+        if let dotpkg::plan::Action::Prune { name, .. } = a {
+            panic!(
+                "an interrupted adopt left a PRUNE candidate -- the write order is wrong: {name}"
+            );
+        }
+    }
+    assert!(
+        plan.actions.is_empty(),
+        "a declared, locked, correctly-installed package needs no action: {:?}",
+        plan.actions
+    );
+}
+
+#[test]
+fn an_unreadable_state_file_refuses_the_whole_package_before_anything_is_written() {
+    // The property CRITICAL review found missing: `State::load_or_empty`
+    // hard-errors on a directory at state_path (measured: IsADirectory, not
+    // NotFound), and `adopt::run` must let that propagate rather than
+    // default to "nothing owned" -- a default would let it write pkg.lock
+    // and edit pkg.toml on a false belief and discover the problem only at
+    // the final `state.save`. This is a permanent regression test for that:
+    // it goes red if a guard like that is ever reintroduced, because then
+    // `out.adopted.len()` would be 1 and pkg.lock/pkg.toml would exist.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let original = "[scoop]\nbuckets = [\"main\"]\npackages = []\n";
+    std::fs::write(&config_path, original).unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    // A directory where state.json should be: unreadable as state, not
+    // merely absent.
+    let state_path = f.home.path().join("state.json");
+    std::fs::create_dir_all(state_path.join("occupied")).unwrap();
+
+    let result = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    );
+    assert!(
+        result.is_err(),
+        "an unreadable state.json must refuse, not proceed on a guessed default"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        original,
+        "pkg.toml untouched"
+    );
+    assert!(!lock_path.exists(), "no lock written");
+}
+
+#[test]
+fn the_forbidden_write_order_leaves_a_shape_plan_turns_into_a_prune() {
+    // This is why `adopt::run` writes state.json LAST, after pkg.lock and
+    // pkg.toml. If the order were reversed -- state.json before pkg.lock and
+    // pkg.toml -- an interruption right after state.json lands leaves this
+    // exact shape: owned (state.json says so), locked (as if pkg.lock had
+    // also landed), but never declared (pkg.toml never got its turn). That
+    // shape is not hypothetical -- `plan()`, the same planner `apply` uses,
+    // turns it into a Prune, which would UNINSTALL a package the user just
+    // told dotpkg to adopt.
+    //
+    // Built directly here, through each file's own writer (`lock::save`,
+    // `State::save`), not through `adopt::run` -- which now always writes in
+    // the safe order and can no longer produce this shape on its own. This
+    // is what makes the consequence covered rather than merely argued in a
+    // comment: `a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_
+    // about` only proves the SHIPPED order is safe; this proves what the
+    // FORBIDDEN order would cost if it ever came back.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    let commit = f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+
+    // pkg.toml: does NOT declare aichat -- the write the forbidden order
+    // never reaches.
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+
+    // pkg.lock: has an entry for aichat, as if the forbidden order's second
+    // write had already landed.
+    let mut lock = dotpkg::lock::Lock::default();
+    lock.scoop.insert(
+        Name::new("aichat"),
+        dotpkg::lock::Pin::ScoopCommit {
+            bucket: "main".to_string(),
+            commit,
+            version: "0.30.0".to_string(),
+        },
+    );
+    dotpkg::lock::save(&lock, &lock_path).unwrap();
+
+    // state.json: owns aichat, as if the forbidden order's FIRST write had
+    // landed and then something interrupted the run before pkg.toml's turn.
+    let mut state = State::default();
+    state.set(
+        dotpkg::model::SCOOP,
+        &Name::new("aichat"),
+        Ownership::Adopted,
+    );
+    state.save(&state_path).unwrap();
+
+    // The package really is installed, at the locked version -- otherwise
+    // this would be a stale ghost entry, not the shape under test.
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    let declared = dotpkg::config::load(&config_path).unwrap();
+    let locked = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    let loaded_state = State::load_or_empty(&state_path).unwrap();
+    let scoop = dotpkg::backend::scoop::Scoop::new(f.scoop_root());
+    let scan = dotpkg::backend::Backend::scan(&scoop).unwrap();
+
+    let plan = dotpkg::plan::plan(
+        &declared,
+        &locked,
+        &scan.installed,
+        &loaded_state,
+        &dotpkg::model::Running::default(),
+    );
+
+    let pruned = plan.actions.iter().any(|a| {
+        matches!(
+            a,
+            dotpkg::plan::Action::Prune { name, .. } if *name == Name::new("aichat")
+        )
+    });
+    assert!(
+        pruned,
+        "owned + locked + undeclared must plan a Prune for aichat -- this is \
+         why adopt writes state.json LAST: {:?}",
+        plan.actions
+    );
+}
+
+#[test]
+fn adopting_an_already_managed_package_again_is_refused_not_repeated() {
+    // The guard `an un-fireable negative control is a plan failure` exists
+    // to check: this is the test Step 6.2 names to confirm the
+    // `state.owns` early return actually does something. Adopt the same
+    // package twice in separate calls -- the second must be refused, not
+    // silently re-adopted or re-pinned.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, "HEAD", "aichat.json"),
+    )
+    .unwrap();
+
+    let first = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+    assert_eq!(first.adopted.len(), 1, "{first:?}");
+
+    let second = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+    assert_eq!(second.adopted.len(), 0, "{second:?}");
+    assert_eq!(second.refused.len(), 1, "{second:?}");
+    let (name, why) = &second.refused[0];
+    assert_eq!(name, &Name::new("aichat"));
+    assert!(
+        why.contains("already managed"),
+        "say why the second call refused: {why}"
+    );
+}
+
+#[test]
+fn adopting_two_packages_in_one_command_does_not_lose_the_first() {
+    // The reason `run` re-reads all three files at the top of every loop
+    // iteration rather than caching them once: an in-memory `Lock`/`Config`/
+    // `State` built before the loop and never refreshed would still hold
+    // last package's write in memory, but a caller re-reading straight from
+    // disk after the whole call returns would see only the SECOND package if
+    // each iteration's on-disk write were not landed before the next
+    // iteration started forming its own updated copy from a stale read.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat.json", "0.30.0", "v030");
+    f.commit(&dir, "widget.json", "1.2.3", "w123");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+
+    for (app, file) in [("aichat", "aichat.json"), ("widget", "widget.json")] {
+        let cur = f.scoop_root().join("apps").join(app).join("current");
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::write(cur.join("manifest.json"), f.blob(&dir, "HEAD", file)).unwrap();
+    }
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat"), Name::new("widget")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+    assert_eq!(out.adopted.len(), 2, "{out:?}");
+
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert!(
+        lock.scoop.contains_key(&Name::new("aichat")),
+        "the first package's lock entry must survive the second's write: {lock:?}"
+    );
+    assert!(lock.scoop.contains_key(&Name::new("widget")), "{lock:?}");
+
+    let declared = dotpkg::config::load(&config_path).unwrap();
+    assert!(
+        declared.scoop.packages.contains(&Name::new("aichat")),
+        "the first package's pkg.toml entry must survive the second's write: {declared:?}"
+    );
+    assert!(declared.scoop.packages.contains(&Name::new("widget")));
+
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(
+        state.ownership(dotpkg::model::SCOOP, &Name::new("aichat")),
+        Some(Ownership::Adopted),
+        "the first package's state entry must survive the second's write"
+    );
+    assert_eq!(
+        state.ownership(dotpkg::model::SCOOP, &Name::new("widget")),
+        Some(Ownership::Adopted)
+    );
+}

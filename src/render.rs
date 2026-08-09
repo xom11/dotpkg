@@ -352,6 +352,28 @@ pub fn render_update(u: &Update) -> String {
     out
 }
 
+use crate::adopt::{Matched, Outcome as AdoptOutcome};
+
+pub fn render_adopt(o: &AdoptOutcome) -> String {
+    let mut out = String::new();
+    for (name, matched) in &o.adopted {
+        let how = match matched {
+            Matched::Content => "the installed manifest matches the bucket exactly",
+            Matched::Version => "matched by version only -- the installed manifest differs",
+        };
+        out.push_str(&format!("  + scoop  {name:<14} adopted ({how})\n"));
+    }
+    for (name, why) in &o.refused {
+        out.push_str(&format!("  ! scoop  {name:<14} {why}\n"));
+    }
+    out.push_str(&format!(
+        "\n  {} adopted, {} refused. Nothing installed and nothing removed.\n",
+        o.adopted.len(),
+        o.refused.len()
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,6 +1076,76 @@ mod tests {
             !render_update(&changed).contains("not rewritten"),
             "{}",
             render_update(&changed)
+        );
+    }
+
+    #[test]
+    fn render_adopt_names_the_package_and_which_match_rule_answered() {
+        // The two Matched variants read as different strengths of evidence --
+        // a user deciding whether to trust an adopted pin needs to see which
+        // one fired, not just that adoption "succeeded".
+        let out = AdoptOutcome {
+            adopted: vec![
+                (Name::new("aichat"), Matched::Content),
+                (Name::new("legacy-tool"), Matched::Version),
+            ],
+            refused: vec![],
+        };
+        let text = render_adopt(&out);
+        assert!(
+            text.contains("aichat")
+                && text.contains("the installed manifest matches the bucket exactly"),
+            "a Content match must say it matched exactly: {text}"
+        );
+        assert!(
+            text.contains("legacy-tool")
+                && text.contains("matched by version only -- the installed manifest differs"),
+            "a Version match must say it is the weaker rule: {text}"
+        );
+    }
+
+    #[test]
+    fn render_adopt_prints_every_refusal_reason_verbatim() {
+        let out = AdoptOutcome {
+            adopted: vec![],
+            refused: vec![
+                (Name::new("nothere"), "nothere is not installed".to_string()),
+                (
+                    Name::new("aichat"),
+                    "no commit in bucket main carries aichat 9.9.9".to_string(),
+                ),
+            ],
+        };
+        let text = render_adopt(&out);
+        assert!(text.contains("nothere is not installed"), "{text}");
+        assert!(
+            text.contains("no commit in bucket main carries aichat 9.9.9"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn render_adopt_summary_counts_match_the_outcome_and_promises_nothing_else_moved() {
+        // The one line a user reads if they read nothing else. It must both
+        // total correctly and repeat the promise that adopt never installs or
+        // removes anything -- the property the whole command exists to keep.
+        let out = AdoptOutcome {
+            adopted: vec![(Name::new("aichat"), Matched::Content)],
+            refused: vec![(Name::new("nothere"), "nothere is not installed".to_string())],
+        };
+        let text = render_adopt(&out);
+        assert!(
+            text.contains("1 adopted, 1 refused. Nothing installed and nothing removed."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn render_adopt_of_an_empty_outcome_still_prints_the_zero_summary() {
+        let text = render_adopt(&AdoptOutcome::default());
+        assert!(
+            text.contains("0 adopted, 0 refused. Nothing installed and nothing removed."),
+            "{text}"
         );
     }
 }

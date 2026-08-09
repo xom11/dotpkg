@@ -117,6 +117,9 @@ impl Mutator for Fake<'_> {
             stderr: String::new(),
         })
     }
+    fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+        unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+    }
 }
 
 #[test]
@@ -398,6 +401,9 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
                 stderr: String::new(),
             })
         }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
     }
     let fake = Picky {
         tree: &t,
@@ -475,6 +481,9 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
     }
     let fake = Picky { tree: &t };
@@ -859,6 +868,9 @@ fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
                 stderr: String::new(),
             })
         }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
     }
     let t = Tree::new();
     let staged = t.stage("fzf", "1.0.0", BODY_A);
@@ -930,6 +942,9 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
     }
     let t = Tree::new();
@@ -1045,6 +1060,9 @@ fn a_retry_that_leaves_half_install_residue_is_touched() {
                 stderr: String::new(),
             })
         }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
     }
     let t = Tree::new();
     let staged = t.stage("fzf", "1.0.0", BODY_A);
@@ -1112,6 +1130,9 @@ fn the_resolved_architecture_reaches_mutator_install() {
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
     }
     let t = Tree::new();
@@ -1210,6 +1231,9 @@ fn the_recovery_file_exists_on_disk_before_executes_first_mutation() {
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+        fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
     }
     let fake = AssertRecoveryAlreadyExists {

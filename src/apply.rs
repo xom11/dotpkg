@@ -295,6 +295,7 @@ pub fn prepare(
     plan: &Plan,
     lock: &Lock,
     scoop: &Scoop,
+    mutator: &dyn crate::execute::Mutator,
     staging_root: &Path,
     declared: &Config,
 ) -> Preparation {
@@ -305,7 +306,7 @@ pub fn prepare(
             action: action.clone(),
             outcome: match classify(action) {
                 Intent::NeedsArtifact => {
-                    stage_and_fetch(action, lock, scoop, staging_root, declared)
+                    stage_and_fetch(action, lock, scoop, mutator, staging_root, declared)
                 }
                 Intent::NoArtifactNeeded => Outcome::ReadyToRemove,
                 Intent::Skip(why) => Outcome::Skipped { why },
@@ -337,6 +338,7 @@ fn stage_and_fetch(
     action: &Action,
     lock: &Lock,
     scoop: &Scoop,
+    mutator: &dyn crate::execute::Mutator,
     staging_root: &Path,
     declared: &Config,
 ) -> Outcome {
@@ -397,20 +399,11 @@ fn stage_and_fetch(
         }
     }
     let staged = scoop.stage(staging_root, name, pin).and_then(|manifest| {
-        // NOT COVERED BY ANY TEST ON THIS PLATFORM: that `arch.as_deref()`
-        // here (rather than `None`) is what actually reaches `scoop
-        // download`'s argv cannot be proven by anything that runs in this
-        // suite. `Scoop::download` executes a real `scoop.cmd`, and no test
-        // may put a file at `Scoop::scoop_exe()`'s path to fake one --
-        // `tests/cli.rs`'s `Fixture::run` asserts exactly that, because a
-        // `#!/bin/sh` script there is silently accepted by `execve` on macOS
-        // and Linux and means nothing on the Windows runner where a real
-        // `scoop.cmd` exists. `download` has no injectable seam yet either
-        // (a later task puts it behind the `Mutator` trait, as `install` and
-        // `uninstall` already are). Until then this line is proven the
-        // honest way: the Windows dogfood, and `install.json` recording the
-        // architecture scoop actually used.
-        scoop.download(&manifest, arch.as_deref())?;
+        // Behind `Mutator` since Phase 3, which is what finally lets a test on
+        // any OS see both that this produces a real `Outcome::ReadyToFetch`
+        // and that `arch` -- not `None` -- reaches the argv.
+        let report = mutator.download(&manifest, arch.as_deref())?;
+        crate::backend::scoop::download_outcome(&report.stdout, &manifest)?;
         Ok(manifest)
     });
     match staged {
@@ -843,7 +836,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.failed_count(), 1);
         assert_eq!(prep.ready_count(), 1, "the prune must still go through");
@@ -923,7 +916,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.failed_count(), 1);
         assert_eq!(prep.ready_count(), 1, "the prune must still go through");
         assert!(!prep.is_ok());
@@ -974,7 +967,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
                 "expected Failed -- there is no real bucket on disk -- got {:?}",
@@ -1010,7 +1003,7 @@ mod tests {
             version: "1".into(),
         };
 
-        let outcome = stage_and_fetch(&action, &lock, &scoop, stage_dir.path(), &declared);
+        let outcome = stage_and_fetch(&action, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         let Outcome::Failed { why } = outcome else {
             panic!("expected a Failed outcome, got {outcome:?}");
         };
@@ -1041,7 +1034,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
                 "expected a Failed outcome, got {:?}",
@@ -1107,7 +1100,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 1);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
@@ -1156,7 +1149,7 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared[0].outcome, Outcome::ReadyToRemove);
         assert!(prep.is_ok());
     }
@@ -1183,7 +1176,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.skipped_count(), 1);
         assert_eq!(prep.not_locked_count(), 1);
         assert!(!prep.is_ok(), "a not-locked package must fail the run");
@@ -1220,7 +1213,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(
             prep.skipped_count(),
             2,
@@ -1332,7 +1325,7 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.ready_count(), 0);
         assert_eq!(prep.failed_count(), 0);

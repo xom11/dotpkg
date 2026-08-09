@@ -620,38 +620,33 @@ impl Scoop {
     pub fn scoop_exe(&self) -> PathBuf {
         self.root.join("shims").join("scoop.cmd")
     }
+}
 
-    /// Fetch and hash-verify the artifact a staged manifest names.
-    ///
-    /// The exit code is read and ignored: measured, `scoop download` returns 0
-    /// for a hash mismatch and for a dead URL. `download_verdict` reads what
-    /// scoop actually said.
-    pub fn download(&self, manifest: &Path, arch: Option<&str>) -> Result<()> {
-        let argv = download_argv(manifest, arch);
-        let out = Command::new(self.scoop_exe())
-            .args(&argv)
-            .output()
-            .with_context(|| format!("cannot run {}", self.scoop_exe().display()))?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        match download_verdict(&stdout) {
-            FetchVerdict::Verified => Ok(()),
-            FetchVerdict::HashFailed => anyhow::bail!(
-                "hash check failed for {}: {}",
-                manifest.display(),
-                tail(&stdout)
-            ),
-            FetchVerdict::UrlDead => anyhow::bail!(
-                "the manifest's url is gone for {}: {}",
-                manifest.display(),
-                tail(&stdout)
-            ),
-            FetchVerdict::Unproven => anyhow::bail!(
-                "scoop download did not report a verified hash for {} (it exits 0 either way, \
-                 so this is treated as a failure): {}",
-                manifest.display(),
-                tail(&stdout)
-            ),
-        }
+/// Turn `scoop download`'s stdout into a result. Pure, so the whole of the
+/// prefetch promise is testable without a subprocess.
+///
+/// The exit code is not a parameter, deliberately: measured on a14, `scoop
+/// download` returns 0 for a hash mismatch and for a dead URL, so a signature
+/// that accepted a code would invite someone to consult it.
+pub fn download_outcome(stdout: &str, manifest: &Path) -> Result<()> {
+    match download_verdict(stdout) {
+        FetchVerdict::Verified => Ok(()),
+        FetchVerdict::HashFailed => anyhow::bail!(
+            "hash check failed for {}: {}",
+            manifest.display(),
+            tail(stdout)
+        ),
+        FetchVerdict::UrlDead => anyhow::bail!(
+            "the manifest's url is gone for {}: {}",
+            manifest.display(),
+            tail(stdout)
+        ),
+        FetchVerdict::Unproven => anyhow::bail!(
+            "scoop download did not report a verified hash for {} (it exits 0 either way, \
+             so this is treated as a failure): {}",
+            manifest.display(),
+            tail(stdout)
+        ),
     }
 }
 
@@ -665,6 +660,13 @@ impl crate::execute::Mutator for Scoop {
         arch: Option<&str>,
     ) -> Result<crate::execute::CommandReport> {
         self.run(&install_argv(manifest, arch))
+    }
+    fn download(
+        &self,
+        manifest: &Path,
+        arch: Option<&str>,
+    ) -> Result<crate::execute::CommandReport> {
+        self.run(&download_argv(manifest, arch))
     }
 }
 

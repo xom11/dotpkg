@@ -163,8 +163,14 @@ fn main() -> Result<()> {
             }
 
             let staging_root = dotpkg::apply::default_staging_root();
-            let preparation =
-                dotpkg::apply::prepare(&plan, &d.locked, &d.scoop, &staging_root, &d.declared);
+            let preparation = dotpkg::apply::prepare(
+                &plan,
+                &d.locked,
+                &d.scoop,
+                &d.scoop,
+                &staging_root,
+                &d.declared,
+            );
             print!("{}", dotpkg::render::render_preparation(&preparation));
             // `process::exit` below skips the normal `main` teardown that
             // would otherwise flush a block-buffered stdout (piped output,

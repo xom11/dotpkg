@@ -30,6 +30,12 @@ pub struct CommandReport {
 pub trait Mutator {
     fn uninstall(&self, app: &Name) -> Result<CommandReport>;
     fn install(&self, manifest: &Path, arch: Option<&str>) -> Result<CommandReport>;
+    /// Fetch and hash-verify. Not a mutation of installed software, but it is
+    /// the third scoop invocation and it belongs behind the same seam: until
+    /// it was here, no test on any platform could produce an
+    /// `Outcome::ReadyToFetch` from production code, or see the argv that
+    /// carries the resolved architecture.
+    fn download(&self, manifest: &Path, arch: Option<&str>) -> Result<CommandReport>;
 }
 
 /// One mutation, already resolved against the plan and the preparation.

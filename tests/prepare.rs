@@ -620,3 +620,150 @@ fn the_scoop_entry_point_is_the_cmd_shim() {
         "the shim must sit directly under the scoop root"
     );
 }
+
+use dotpkg::apply::{prepare, Outcome};
+use dotpkg::execute::{CommandReport, Mutator};
+use std::cell::RefCell;
+
+/// A fake scoop that only ever downloads. It records the argv it was handed
+/// and reports scoop's measured success shape.
+///
+/// It deliberately cannot uninstall or install: `prepare` must never reach
+/// those, and a fake that silently permits them could not prove it.
+struct Downloader {
+    calls: RefCell<Vec<(std::path::PathBuf, Option<String>)>>,
+    verified: bool,
+}
+
+impl Downloader {
+    fn ok() -> Downloader {
+        Downloader {
+            calls: RefCell::new(Vec::new()),
+            verified: true,
+        }
+    }
+    fn hash_failure() -> Downloader {
+        Downloader {
+            calls: RefCell::new(Vec::new()),
+            verified: false,
+        }
+    }
+}
+
+impl Mutator for Downloader {
+    fn uninstall(&self, app: &dotpkg::model::Name) -> anyhow::Result<CommandReport> {
+        panic!("prepare must never uninstall anything, but it asked for {app}");
+    }
+    fn install(&self, m: &Path, _a: Option<&str>) -> anyhow::Result<CommandReport> {
+        panic!(
+            "prepare must never install anything, but it asked for {}",
+            m.display()
+        );
+    }
+    fn download(&self, manifest: &Path, arch: Option<&str>) -> anyhow::Result<CommandReport> {
+        self.calls
+            .borrow_mut()
+            .push((manifest.to_path_buf(), arch.map(str::to_string)));
+        // Both branches exit 0. Measured on a14: scoop reports a hash failure
+        // through stdout and nothing else.
+        let stdout = if self.verified {
+            "Checking hash of tool-1.0.0.zip ... ok.\n'tool' (1.0.0) was downloaded successfully!\n"
+        } else {
+            "Checking hash of tool-1.0.0.zip ... ERROR Hash check failed!\n\
+             'tool' (1.0.0) was downloaded successfully!\n"
+        };
+        Ok(CommandReport {
+            code: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+        })
+    }
+}
+
+fn one_install_plan(name: &str, version: &str, arch: Option<&str>) -> dotpkg::plan::Plan {
+    dotpkg::plan::Plan {
+        actions: vec![dotpkg::plan::Action::Install {
+            backend: dotpkg::model::SCOOP.into(),
+            name: Name::new(name),
+            version: version.into(),
+            arch: arch.map(str::to_string),
+        }],
+    }
+}
+
+#[test]
+fn a_real_ready_to_fetch_is_produced_by_production_code_and_carries_the_architecture() {
+    // Two things at once, both of which Phase 2b-2 left unproven on every
+    // platform: that `Outcome::ReadyToFetch` is reachable from real code at
+    // all (every value of it in the suite was hand-built), and that the
+    // architecture the planner resolved actually reaches the download argv.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+    let scoop = Scoop::new(root.path().to_path_buf());
+    let declared =
+        dotpkg::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
+    let mut lock = dotpkg::lock::Lock::default();
+    lock.scoop
+        .insert(Name::new("tool"), pin("main", &shas[0], "1.0.0"));
+
+    let fake = Downloader::ok();
+    let prep = prepare(
+        &one_install_plan("tool", "1.0.0", Some("arm64")),
+        &lock,
+        &scoop,
+        &fake,
+        stage_dir.path(),
+        &declared,
+    );
+
+    let staged = match &prep.prepared[0].outcome {
+        Outcome::ReadyToFetch { manifest } => manifest.clone(),
+        other => panic!("expected ReadyToFetch from real code, got {other:?}"),
+    };
+    assert!(staged.exists(), "the manifest must really be on disk");
+
+    let calls = fake.calls.borrow();
+    assert_eq!(calls.len(), 1, "exactly one download: {calls:?}");
+    assert_eq!(
+        calls[0].0, staged,
+        "download must be handed the staged path"
+    );
+    assert_eq!(
+        calls[0].1.as_deref(),
+        Some("arm64"),
+        "the architecture the plan resolved must reach the download argv"
+    );
+}
+
+#[test]
+fn a_hash_failure_that_exits_zero_is_still_a_failed_outcome() {
+    // The positive control's sibling. Without it, a `download` that ignored
+    // its stdout entirely would pass the test above.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let shas = bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+    let scoop = Scoop::new(root.path().to_path_buf());
+    let declared =
+        dotpkg::config::parse("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n").unwrap();
+    let mut lock = dotpkg::lock::Lock::default();
+    lock.scoop
+        .insert(Name::new("tool"), pin("main", &shas[0], "1.0.0"));
+
+    let prep = prepare(
+        &one_install_plan("tool", "1.0.0", None),
+        &lock,
+        &scoop,
+        &Downloader::hash_failure(),
+        stage_dir.path(),
+        &declared,
+    );
+
+    match &prep.prepared[0].outcome {
+        Outcome::Failed { why } => assert!(
+            why.contains("hash"),
+            "name the diagnosis, not just that it failed: {why}"
+        ),
+        other => panic!("a hash failure must not be ready: {other:?}"),
+    }
+}

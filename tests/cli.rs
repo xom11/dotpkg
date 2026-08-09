@@ -326,9 +326,26 @@ fn apply_with_no_answer_available_refuses_and_changes_nothing() {
         stderr.contains("--yes"),
         "say what to pass instead: {stderr}"
     );
+    // The old assertion checked for the literal `scoop.cmd` path fragment,
+    // which is macOS/Linux-only: measured on the real Windows machine, a
+    // missing `<root>/shims/scoop.cmd` makes `Command::new(..).output()`
+    // return `Ok` instead of `Err(NotFound)`, so the `.with_context(||
+    // format!("cannot run {}", ...))` message that contains that string is
+    // never produced there, for any run, refused or not. Its absence proved
+    // nothing on Windows.
+    //
+    // `FAILED` is the marker `render_execution` prints for a genuine
+    // mutation failure, on every platform (only the reason text after it is
+    // platform-specific). This fixture is the exact same one-PRUNE shape as
+    // `a_prune_authorised_by_both_flags_runs_and_records_the_release` (this
+    // test's positive sibling): if the confirmation refusal below did not
+    // fire, `execute` would call `Mutator::uninstall` on this same `aichat`
+    // and that sibling test proves that produces a `FAILED` line on every
+    // platform. Its absence here is therefore real, portable evidence that
+    // `execute` never ran.
     assert!(
-        !stderr.contains("scoop.cmd") && !stdout.contains("scoop.cmd"),
-        "it must refuse before running scoop at all: {stderr}"
+        !stderr.contains("FAILED") && !stdout.contains("FAILED"),
+        "it must refuse before running scoop at all: stdout: {stdout} stderr: {stderr}"
     );
     f.assert_nothing_was_touched(before);
 }
@@ -719,14 +736,15 @@ fn a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs() 
     // fzf is declared with no lock entry, so `classify` returns
     // `Intent::NotLocked` and `prepare` never calls `stage_and_fetch` --
     // let alone `scoop.download` -- for it. There is nothing in this fixture
-    // that could touch `scoop.cmd` on its own, so its total absence from the
-    // run's output is part of the proof that this refusal fired before
-    // `execute` (and before `prepare`'s download half) ever ran. The other
-    // part is the exit code itself: with the gate deleted, `steps` and
-    // `held` both stay empty (fzf never becomes a `Step`, so there is
-    // nothing for `--keep-going`-without-the-gate to hold or run), `execute`
-    // is reached with zero steps, and `main` still applies the
-    // could-not-be-prepared floor -- exit 1, not 2. `the_scoop_cmd_sentinel_
+    // that could produce a `FAILED` marker on its own (fzf never becomes a
+    // `Step` either way -- see below), so its total absence from the run's
+    // output is part of the proof that this refusal fired before `execute`
+    // (and before `prepare`'s download half) ever ran. The other part is
+    // the exit code itself: with the gate deleted, `steps` and `held` both
+    // stay empty (fzf never becomes a `Step`, so there is nothing for
+    // `--keep-going`-without-the-gate to hold or run), `execute` is reached
+    // with zero steps, and `main` still applies the could-not-be-prepared
+    // floor -- exit 1, not 2. `the_scoop_cmd_sentinel_
     // is_reachable_or_the_assertion_above_proves_nothing` and
     // `a_prune_authorised_by_both_flags_runs_and_records_the_release` are
     // this test's positive siblings: both already prove a `FAILED` outcome
@@ -748,8 +766,15 @@ fn a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs() 
         "an unpreparable package without --keep-going must refuse before \
          execute runs, not report it as outstanding: stdout: {stdout} stderr: {stderr}"
     );
+    // Same platform problem as every other `scoop.cmd` assertion in this
+    // file (see `the_scoop_cmd_sentinel_is_reachable_or_the_assertion_above_
+    // proves_nothing`'s assertion for the measured Windows behaviour): that
+    // string is macOS/Linux-only, so checking its absence proved nothing on
+    // Windows. `FAILED` is what both named siblings above prove is
+    // producible, on every platform, the moment `prepare`'s download half
+    // or `execute`'s mutator half is actually reached.
     assert!(
-        !stdout.contains("scoop.cmd") && !stderr.contains("scoop.cmd"),
+        !stdout.contains("FAILED") && !stderr.contains("FAILED"),
         "execute() -- and prepare()'s download half -- must never have run: \
          stdout: {stdout} stderr: {stderr}"
     );

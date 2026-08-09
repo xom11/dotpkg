@@ -147,6 +147,56 @@ fn offline_skips_the_fetch_and_says_the_result_may_be_stale() {
 }
 
 #[test]
+fn declared_winget_packages_are_named_in_a_warning_and_their_pins_survive() {
+    // Phase 3 resolves scoop only. This warning is the only thing standing
+    // between "your winget packages were skipped, on purpose, and Phase 4
+    // will do them" and a user believing `update` handled the whole file.
+    // Untested until the Task 14 mutation run, which found `delete !` at
+    // src/update.rs:314 surviving the entire suite because no test had ever
+    // declared a [winget] section at all.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "tool.json", "1.0.0", "v100");
+
+    let mut old = Lock::default();
+    old.winget.insert(
+        Name::new("Git.Git"),
+        Pin::WingetVersion {
+            version: "2.55.0".into(),
+        },
+    );
+
+    let with_winget = cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n\
+         \n[winget]\npackages = [\"Git.Git\"]\n");
+    let (u, warnings) = update::run(&f.scoop_root(), &with_winget, &old, &Scope::WholeRun, true);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("winget") && w.contains('1')),
+        "name how many were skipped, and that they were winget: {warnings:?}"
+    );
+    assert_eq!(
+        u.lock.winget, old.winget,
+        "a command that cannot resolve them must not drop them either"
+    );
+
+    // The counterweight, and what makes the assertion above discriminate: the
+    // same run with no [winget] section must not mention winget at all. An
+    // unconditional warning would satisfy the positive test on its own.
+    let (_, quiet) = update::run(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    assert!(
+        !quiet.iter().any(|w| w.contains("winget")),
+        "a pkg.toml with no winget packages has nothing to warn about: {quiet:?}"
+    );
+}
+
+#[test]
 fn a_fetch_moves_the_pin_forward() {
     // The one property that most needs proving and is invisible when the
     // bucket is already current: `latest` means fetched, not cached.

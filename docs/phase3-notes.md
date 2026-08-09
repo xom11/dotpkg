@@ -36,6 +36,42 @@ missing — so it is not a warning that will fire on its own.
 what it cannot resolve, and `update::run` emits a warning naming the count of
 winget packages it ignored. Phase 4 replaces the warning, not the carry-through.
 
+## Inherited, unfixed: 15 surviving mutants in `src/backend/scoop.rs`
+
+Phase 2b code. This branch does not touch it, and a Phase 3 review rewriting a
+Phase 2b module's test suite is the wrong shape of change — so it is **listed,
+not fixed**, exactly as Phase 2a listed things for 2b. It is the largest single
+concentration of survivors on the branch (15 of 55, in one file of 97 mutants),
+and nobody has looked at it.
+
+**`scoop.rs:219` — `<impl Backend for Scoop>::name -> ""` and `-> "xyzzy"` both
+survive. The backend's own name is asserted by nothing**, and everything keys on
+it: `state.json` is a map keyed by backend name, `plan()` compares against
+`model::SCOOP`, and `owned_count(SCOOP)` is what `mass_prune_guard` reads. Do
+this one first, and do it before adding a second backend — the whole point of
+Phase 4 is that there will be two names to tell apart.
+
+The rest, grouped by what they are:
+
+- **`:124` ×3** — `resolve_root`'s `b.len() == s.len()`.
+- **`:533` ×2 and `:525`** — `clone_missing_buckets`' `.git` existence guard and
+  its entire return value. One item, not three. Directly related to the
+  no-`.git` guard in `update::run`, which this branch left untested for the same
+  reason: no fixture ever has a bucket without `.git`.
+- **`:699`, `:712`** — `download_verdict`'s `&&` in two places.
+- **`:731` ×2** — `tail`'s `skip > 0`.
+- **`:654`** — `strip_ansi`'s `&&`.
+- **`:227`** — `scan`'s `NotFound` guard. See the pattern below.
+- **`:67`** — the `Value::Array` arm of `declared_executables::walk`.
+
+**A pattern worth more than any single item:** `lock.rs:99`, `verify.rs:146` and
+`scoop.rs:227` are the same mutation of the same idiom —
+`Err(e) if e.kind() == NotFound => <benign default>` — and **all three
+survived**. Wherever this codebase writes that, the benign path is tested and
+the other error kinds are not, so an unreadable file reads as an absent one.
+`lock.rs:99` was closed here; the other two were not. Phase 4 should treat this
+as one fix in three places rather than three unrelated tests.
+
 ## The Windows run, before the dogfood
 
 Run on the real dogfood machine (a14, `100.83.225.100`) from
@@ -84,7 +120,7 @@ end of the change as well as before the dogfood.** "Run Windows first" is not
 the same instruction as "run Windows on what you ship", and this task needed
 both.
 
-### Four predicted Windows failures, three of them falsified
+### Four predicted Windows failures, all four falsified
 
 The plan named four failure classes to expect, all seen in earlier phases. **None
 of them occurred.** Recorded by name so the next phase's plan author does not
@@ -453,10 +489,14 @@ test it.
 
 The ledger records that **nine control sets this plan specified were un-fireable
 or mis-aimed**, every one caught by an implementer *running* the control rather
-than by the plan author writing it. So this audit did not re-read the plan's
-control list. Each of the four controls the plan singled out was re-derived from
-what the code can actually do wrong, then **applied to a copy of the tree and
-run**, and the assertion that actually fired was recorded.
+than by the plan author writing it. This audit found a tenth, so **the count for
+this plan is ten**, and it was found the same way as the other nine: by running
+the control rather than reading it.
+
+So this audit did not re-read the plan's control list. Each of the four controls
+the plan singled out was re-derived from what the code can actually do wrong,
+then **applied to a copy of the tree and run**, and the assertion that actually
+fired was recorded.
 
 | Control | Claim | Measured | Verdict |
 |---|---|---|---|
@@ -490,20 +530,59 @@ plan predicted:
    and **not** for the call site's argument order.
 
    So on Windows — this tool's only real target — swapping the three closures in
-   `adopt::run` is currently undetectable. **This is the highest-value open item
-   in this document.** The fix is small: have `write_in_order` take a single
-   ordered structure, or have the seam test call `run` rather than
-   `write_in_order`, or assert the order through a recording fake threaded from
-   `run`. Left open deliberately rather than fixed under a review task, because
-   it is a production-shape change and deserves its own review.
+   `adopt::run` was undetectable.
+
+### Fixed, and not with another test
+
+`write_in_order` now takes one wrapper type per write:
+
+```rust
+struct WriteLock<F>(F);
+struct WritePkgToml<F>(F);
+struct WriteState<F>(F);
+```
+
+Swapping two arguments at the call site is now a **compile error**, on every
+platform, with no test involved:
+
+```
+error[E0308]: arguments to this function are incorrect
+   --> src/adopt.rs:159:17
+    |
+160 |                     WriteState(|| state.save(state_path)),
+    |                     ------------------------------------- expected `WriteLock<_>`, found `WriteState<{closure@src/adopt.rs:160:32: 160:34}>`
+162 |                     WriteLock(|| crate::lock::save(&lock, lock_path)),
+    |                     ------------------------------------------------- expected `WriteState<_>`, found `WriteLock<{closure@src/adopt.rs:162:31: 162:33}>`
+help: swap these arguments
+```
+
+This is the same move `Name` makes in `crate::model`: the wrong thing stops
+being a bug to be caught and becomes a program that cannot be written. It needs
+no test, runs on every platform including the one a `#[cfg(unix)]` test cannot
+reach, and cannot rot. rustc even offers the correct order in its `help:`.
+
+Both seam tests are kept. **Three properties, three holders**, and they should
+not be confused again:
+
+| property | held by | platforms |
+|---|---|---|
+| which closure goes in which position | the wrapper types | all, at compile time |
+| that `write_in_order` calls them in order and short-circuits | the two seam tests | all |
+| that the sequence survives a real interrupted write | `a_failed_last_write_leaves_a_prefix...` | unix only |
+
+**The residual risk, stated honestly:** the types stop the three *arguments*
+being reordered. They do not stop someone writing
+`WriteLock(|| state.save(state_path))` — putting the wrong body inside the right
+wrapper. That line is self-contradictory on its face, which is the best a type
+can do here short of making each write a distinct method on a trait.
 
 This also answers the plan's Step 6 question directly. **The write-order test in
 `adopt` does discriminate the orders — but not on the assertion its own name and
-comments point at, and not on any platform where `#[cfg(unix)]` is false.** The
-induced failure is a read-only parent directory, not a rename onto a directory,
-so the Unix/Windows error-shape difference the plan worried about never arises;
-the real problem is simpler and worse, namely that the test does not exist on
-Windows at all.
+comments point at, and, before this fix, not on any platform where
+`#[cfg(unix)]` is false.** The induced failure is a read-only parent directory,
+not a rename onto a directory, so the Unix/Windows error-shape difference the
+plan worried about never arises; the real problem was simpler and worse, namely
+that the check did not exist on Windows at all.
 
 ## The three patterns, for the next plan author
 
@@ -677,22 +756,26 @@ Accepted, with reasons:
 ## Still open
 
 1. **`mass_prune_guard` reads scoop only.** Top of this file. Must grow a backend
-   loop in the same change that adds winget.
-2. **`adopt::run`'s call-site write order is unprotected on Windows.** Only a
-   `#[cfg(unix)]` test catches a reversal. Highest-value open item.
-3. **`main.rs:411`'s exit-code floor has no reachable test.** Recommend
+   loop in the same change that adds winget. **This is now the highest-value
+   open item in this document.**
+2. **`main.rs:411`'s exit-code floor has no reachable test.** Recommend
    extracting it as a pure function in Phase 4.
-4. **`render.rs:181` may be an equivalent mutant.** Prove the `touched() ⊇
+3. **15 surviving mutants in `src/backend/scoop.rs`**, listed in their own
+   section above. `Backend::name` being asserted by nothing is the one to do
+   first, and to do before there is a second backend to tell it apart from.
+4. **The `Err(e) if e.kind() == NotFound => <benign default>` idiom is tested
+   only on its benign path**, in three separate places. `lock.rs:99` was closed
+   here; `verify.rs:146` and `backend/scoop.rs:227` were not. One fix, three
+   places.
+5. **`render.rs:181` may be an equivalent mutant.** Prove the `touched() ⊇
    changed()` containment and delete the redundant disjunct, or find the case
    where they differ.
-5. **The lock-beats-a-conflicting-opt precedence claim is inspection-only.**
-6. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
+6. **The lock-beats-a-conflicting-opt precedence claim is inspection-only.**
+7. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.
-7. **15 surviving mutants in `src/backend/scoop.rs`**, listed above. Phase 2b
-   code, deliberately out of scope for a Phase 3 review, and the largest single
-   concentration on the branch. `Backend::name` being asserted by nothing is the
-   one to do first.
 8. **`State::names` has no callers.** Give it one or delete it.
-9. **The `Err(e) if e.kind() == NotFound => <benign default>` idiom is tested
-   only on its benign path**, in three separate places. `lock.rs:99` was closed
-   here; `verify.rs:146` and `backend/scoop.rs:227` were not.
+
+**Closed by this review, so not carried:** `adopt::run`'s call-site write order,
+which was unprotected on Windows and is now a compile error. Recorded here
+because the previous draft of this file listed it as the highest-value open
+item, and it should be visible that it moved rather than vanished.

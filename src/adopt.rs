@@ -90,7 +90,19 @@ use crate::state::{Ownership, State};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
-    pub adopted: Vec<(Name, Matched)>,
+    /// The third element is the version `pkg.lock` pinned for this name
+    /// before this run, if any -- `None` when there was no previous entry.
+    ///
+    /// `adopt_one` refuses when the package is not installed or is already
+    /// owned, but not when `pkg.lock` already carries an unowned pin for it
+    /// (reachable: hand-write `pkg.toml`, run `update`, then `adopt` to hold
+    /// what is actually installed instead of what `update` just resolved).
+    /// `run` overwrites that pin unconditionally, so this is the only record
+    /// of what was replaced -- without it, `render_adopt` has no way to say
+    /// a committed file's prior content is gone, and Phase 3 treats that
+    /// silence the same as `Change::RepinnedSameVersion` treats it on the
+    /// `update` side: a lie by omission.
+    pub adopted: Vec<(Name, Matched, Option<String>)>,
     pub refused: Vec<(Name, String)>,
     /// What `scan` could not read, carried out so the caller can print it.
     ///
@@ -183,7 +195,14 @@ pub fn run(
             config_path,
         ) {
             Err(why) => out.refused.push((name.clone(), why)),
-            Ok((bucket_name, found, config_text)) => {
+            Ok((bucket_name, found, config_text, config_changed)) => {
+                // Captured before the insert below overwrites it. `adopt_one`
+                // refuses on `state.owns` and on "not installed", but not on
+                // `pkg.lock` already carrying a pin for this name -- see
+                // `Outcome::adopted`'s doc comment. `Pin::version` reads
+                // either variant, though only `ScoopCommit` pins land in
+                // `lock.scoop` through this module.
+                let previous_version = lock.scoop.get(name).map(|p| p.version().to_string());
                 lock.scoop.insert(
                     name.clone(),
                     Pin::ScoopCommit {
@@ -199,7 +218,18 @@ pub fn run(
                 state.set(crate::model::SCOOP, name, Ownership::Adopted);
                 if let Err(failure) = write_in_order(
                     WriteLock(|| crate::lock::save(&lock, lock_path)),
-                    WritePkgToml(|| crate::config_edit::save(config_path, &config_text)),
+                    WritePkgToml(|| {
+                        // Skip the write entirely when `pkg.toml`'s bytes
+                        // would not change -- see `adopt_one`'s
+                        // `already_declared` comment. `write_in_order` only
+                        // counts this as "wrote pkg.toml" when the closure
+                        // says it really did.
+                        if config_changed {
+                            crate::config_edit::save(config_path, &config_text).map(|()| true)
+                        } else {
+                            Ok(false)
+                        }
+                    }),
                     WriteState(|| state.save(state_path)),
                 ) {
                     out.partial_write = Some(PartialWrite {
@@ -209,7 +239,8 @@ pub fn run(
                     });
                     return Ok(out);
                 }
-                out.adopted.push((name.clone(), found.matched));
+                out.adopted
+                    .push((name.clone(), found.matched, previous_version));
             }
         }
     }
@@ -255,6 +286,14 @@ struct WriteState<F>(F);
 /// The failure carries the prefix that really did land. The error alone names
 /// only the file that failed, and "which files did this leave changed" is the
 /// one question a user whose `adopt` died half way through actually has.
+///
+/// `write_pkg_toml` returns `Result<bool>`, not `Result<()>` like the other
+/// two: `run` skips the actual `pkg.toml` write when the text would not
+/// change (see `adopt_one`'s `already_declared`), and `wrote`'s job is to
+/// name what really changed on disk -- listing "pkg.toml" there for a write
+/// that never happened would itself be the kind of false line this module
+/// exists to avoid, on the (narrow) path where `state.json`'s write fails
+/// right after a skipped `pkg.toml` write.
 fn write_in_order<L, P, S>(
     write_lock: WriteLock<L>,
     write_pkg_toml: WritePkgToml<P>,
@@ -262,7 +301,7 @@ fn write_in_order<L, P, S>(
 ) -> std::result::Result<(), WriteFailure>
 where
     L: FnOnce() -> Result<()>,
-    P: FnOnce() -> Result<()>,
+    P: FnOnce() -> Result<bool>,
     S: FnOnce() -> Result<()>,
 {
     let mut wrote: Vec<&'static str> = Vec::new();
@@ -270,10 +309,11 @@ where
         return Err(WriteFailure { wrote, error });
     }
     wrote.push("pkg.lock");
-    if let Err(error) = (write_pkg_toml.0)() {
-        return Err(WriteFailure { wrote, error });
+    match (write_pkg_toml.0)() {
+        Err(error) => return Err(WriteFailure { wrote, error }),
+        Ok(true) => wrote.push("pkg.toml"),
+        Ok(false) => {}
     }
-    wrote.push("pkg.toml");
     if let Err(error) = (write_state.0)() {
         return Err(WriteFailure { wrote, error });
     }
@@ -298,7 +338,7 @@ fn adopt_one(
     state: &State,
     name: &Name,
     config_path: &Path,
-) -> std::result::Result<(Name, Found, String), String> {
+) -> std::result::Result<(Name, Found, String, bool), String> {
     let Some(inst) = scan
         .installed
         .iter()
@@ -395,13 +435,19 @@ fn adopt_one(
     // Prepared, not written: the caller writes all three in order only once
     // every refusal above has been passed.
     let text = std::fs::read_to_string(config_path).map_err(|e| format!("{e}"))?;
-    let config_text = if declared.scoop.packages.contains(name) {
+    let already_declared = declared.scoop.packages.contains(name);
+    let config_text = if already_declared {
         text
     } else {
         crate::config_edit::add_scoop_package(&text, name).map_err(|e| format!("{e:#}"))?
     };
 
-    Ok((bucket_name, found, config_text))
+    // `already_declared` doubles as "config_text is byte-identical to what is
+    // already on disk" -- true exactly when the `if` above took the
+    // unedited-`text` branch. The caller uses this to skip a `config_edit::
+    // save` that would rewrite `pkg.toml` with the same bytes and leave a
+    // `pkg.toml.bak` carrying that same content behind it, for no reason.
+    Ok((bucket_name, found, config_text, !already_declared))
 }
 
 #[cfg(test)]
@@ -427,7 +473,7 @@ mod tests {
             }),
             WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml");
-                Ok(())
+                Ok(true)
             }),
             WriteState(|| {
                 log.borrow_mut().push("state.json");
@@ -465,7 +511,7 @@ mod tests {
             }),
             WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml");
-                Ok(())
+                Ok(true)
             }),
             WriteState(|| {
                 log.borrow_mut().push("state.json");
@@ -484,6 +530,44 @@ mod tests {
             *log.borrow(),
             vec!["lock"],
             "pkg.toml and state.json must never have been called"
+        );
+    }
+
+    /// A skipped `pkg.toml` write (`Ok(false)` -- the package was already
+    /// declared, so its text would not change) must still run `write_state`
+    /// and must not be named in `wrote` on a later failure: it did not
+    /// change anything on disk, so `render_adopt` must not say it did.
+    #[test]
+    fn a_skipped_pkg_toml_write_still_runs_state_and_is_not_named_as_written() {
+        let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
+        let result = write_in_order(
+            WriteLock(|| {
+                log.borrow_mut().push("lock");
+                Ok(())
+            }),
+            WritePkgToml(|| {
+                log.borrow_mut().push("pkg.toml (skipped)");
+                Ok(false)
+            }),
+            WriteState(|| {
+                log.borrow_mut().push("state.json");
+                anyhow::bail!("state.json write failed")
+            }),
+        );
+
+        let failure = result.expect_err("the third write's failure must propagate");
+        assert_eq!(
+            failure.wrote,
+            vec!["pkg.lock"],
+            "pkg.toml was skipped, not written, so it must not appear here even \
+             though state.json failed right after it: {:?}",
+            failure.wrote
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec!["lock", "pkg.toml (skipped)", "state.json"],
+            "the skipped write must still run in its slot -- it decides on its \
+             own to do nothing, `write_in_order` does not skip calling it"
         );
     }
 }

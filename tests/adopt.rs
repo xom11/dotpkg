@@ -214,9 +214,10 @@ fn adopt_writes_the_lock_then_pkg_toml_then_state_and_each_prefix_is_safe() {
     assert_eq!(out.adopted.len(), 1, "{out:?}");
     assert_eq!(
         out.adopted[0],
-        (Name::new("aichat"), Matched::Content),
+        (Name::new("aichat"), Matched::Content, None),
         "the installed manifest is the bucket's own bytes: the matched rule \
-         reported to the caller must say so, not merely say 'adopted'"
+         reported to the caller must say so, not merely say 'adopted'; and \
+         there was no previous pin to replace"
     );
 
     // All three files, and only the intended change in each. Not just
@@ -247,6 +248,111 @@ fn adopt_writes_the_lock_then_pkg_toml_then_state_and_each_prefix_is_safe() {
         state.ownership(dotpkg::model::SCOOP, &Name::new("aichat")),
         Some(Ownership::Adopted),
         "adopt is the first writer of this variant"
+    );
+}
+
+/// The reachable sequence the audit named: hand-write `pkg.toml` for what is
+/// installed, run `update` (which pins the newest commit `pkg.lock` has ever
+/// seen), then `adopt` to hold what is actually on disk instead. `adopt_one`
+/// refuses when a package is not installed or is already owned, but not when
+/// `pkg.lock` already carries a pin for it -- so this replaces a committed
+/// pin, and both halves of that must be visible: the new pin must be the one
+/// that is actually installed, and the outcome must say a pin was replaced
+/// and what it was.
+#[test]
+fn adopting_over_an_existing_unowned_pin_replaces_it_and_reports_the_previous_version() {
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    let installed_commit = f.commit(&dir, "fzf.json", "0.74.1", "installed");
+    // The commit `update` would have resolved as newest -- not what is
+    // actually installed.
+    let latest_commit = f.commit(&dir, "fzf.json", "0.74.2", "latest");
+    assert_ne!(installed_commit, latest_commit);
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+    )
+    .unwrap();
+    let config_before = std::fs::read_to_string(&config_path).unwrap();
+
+    // `update`'s own write: fzf pinned to the newer commit, before `adopt`
+    // ever runs. No state.json entry -- `update` never claims ownership.
+    let mut stale_lock = dotpkg::lock::Lock::default();
+    stale_lock.scoop.insert(
+        Name::new("fzf"),
+        dotpkg::lock::Pin::ScoopCommit {
+            bucket: "main".to_string(),
+            commit: latest_commit,
+            version: "0.74.2".to_string(),
+        },
+    );
+    dotpkg::lock::save(&stale_lock, &lock_path).unwrap();
+
+    // What is actually installed: the OLDER commit's manifest, byte for
+    // byte.
+    let cur = f.scoop_root().join("apps").join("fzf").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(
+        cur.join("manifest.json"),
+        f.blob(&dir, &installed_commit, "fzf.json"),
+    )
+    .unwrap();
+
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("fzf")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert_eq!(
+        out.adopted[0],
+        (
+            Name::new("fzf"),
+            Matched::Content,
+            Some("0.74.2".to_string())
+        ),
+        "the previous pin's version must be carried out so the caller can \
+         report it: {out:?}"
+    );
+
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert_eq!(
+        lock.scoop[&Name::new("fzf")],
+        dotpkg::lock::Pin::ScoopCommit {
+            bucket: "main".to_string(),
+            commit: installed_commit,
+            version: "0.74.1".to_string(),
+        },
+        "the pin must now match what is actually installed, not what update \
+         last resolved"
+    );
+
+    // Secondary fix: fzf was already declared, so pkg.toml's text does not
+    // change -- the write must be skipped entirely, not repeated with
+    // identical bytes.
+    let config_after = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(
+        config_before, config_after,
+        "pkg.toml's content must be untouched"
+    );
+    assert!(
+        !config_path.with_extension("toml.bak").exists(),
+        "a skipped write must not leave a .bak behind"
+    );
+
+    let rendered = dotpkg::render::render_adopt(&out);
+    assert!(
+        rendered.contains("replaced the existing pin 0.74.2"),
+        "the end-to-end render must say a pin was replaced and what it was: \
+         {rendered}"
     );
 }
 

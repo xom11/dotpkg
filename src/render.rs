@@ -371,12 +371,22 @@ use crate::adopt::{Matched, Outcome as AdoptOutcome};
 
 pub fn render_adopt(o: &AdoptOutcome) -> String {
     let mut out = String::new();
-    for (name, matched) in &o.adopted {
+    for (name, matched, previous_version) in &o.adopted {
         let how = match matched {
             Matched::Content => "the installed manifest matches the bucket exactly",
             Matched::Version => "matched by version only -- the installed manifest differs",
         };
-        out.push_str(&format!("  + scoop  {name:<14} adopted ({how})\n"));
+        // `adopt_one` does not refuse when `pkg.lock` already pins this name
+        // (see `Outcome::adopted`'s doc comment), so this write can silently
+        // replace a committed pin. Naming what was replaced is the same
+        // promise `Change::RepinnedSameVersion` makes on the `update` side --
+        // a pin changing is reported, not folded into a bare "adopted".
+        match previous_version {
+            Some(prev) => out.push_str(&format!(
+                "  + scoop  {name:<14} adopted ({how}); replaced the existing pin {prev}\n"
+            )),
+            None => out.push_str(&format!("  + scoop  {name:<14} adopted ({how})\n")),
+        }
     }
     for (name, why) in &o.refused {
         out.push_str(&format!("  ! scoop  {name:<14} {why}\n"));
@@ -1250,8 +1260,8 @@ mod tests {
         // one fired, not just that adoption "succeeded".
         let out = AdoptOutcome {
             adopted: vec![
-                (Name::new("aichat"), Matched::Content),
-                (Name::new("legacy-tool"), Matched::Version),
+                (Name::new("aichat"), Matched::Content, None),
+                (Name::new("legacy-tool"), Matched::Version, None),
             ],
             refused: vec![],
             warnings: vec![],
@@ -1267,6 +1277,43 @@ mod tests {
             text.contains("legacy-tool")
                 && text.contains("matched by version only -- the installed manifest differs"),
             "a Version match must say it is the weaker rule: {text}"
+        );
+    }
+
+    #[test]
+    fn render_adopt_names_a_replaced_pin_and_what_it_was() {
+        // `adopt_one` does not refuse when `pkg.lock` already pins the name
+        // being adopted (the reachable sequence: hand-write `pkg.toml`, run
+        // `update`, then `adopt` to hold what is actually installed) -- `run`
+        // overwrites that pin unconditionally. Before this fix,
+        // `render_adopt` printed the same "+ scoop fzf adopted (...)" line
+        // whether or not a committed pin had just been replaced.
+        let out = AdoptOutcome {
+            adopted: vec![(Name::new("fzf"), Matched::Version, Some("0.74.2".into()))],
+            refused: vec![],
+            warnings: vec![],
+            partial_write: None,
+        };
+        let text = render_adopt(&out);
+        assert!(
+            text.contains("replaced the existing pin 0.74.2"),
+            "a replaced pin must be named, and what it was: {text}"
+        );
+
+        // The counterweight: a fresh adoption with no previous pin must not
+        // claim one was replaced. Without this, an unconditional line would
+        // satisfy the assertion above and falsely announce a replacement on
+        // every ordinary adopt.
+        let fresh = AdoptOutcome {
+            adopted: vec![(Name::new("aichat"), Matched::Content, None)],
+            refused: vec![],
+            warnings: vec![],
+            partial_write: None,
+        };
+        let fresh_text = render_adopt(&fresh);
+        assert!(
+            !fresh_text.contains("replaced"),
+            "a first-time adopt has no pin to replace: {fresh_text}"
         );
     }
 
@@ -1298,7 +1345,7 @@ mod tests {
         // total correctly and repeat the promise that adopt never installs or
         // removes anything -- the property the whole command exists to keep.
         let out = AdoptOutcome {
-            adopted: vec![(Name::new("aichat"), Matched::Content)],
+            adopted: vec![(Name::new("aichat"), Matched::Content, None)],
             refused: vec![(Name::new("nothere"), "nothere is not installed".to_string())],
             warnings: vec![],
             partial_write: None,
@@ -1347,7 +1394,7 @@ mod tests {
         // this. Without it, an unconditional block satisfies every assertion
         // above -- and would tell every ordinary `adopt` that a write failed.
         let clean = AdoptOutcome {
-            adopted: vec![(Name::new("aichat"), Matched::Content)],
+            adopted: vec![(Name::new("aichat"), Matched::Content, None)],
             ..AdoptOutcome::default()
         };
         let clean_text = render_adopt(&clean);

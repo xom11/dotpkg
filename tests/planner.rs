@@ -885,6 +885,77 @@ fn an_undeclared_package_the_scan_could_not_read_is_not_a_stray_and_not_a_prune(
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
 
+// `plan_backend`'s `debug_assert!` fires on this exact input (two `Installed`
+// entries for one `(backend, name)`), which means the two properties Task 5
+// promises -- "fails loudly in a debug build" and "a release build cannot
+// double-prune" -- cannot both be observed from one execution of one test:
+// the `debug_assert!` panics before `plan()` can return anything for the
+// second half to inspect. `tests/execute.rs`'s
+// `exit_code_asserts_a_refused_run_changed_nothing` hit the identical shape
+// of conflict for a different `debug_assert!` and resolved it the same way:
+// two tests, gated to opposite build profiles. Following that precedent here
+// rather than inventing a new pattern.
+
+/// The declared-side half: `plan_backend`'s `debug_assert!`, proven firing
+/// rather than merely trusted. Its release-build twin -- the `acted` dedup
+/// guard that stops this same input from becoming two Prune actions once the
+/// assert is compiled out -- is
+/// `two_installed_entries_for_one_package_do_not_produce_two_prunes` below.
+///
+/// Gated `debug_assertions`, not `not(debug_assertions)`, for the same reason
+/// `tests/execute.rs`'s equivalent test is: `debug_assert!` is compiled out
+/// under `cargo test --release`, so under that profile this can never panic
+/// and `#[should_panic]` would fail it.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a backend returned two Installed entries for one name")]
+fn a_backend_returning_two_installed_entries_for_one_name_panics_loudly_in_a_debug_build() {
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+    let _ = plan(
+        &config::parse("[scoop]\npackages = []\n").unwrap(),
+        &lock::parse("").unwrap(),
+        &[installed("aichat", "0.30.0"), installed("aichat", "0.29.0")],
+        &[],
+        &state,
+        &Running::default(),
+    );
+}
+
+/// The undeclared-side half, and the release-build backstop: even if a
+/// backend does violate the one-`Installed`-per-name invariant, `plan()`
+/// must still emit exactly one `Prune` for it, not one per duplicate.
+///
+/// Gated `not(debug_assertions)` -- see the block comment above this test's
+/// sibling for why: under a debug profile, `plan_backend`'s `debug_assert!`
+/// panics on this exact input before `plan()` can return anything, so this
+/// property can only be observed to hold under `cargo test --release`.
+#[cfg(not(debug_assertions))]
+#[test]
+fn two_installed_entries_for_one_package_do_not_produce_two_prunes() {
+    // Measured: winget's `list` returns 7zip.7zip twice, with two different
+    // versions. plan()'s declared loop takes the first with `.find()`; its
+    // undeclared loop iterates all of them and would emit TWO Prune actions
+    // for one package. The invariant "at most one Installed per (backend,
+    // name)" has never been written down and is false for the second backend.
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+    let p = plan(
+        &config::parse("[scoop]\npackages = []\n").unwrap(),
+        &lock::parse("").unwrap(),
+        &[installed("aichat", "0.30.0"), installed("aichat", "0.29.0")],
+        &[],
+        &state,
+        &Running::default(),
+    );
+    let prunes = p
+        .actions
+        .iter()
+        .filter(|a| matches!(a, Action::Prune { .. }))
+        .count();
+    assert_eq!(prunes, 1, "one package is one prune, got {:?}", p.actions);
+}
+
 #[test]
 fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
     // src/plan.rs's own doc comment claimed 1.0.0-rc1 and 1.0.0 reduce to the

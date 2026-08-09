@@ -1,8 +1,8 @@
-use crate::config::Config;
-use crate::lock::Lock;
+use crate::config::{Config, PkgOpts};
+use crate::lock::{Lock, Pin};
 use crate::model::{Installed, Name, Running, SCOOP, WINGET};
 use crate::state::State;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Scoop installs these itself to unpack other packages and does NOT record
 /// that it did: install.json for `dark` is shape-identical to a user-requested
@@ -116,27 +116,71 @@ impl Plan {
     }
 }
 
-/// Pure. No I/O, no network, no subprocess — every input is passed in, which is
-/// what lets the whole decision layer be tested on any OS.
-pub fn plan(
-    declared: &Config,
-    lock: &Lock,
+/// One backend's slice of the inputs. `plan()` runs the same pass over each
+/// backend it has a view for.
+///
+/// Only scoop has one today: `declared`, `lock` and `opts` all read from
+/// `declared.scoop` / `lock.scoop`. Winget's declared packages still go
+/// through the separate stub loop in `plan()`, unconditionally emitting
+/// `SkipReason::BackendNotImplemented` -- Task 6 gives winget a real view
+/// once there is real installed/lock data for this pass to read, and Task 14
+/// deletes the stub loop once that view replaces it.
+struct BackendView<'a> {
+    backend: &'static str,
+    declared: &'a [Name],
+    lock: &'a BTreeMap<Name, Pin>,
+    /// `[scoop.opts]`. Empty for backends that have no per-package options.
+    opts: &'a BTreeMap<Name, PkgOpts>,
+    /// Names this backend installs for itself and does not record. Empty for
+    /// winget, whose equivalent is not a fixed list but the sourceless rows,
+    /// which never reach `installed` at all.
+    helpers: &'static [&'static str],
+}
+
+/// One backend's full pass: declared packages first (install / upgrade /
+/// downgrade / skip, plus arch drift), then installed-but-undeclared packages
+/// (prune if owned, report if not, ignore helpers). Appends into the shared
+/// `actions` / `prunes` / `reports` that `plan()` orders and concatenates
+/// once every backend view has run.
+fn plan_backend(
+    view: &BackendView,
     installed: &[Installed],
     opaque: &[Name],
     state: &State,
     running: &Running,
-) -> Plan {
-    let mut actions = Vec::new();
-    let mut prunes = Vec::new();
-    let mut reports = Vec::new();
+    actions: &mut Vec<Action>,
+    prunes: &mut Vec<Action>,
+    reports: &mut Vec<Action>,
+) {
+    // Measured: winget's `list` returns `7zip.7zip` twice, with two different
+    // versions (`26.01.00.0` and `26.02`), and eight ids in total duplicated
+    // on the author's machine. Nothing below can safely pick one of several:
+    // the declared loop's `.find()` would silently take the first, and the
+    // undeclared loop would emit one Prune per duplicate for what is really
+    // one package. A backend's scan is responsible for collapsing duplicates
+    // or marking the name opaque before `installed` ever reaches `plan()`;
+    // this only catches a violation in development builds. The `acted` guard
+    // in the undeclared loop below is the release-build backstop that keeps
+    // a violation that slips past this from double-pruning.
+    debug_assert!(
+        {
+            let mut seen = BTreeSet::new();
+            installed
+                .iter()
+                .filter(|i| i.backend == view.backend)
+                .all(|i| seen.insert(&i.name))
+        },
+        "a backend returned two Installed entries for one name; \
+         Scan must collapse them or mark them opaque"
+    );
 
-    let declared_scoop: BTreeSet<&Name> = declared.scoop.packages.iter().collect();
+    let declared_set: BTreeSet<&Name> = view.declared.iter().collect();
 
     // Declared packages: install / upgrade / downgrade / skip.
-    for name in &declared.scoop.packages {
+    for name in view.declared {
         let current = installed
             .iter()
-            .find(|i| i.backend == SCOOP && &i.name == name);
+            .find(|i| i.backend == view.backend && &i.name == name);
 
         // Emitted independently of the version verdict, and before the lock
         // check: architecture is a fact about the machine, true whether or not
@@ -144,9 +188,7 @@ pub fn plan(
         // Upgrade and an ArchDrift; those are two true facts.
         if let (Some(cur), Some(want)) = (
             current,
-            declared
-                .scoop
-                .opts
+            view.opts
                 .get(name)
                 .and_then(|o| o.arch)
                 .and_then(|a| a.as_scoop()),
@@ -161,7 +203,7 @@ pub fn plan(
                 // to remove, and in Phase 2b drift may drive a reinstall.
                 if !have.eq_ignore_ascii_case(want) {
                     reports.push(Action::ArchDrift {
-                        backend: SCOOP.into(),
+                        backend: view.backend.into(),
                         name: name.clone(),
                         have: have.to_string(),
                         want: want.to_string(),
@@ -172,16 +214,16 @@ pub fn plan(
 
         if opaque.iter().any(|o| o == name) {
             actions.push(Action::Skip {
-                backend: SCOOP.into(),
+                backend: view.backend.into(),
                 name: name.clone(),
                 reason: SkipReason::Opaque,
             });
             continue;
         }
 
-        let Some(pin) = lock.scoop.get(name) else {
+        let Some(pin) = view.lock.get(name) else {
             actions.push(Action::Skip {
-                backend: SCOOP.into(),
+                backend: view.backend.into(),
                 name: name.clone(),
                 reason: SkipReason::NotLocked,
             });
@@ -196,14 +238,14 @@ pub fn plan(
         // reinstalling an undeclared package under a different architecture is
         // a change nobody asked for. `Arch::Keep` yields None, which means
         // "pass no -a".
-        let arch: Option<String> = match declared.scoop.opts.get(name).and_then(|o| o.arch) {
+        let arch: Option<String> = match view.opts.get(name).and_then(|o| o.arch) {
             Some(a) => a.as_scoop().map(str::to_string),
             None => current.and_then(|c| c.arch.clone()),
         };
 
         match current {
             None => actions.push(Action::Install {
-                backend: SCOOP.into(),
+                backend: view.backend.into(),
                 name: name.clone(),
                 version: want.to_string(),
                 arch: arch.clone(),
@@ -214,13 +256,13 @@ pub fn plan(
                 // healthy running package produces no line at all.
                 if running.covers(cur) {
                     actions.push(Action::Skip {
-                        backend: SCOOP.into(),
+                        backend: view.backend.into(),
                         name: name.clone(),
                         reason: SkipReason::Running,
                     });
                 } else if is_older(&cur.version, want) {
                     actions.push(Action::Upgrade {
-                        backend: SCOOP.into(),
+                        backend: view.backend.into(),
                         name: name.clone(),
                         from: cur.version.clone(),
                         to: want.to_string(),
@@ -228,7 +270,7 @@ pub fn plan(
                     });
                 } else {
                     actions.push(Action::Downgrade {
-                        backend: SCOOP.into(),
+                        backend: view.backend.into(),
                         name: name.clone(),
                         from: cur.version.clone(),
                         to: want.to_string(),
@@ -237,6 +279,83 @@ pub fn plan(
                 }
             }
         }
+    }
+
+    // Installed but undeclared: prune if owned, report if not, ignore helpers.
+    //
+    // `acted` is the release-build twin of the `debug_assert!` above: if a
+    // backend does hand back two `Installed` entries for one name, this still
+    // emits at most one Prune/Skip/Unmanaged for it rather than one per
+    // duplicate.
+    let mut acted: BTreeSet<&Name> = BTreeSet::new();
+    for inst in installed.iter().filter(|i| i.backend == view.backend) {
+        if !acted.insert(&inst.name) {
+            continue;
+        }
+        if declared_set.contains(&inst.name) {
+            continue;
+        }
+        if state.owns(view.backend, &inst.name) {
+            // Ownership outranks the helper list. The list exists to stop a
+            // helper scoop installed for itself being reported as a stray; a
+            // helper *dotpkg* installed is dotpkg's to release, and skipping
+            // it here left it unreleasable and unmentioned forever.
+            if running.covers(inst) {
+                actions.push(Action::Skip {
+                    backend: view.backend.into(),
+                    name: inst.name.clone(),
+                    reason: SkipReason::Running,
+                });
+            } else {
+                prunes.push(Action::Prune {
+                    backend: view.backend.into(),
+                    name: inst.name.clone(),
+                    version: inst.version.clone(),
+                });
+            }
+        } else if !view.helpers.contains(&inst.name.key()) {
+            reports.push(Action::Unmanaged {
+                backend: view.backend.into(),
+                name: inst.name.clone(),
+                version: inst.version.clone(),
+            });
+        }
+    }
+}
+
+/// Pure. No I/O, no network, no subprocess — every input is passed in, which is
+/// what lets the whole decision layer be tested on any OS.
+pub fn plan(
+    declared: &Config,
+    lock: &Lock,
+    installed: &[Installed],
+    opaque: &[Name],
+    state: &State,
+    running: &Running,
+) -> Plan {
+    let mut actions = Vec::new();
+    let mut prunes = Vec::new();
+    let mut reports = Vec::new();
+
+    // One pass per backend. Only scoop has a view today; Task 6 adds winget's.
+    let backends = [BackendView {
+        backend: SCOOP,
+        declared: declared.scoop.packages.as_slice(),
+        lock: &lock.scoop,
+        opts: &declared.scoop.opts,
+        helpers: SCOOP_HELPERS,
+    }];
+    for view in &backends {
+        plan_backend(
+            view,
+            installed,
+            opaque,
+            state,
+            running,
+            &mut actions,
+            &mut prunes,
+            &mut reports,
+        );
     }
 
     // Declared winget packages. There is no winget scan in Phase 1 and none is
@@ -249,38 +368,6 @@ pub fn plan(
             name: name.clone(),
             reason: SkipReason::BackendNotImplemented,
         });
-    }
-
-    // Installed but undeclared: prune if owned, report if not, ignore helpers.
-    for inst in installed.iter().filter(|i| i.backend == SCOOP) {
-        if declared_scoop.contains(&inst.name) {
-            continue;
-        }
-        if state.owns(SCOOP, &inst.name) {
-            // Ownership outranks the helper list. The list exists to stop a
-            // helper scoop installed for itself being reported as a stray; a
-            // helper *dotpkg* installed is dotpkg's to release, and skipping
-            // it here left it unreleasable and unmentioned forever.
-            if running.covers(inst) {
-                actions.push(Action::Skip {
-                    backend: SCOOP.into(),
-                    name: inst.name.clone(),
-                    reason: SkipReason::Running,
-                });
-            } else {
-                prunes.push(Action::Prune {
-                    backend: SCOOP.into(),
-                    name: inst.name.clone(),
-                    version: inst.version.clone(),
-                });
-            }
-        } else if !SCOOP_HELPERS.contains(&inst.name.key()) {
-            reports.push(Action::Unmanaged {
-                backend: SCOOP.into(),
-                name: inst.name.clone(),
-                version: inst.version.clone(),
-            });
-        }
     }
 
     // Install before uninstall: a run that dies partway should leave an extra

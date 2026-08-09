@@ -999,3 +999,53 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     );
     f.assert_nothing_was_touched(before);
 }
+
+#[test]
+fn status_says_so_when_the_lock_is_one_apply_would_refuse() {
+    // The worst pairing available before this: status prints an actionable
+    // plan, apply exits 2 on the same two files. `status` still prints the
+    // plan -- it is read-only and its whole product is telling the truth --
+    // but it no longer does so in silence.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n",
+        "{}",
+    );
+    fs::write(
+        f.work.path().join("pkg.lock"),
+        "[scoop.tool]\nbucket = \"main\"\ncommit = \"main\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+
+    let out = f.run(&["status"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status stays read-only and never refuses: {stderr}"
+    );
+    assert!(
+        stderr.contains("not a commit hash"),
+        "name the diagnosis: {stderr}"
+    );
+    assert!(
+        stderr.contains("dotpkg update"),
+        "name the command that fixes it -- it exists now: {stderr}"
+    );
+    // The guard's own error (printed above) already says the lock is
+    // malformed and names "dotpkg update" -- it does not say anything about
+    // `apply`. This substring exists only in the second `eprintln!`, so it is
+    // the one thing here that pins that line rather than being satisfied by
+    // the first line's text alone.
+    assert!(
+        stderr.contains("not what apply would do"),
+        "name the relationship between the two commands, not just the lock's own defect: {stderr}"
+    );
+    // The plan is still printed. Without this, making status bail would pass
+    // the assertions above while removing the thing status is for.
+    assert!(
+        stdout.contains("tool"),
+        "the plan must still be printed: {stdout}"
+    );
+}

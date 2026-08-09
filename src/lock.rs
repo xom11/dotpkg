@@ -112,7 +112,7 @@ mod tests {
             r#"
 [scoop.fzf]
 bucket  = "main"
-commit  = "a28d0c5648f1"
+commit  = "a28d0c5648f1e9d3b7c2a41f6e8b9d0c5a7f3e12"
 version = "0.74.1"
 
 [winget."Git.Git"]
@@ -126,7 +126,7 @@ pin     = "version-only"
             lock.scoop[&Name::new("fzf")],
             Pin::ScoopCommit {
                 bucket: "main".into(),
-                commit: "a28d0c5648f1".into(),
+                commit: "a28d0c5648f1e9d3b7c2a41f6e8b9d0c5a7f3e12".into(),
                 version: "0.74.1".into()
             }
         );
@@ -144,6 +144,22 @@ pin     = "version-only"
         // through `Display`, which does not fold.
         let (stored_key, _) = lock.winget.get_key_value(&Name::new("Git.Git")).unwrap();
         assert_eq!(stored_key.to_string(), "Git.Git");
+    }
+
+    #[test]
+    fn parse_accepts_a_commit_the_guards_reject_and_that_split_is_deliberate() {
+        // There is no hex check here, on purpose. A lock too broken to run
+        // must still be READABLE, or `status` could not explain it and
+        // `update` could not tell the user which entries it is replacing.
+        // The refusal lives in `apply::lock_coherence_guard` and in
+        // `Scoop::stage`, both of which run before anything is staged.
+        let lock =
+            parse("[scoop.fzf]\nbucket = \"main\"\ncommit = \"main\"\nversion = \"0.74.1\"\n")
+                .expect("parse must not be the layer that refuses this");
+        assert_eq!(lock.scoop.len(), 1);
+
+        let err = crate::apply::lock_coherence_guard(&lock).unwrap_err();
+        assert!(format!("{err:#}").contains("hex"), "got {err:#}");
     }
 
     #[test]

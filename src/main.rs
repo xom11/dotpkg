@@ -90,6 +90,18 @@ fn main() -> Result<()> {
         Command::Status { config, lock } => {
             let declared = dotpkg::config::load(&config)?;
             let locked = dotpkg::lock::load_or_empty(&lock)?;
+
+            // A warning, not a refusal. `apply` exits 2 on this lock, and
+            // until now `status` printed an actionable plan from it in
+            // silence. Refusing here would withhold exactly the information
+            // the user needs to fix it, so the plan is still printed --
+            // `status` is read-only and its whole product is the truth about
+            // this machine.
+            if let Err(e) = dotpkg::apply::lock_coherence_guard(&locked) {
+                eprintln!("warning: {e:#}");
+                eprintln!("warning: `dotpkg apply` will refuse this lock. The plan below is what it describes, not what apply would do.");
+            }
+
             let state = State::load_or_empty(&State::default_path())?;
             let scoop = Scoop::discover();
             let scan = scoop.scan()?;

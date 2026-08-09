@@ -200,7 +200,7 @@ fn main() -> Result<()> {
             print!("{}", dotpkg::render::render(&plan));
 
             if clone_missing_buckets {
-                for (name, why) in d.scoop.clone_missing_buckets(&d.declared) {
+                for (name, why) in d.scoop.clone_missing_buckets(&d.declared, &d.scoop) {
                     eprintln!("warning: could not add bucket {name}: {why}");
                 }
             }

@@ -120,6 +120,11 @@ impl Mutator for Fake<'_> {
     fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
         unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
     }
+    fn bucket_add(&self, _bucket: &dotpkg::config::BucketDecl) -> anyhow::Result<CommandReport> {
+        unreachable!(
+            "execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job"
+        )
+    }
 }
 
 #[test]
@@ -404,6 +409,12 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
+        }
     }
     let fake = Picky {
         tree: &t,
@@ -484,6 +495,12 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
         }
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
         }
     }
     let fake = Picky { tree: &t };
@@ -871,6 +888,12 @@ fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
+        }
     }
     let t = Tree::new();
     let staged = t.stage("fzf", "1.0.0", BODY_A);
@@ -945,6 +968,12 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
         }
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
         }
     }
     let t = Tree::new();
@@ -1063,6 +1092,12 @@ fn a_retry_that_leaves_half_install_residue_is_touched() {
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
         }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
+        }
     }
     let t = Tree::new();
     let staged = t.stage("fzf", "1.0.0", BODY_A);
@@ -1133,6 +1168,12 @@ fn the_resolved_architecture_reaches_mutator_install() {
         }
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
         }
     }
     let t = Tree::new();
@@ -1234,6 +1275,12 @@ fn the_recovery_file_exists_on_disk_before_executes_first_mutation() {
         }
         fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
             unreachable!("execute() and run_step() never call download -- that is prepare()'s job")
+        }
+        fn bucket_add(
+            &self,
+            _bucket: &dotpkg::config::BucketDecl,
+        ) -> anyhow::Result<CommandReport> {
+            unreachable!("execute() and run_step() never call bucket_add -- that is clone_missing_buckets's job")
         }
     }
     let fake = AssertRecoveryAlreadyExists {

@@ -431,67 +431,163 @@ fn a_manifest_that_is_not_a_file_warns_rather_than_vanishing() {
     );
 }
 
-#[test]
-fn a_declared_bucket_missing_on_disk_is_reported_by_name_and_a_real_reason() {
-    // Every mutant that replaces `clone_missing_buckets`'s whole body
-    // survives unless the real return value differs from all three literal
-    // stand-ins: an empty vec, or a single entry naming a `Default` (empty)
-    // `Name` with reason `""` or `"xyzzy"`. A declared bucket that is not on
-    // disk, run against a root with no real `scoop.cmd` to invoke, produces
-    // exactly one entry naming the real bucket ("main") with a real "cannot
-    // run" failure text -- distinct from all three stand-ins at once.
-    //
-    // This also exercises the pre-run `.git`-existence skip guard from its
-    // "missing" side: a bucket dir with no `.git` must not be treated as
-    // already cloned. Its sibling below covers the "already present" side.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dotpkg::config::Config {
-        scoop: dotpkg::config::ScoopSection {
-            buckets: vec![dotpkg::config::BucketDecl {
-                name: Name::new("main"),
+use dotpkg::config::{BucketDecl, Config, ScoopSection};
+use dotpkg::execute::{CommandReport, Mutator};
+
+fn one_bucket_config(name: &str) -> Config {
+    Config {
+        scoop: ScoopSection {
+            buckets: vec![BucketDecl {
+                name: Name::new(name),
                 url: None,
             }],
             ..Default::default()
         },
         ..Default::default()
-    };
+    }
+}
 
-    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg);
+/// A fake `bucket_add`. `clone_missing_buckets` never calls `uninstall`,
+/// `install` or `download`, so those panic if reached rather than silently
+/// returning something plausible.
+///
+/// The two `Ok` shapes mirror what a real `scoop bucket add` was measured to
+/// do (see `clone_missing_buckets`'s own doc comment): it can really clone
+/// (`.git` appears under the bucket directory) or it can exit 0 having done
+/// nothing (`.git` does not appear) -- the silent-success trap the post-run
+/// `.git` re-check exists to catch. Before this seam existed, no test could
+/// produce the second shape at all: `self.run` against a nonexistent
+/// `scoop.cmd` can only ever return `Err`.
+struct FakeBucketAdd {
+    root: PathBuf,
+    clones_for_real: bool,
+    fails: bool,
+}
 
-    assert_eq!(failed.len(), 1, "got {failed:?}");
-    assert_eq!(failed[0].0, Name::new("main"));
-    assert!(
-        !failed[0].1.is_empty() && failed[0].1 != "xyzzy",
-        "got {:?}",
-        failed[0].1
-    );
+impl Mutator for FakeBucketAdd {
+    fn uninstall(&self, _app: &Name) -> anyhow::Result<CommandReport> {
+        unreachable!("clone_missing_buckets never calls uninstall")
+    }
+    fn install(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+        unreachable!("clone_missing_buckets never calls install")
+    }
+    fn download(&self, _manifest: &Path, _arch: Option<&str>) -> anyhow::Result<CommandReport> {
+        unreachable!("clone_missing_buckets never calls download")
+    }
+    fn bucket_add(&self, bucket: &BucketDecl) -> anyhow::Result<CommandReport> {
+        if self.fails {
+            anyhow::bail!("cannot run fake scoop");
+        }
+        if self.clones_for_real {
+            let git = self
+                .root
+                .join("buckets")
+                .join(bucket.name.key())
+                .join(".git");
+            fs::create_dir_all(git).unwrap();
+        }
+        Ok(CommandReport {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
 }
 
 #[test]
 fn a_declared_bucket_already_on_disk_is_left_alone() {
-    // The positive sibling to the test above: a bucket directory that
-    // already has `.git` must be skipped outright -- no clone attempt, no
-    // failure entry -- even on a machine with no working scoop.cmd to
-    // attempt one with. Only `.git`'s existence is checked, not its
-    // validity, so an empty `.git` directory is enough to take this branch.
-    // Pairing this with the "missing" test above means a mutation that
-    // always takes one branch cannot satisfy both.
+    // A bucket directory that already has `.git` must be skipped outright --
+    // no clone attempt, no failure entry -- before `bucket_add` is ever
+    // called. The mutator here panics if it is reached at all, which is a
+    // stronger guarantee than merely checking `failed` ends up empty: it
+    // proves the pre-run skip guard, not a coincidence downstream of it.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("buckets").join("main").join(".git")).unwrap();
-    let cfg = dotpkg::config::Config {
-        scoop: dotpkg::config::ScoopSection {
-            buckets: vec![dotpkg::config::BucketDecl {
-                name: Name::new("main"),
-                url: None,
-            }],
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let cfg = one_bucket_config("main");
+    struct PanicsIfCalled;
+    impl Mutator for PanicsIfCalled {
+        fn uninstall(&self, _app: &Name) -> anyhow::Result<CommandReport> {
+            unreachable!()
+        }
+        fn install(&self, _m: &Path, _a: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!()
+        }
+        fn download(&self, _m: &Path, _a: Option<&str>) -> anyhow::Result<CommandReport> {
+            unreachable!()
+        }
+        fn bucket_add(&self, bucket: &BucketDecl) -> anyhow::Result<CommandReport> {
+            panic!("must not be called: {} already has .git", bucket.name)
+        }
+    }
 
-    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg);
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg, &PanicsIfCalled);
 
     assert!(failed.is_empty(), "got {failed:?}");
+}
+
+#[test]
+fn a_bucket_add_that_really_clones_is_not_recorded_as_failed() {
+    // The positive sibling to the silent-success test below: an `Ok` whose
+    // `.git` genuinely appears afterwards is a real clone and must not be
+    // reported. Without this test, a mutant that always takes the
+    // empty-arm (`Ok(_) if true`) would look identical to correct behaviour.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = one_bucket_config("main");
+    let mutator = FakeBucketAdd {
+        root: dir.path().to_path_buf(),
+        clones_for_real: true,
+        fails: false,
+    };
+
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg, &mutator);
+
+    assert!(failed.is_empty(), "got {failed:?}");
+}
+
+#[test]
+fn a_bucket_add_that_reports_success_without_cloning_is_recorded_as_failed() {
+    // The trap `clone_missing_buckets`'s own doc comment measures: `scoop
+    // bucket add` can exit 0 having done nothing. Mutated to `true`, the
+    // post-run guard would accept this `Ok` on its own and record nothing --
+    // a clone that silently did nothing would look identical to one that
+    // worked. Paired with the test above (same `Ok`, opposite `.git`
+    // outcome), a mutation that always takes one branch cannot satisfy both.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = one_bucket_config("main");
+    let mutator = FakeBucketAdd {
+        root: dir.path().to_path_buf(),
+        clones_for_real: false,
+        fails: false,
+    };
+
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg, &mutator);
+
+    assert_eq!(failed.len(), 1, "got {failed:?}");
+    assert_eq!(failed[0].0, Name::new("main"));
+}
+
+#[test]
+fn a_bucket_add_that_cannot_run_at_all_is_recorded_with_its_error_text() {
+    // The `Err` arm, distinct from the two `Ok` shapes above: a bucket add
+    // that could not even be attempted is recorded with a real, non-empty
+    // reason rather than a stand-in default.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = one_bucket_config("main");
+    let mutator = FakeBucketAdd {
+        root: dir.path().to_path_buf(),
+        clones_for_real: false,
+        fails: true,
+    };
+
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg, &mutator);
+
+    assert_eq!(failed.len(), 1, "got {failed:?}");
+    assert_eq!(failed[0].0, Name::new("main"));
+    assert!(
+        failed[0].1.contains("cannot run fake scoop"),
+        "got {:?}",
+        failed[0].1
+    );
 }
 
 use dotpkg::model::{Installed, SCOOP};

@@ -536,15 +536,25 @@ impl Scoop {
     ///
     /// Verified by looking for `.git` again, not by the exit code: measured,
     /// `scoop bucket add` exits 0 on a duplicate and on a failure alike.
-    pub fn clone_missing_buckets(&self, declared: &crate::config::Config) -> Vec<(Name, String)> {
+    ///
+    /// Takes `mutator` rather than calling `self.run` directly -- the same
+    /// seam `download` joined for the same reason (`crate::execute::Mutator`'s
+    /// own doc comment). Without it, no test on any platform could produce
+    /// the silent-success shape this function's `.git` re-check exists to
+    /// catch, because that shape requires an `Ok` that a real `self.run`
+    /// against a nonexistent `scoop.cmd` can never return.
+    pub fn clone_missing_buckets(
+        &self,
+        declared: &crate::config::Config,
+        mutator: &dyn crate::execute::Mutator,
+    ) -> Vec<(Name, String)> {
         let mut failed = Vec::new();
         for b in &declared.scoop.buckets {
             let dir = self.root.join("buckets").join(b.name.key());
             if dir.join(".git").exists() {
                 continue;
             }
-            let argv = bucket_add_argv(b);
-            match self.run(&argv) {
+            match mutator.bucket_add(b) {
                 Ok(_) if dir.join(".git").exists() => {}
                 Ok(r) => failed.push((b.name.clone(), tail(&r.stdout))),
                 Err(e) => failed.push((b.name.clone(), format!("{e:#}"))),
@@ -641,6 +651,12 @@ impl crate::execute::Mutator for Scoop {
         arch: Option<&str>,
     ) -> Result<crate::execute::CommandReport> {
         self.run(&download_argv(manifest, arch))
+    }
+    fn bucket_add(
+        &self,
+        bucket: &crate::config::BucketDecl,
+    ) -> Result<crate::execute::CommandReport> {
+        self.run(&bucket_add_argv(bucket))
     }
 }
 

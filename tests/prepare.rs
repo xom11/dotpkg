@@ -756,6 +756,12 @@ impl Mutator for Downloader {
             stderr: String::new(),
         })
     }
+    fn bucket_add(&self, bucket: &dotpkg::config::BucketDecl) -> anyhow::Result<CommandReport> {
+        panic!(
+            "prepare must never add a bucket, but it was asked to add {}",
+            bucket.name
+        );
+    }
 }
 
 fn one_install_plan(name: &str, version: &str, arch: Option<&str>) -> dotpkg::plan::Plan {

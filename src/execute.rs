@@ -5,6 +5,7 @@
 //! directory tree, because a fake that both performs and reports the mutation
 //! proves only that it is self-consistent.
 
+use crate::config::BucketDecl;
 use crate::model::{Name, Running, SCOOP};
 use crate::state::{Ownership, State};
 use crate::verify::{verdict, Disagreement, Expected};
@@ -42,6 +43,15 @@ pub trait Mutator {
     /// `Outcome::ReadyToFetch` from production code, or see the argv that
     /// carries the resolved architecture.
     fn download(&self, manifest: &Path, arch: Option<&str>) -> Result<CommandReport>;
+    /// Add a declared bucket that is missing on disk. Not a mutation of
+    /// installed software either, but it is the fourth scoop invocation, and
+    /// `clone_missing_buckets` calling a `Scoop`-only `run` directly bypassed
+    /// this seam the same way `download` used to: until this joined the
+    /// trait, no test on any platform could make a bucket add report success
+    /// while having cloned nothing -- the exact silent-success shape
+    /// `clone_missing_buckets`'s own doc comment measures `scoop bucket add`
+    /// for, and the one its post-run `.git` check exists to catch.
+    fn bucket_add(&self, bucket: &BucketDecl) -> Result<CommandReport>;
 }
 
 /// One mutation, already resolved against the plan and the preparation.

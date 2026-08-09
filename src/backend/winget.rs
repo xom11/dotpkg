@@ -1,7 +1,8 @@
-use super::Scan;
+use super::{Backend, Scan};
 use crate::model::{Installed, Name, WINGET};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
+use std::process::{Command, Stdio};
 
 /// One row of `winget list`'s fixed-width text table.
 ///
@@ -317,4 +318,144 @@ pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     }
 
     scan
+}
+
+/// One `winget` invocation's outcome: the exit code and stdout, verbatim.
+///
+/// `code` is a plain `i32`, not the `Option<i32>` `execute::CommandReport`
+/// uses for scoop -- every one of the ~45 measured invocations
+/// (`docs/measurements-2026-08-09-winget.md`) exited with a code, none was
+/// killed by a signal, so there is no signal case to model here.
+///
+/// stdout only: see `RealWinget::run`'s doc comment for why stderr never
+/// reaches this struct at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdOut {
+    pub code: i32,
+    pub stdout: String,
+}
+
+/// The seam. Every winget invocation this crate makes goes through here, so
+/// every test can fake it and none has to spawn `winget.exe` -- the sibling
+/// rule to `tests/cli.rs`'s "no test may provide a fake scoop binary", and to
+/// the standing rule that no test may create a file at `Scoop::scoop_exe()`'s
+/// path either.
+pub trait WingetCmd {
+    fn run(&self, args: &[&str]) -> Result<CmdOut>;
+}
+
+/// The real `winget.exe`, invoked as a subprocess. Only production code
+/// (`main.rs`, once a later task wires it up) may construct this -- every
+/// test uses a fake that implements `WingetCmd` instead.
+pub struct RealWinget;
+
+impl WingetCmd for RealWinget {
+    fn run(&self, args: &[&str]) -> Result<CmdOut> {
+        let out = Command::new("winget")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("cannot run winget {args:?}"))?;
+        // `out.stderr` is captured (so it cannot leak to this process's own
+        // stderr) and then never read -- deliberately discarded rather than
+        // merged into `stdout`. Measured across ~45 invocations on a14
+        // (docs/measurements-2026-08-09-winget.md): stderr was 0 bytes every
+        // single time, including all three failure codes, including the
+        // 0x80070003 export failure whose error text was itself printed to
+        // STDOUT. So anything winget ever writes to stderr on a real machine
+        // is a surprise this crate has never seen measured -- silently
+        // folding it into stdout would hide that surprise instead of
+        // surfacing it.
+        Ok(CmdOut {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        })
+    }
+}
+
+/// `winget list -e --id <a package that does not exist>` exits this code on
+/// a14 -- `0x8A150014` read as a signed `i32`. `winget show -e --id <absent>`
+/// exits it too.
+///
+/// **Not "found nothing".** `winget list -s msstore` against a source with no
+/// matching package prints the byte-identical 53-byte sentence `list -e --id
+/// <absent>` does, and exits `0` -- see `tests/fixtures/winget/PROVENANCE.md`,
+/// where both fixtures are checked in side by side precisely so this is not
+/// forgotten. The exit code is a function of the *filter shape* winget was
+/// asked with, not of the output it printed, so this constant may only be
+/// trusted against `code` for the exact argv shapes this crate uses -- pinned
+/// by `scan_asks_winget_exactly_once_with_the_argv_this_phase_measured` in
+/// `tests/winget_scan.rs`.
+pub const NO_APPLICATIONS_FOUND: i32 = -1978335212;
+
+/// `winget show -e --id <an id that exists> -v <a version that does not>`
+/// exits this code on a14 -- `0x8A150017`, deliberately distinct from
+/// `NO_APPLICATIONS_FOUND` above: one says the package itself is gone, this
+/// one says a specific version of a package that still exists is gone.
+///
+/// **Not used by this task.** Task 13's pin-liveness check
+/// (`Winget::resolve_installed`) is the caller: it runs `show ... -v <the
+/// version pkg.lock pins>` and needs to tell "this exact version fell out of
+/// the index" (this code) apart from "the package itself is no longer in any
+/// index at all" (`NO_APPLICATIONS_FOUND`), because the two lead to different
+/// advice for the user.
+pub const NO_VERSION_FOUND: i32 = -1978335209;
+
+/// One package manager, `winget`, behind the `WingetCmd` seam -- generic so
+/// that `RealWinget` and a test's fake are interchangeable, and so nothing
+/// outside this module needs to know which one it is holding.
+pub struct Winget<C: WingetCmd> {
+    cmd: C,
+}
+
+impl<C: WingetCmd> Winget<C> {
+    pub fn new(cmd: C) -> Winget<C> {
+        Winget { cmd }
+    }
+}
+
+impl<C: WingetCmd> Backend for Winget<C> {
+    fn name(&self) -> &'static str {
+        WINGET
+    }
+
+    /// Runs exactly `["list", "--disable-interactivity"]` -- no filter at
+    /// all, deliberately: the argv is part of this function's contract (see
+    /// `NO_APPLICATIONS_FOUND`'s doc comment for why), and it is the one
+    /// shape the exit-code trust below is measured against.
+    fn scan(&self) -> Result<Scan> {
+        let out = match self.cmd.run(&["list", "--disable-interactivity"]) {
+            Ok(out) => out,
+            // Symmetric with `Scoop::scan`'s `NotFound` arm for a missing
+            // `~/scoop/apps`: a machine with no `winget.exe` on `PATH` is a
+            // legitimate machine -- not every Windows install has it -- and
+            // an empty `Scan` is the right answer. But unlike that arm this
+            // records a warning rather than staying silent, because "winget
+            // could not be run" and "winget ran and found nothing" would
+            // otherwise be indistinguishable to the user, and the caller
+            // named in `e` is worth keeping.
+            Err(e) => {
+                let mut scan = Scan::default();
+                scan.warnings
+                    .push(format!("winget could not be run: {e:#}"));
+                return Ok(scan);
+            }
+        };
+        // winget signals failure through its exit code -- the opposite of
+        // scoop, which was measured to exit 0 for a hash mismatch, a dead
+        // URL, and an uninstall of an app that was never installed (see
+        // `execute::CommandReport`'s doc comment). Here the code is
+        // trustworthy for this exact argv, and a nonzero code must become an
+        // error, never an empty `Scan`: an empty machine is exactly what
+        // `mass_prune_guard` exists to catch, and it catches it far too late
+        // -- after a plan full of prunes has already been built.
+        anyhow::ensure!(
+            out.code == 0,
+            "winget list exited {}: {}",
+            out.code,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        );
+        Ok(rows_to_scan(parse_list(&out.stdout)?))
+    }
 }

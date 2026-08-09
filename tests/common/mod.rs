@@ -5,6 +5,8 @@
 //! against a fake that can only be self-consistent.
 #![allow(dead_code)]
 
+pub mod fake_winget;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

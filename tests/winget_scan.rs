@@ -1,4 +1,8 @@
-use dotpkg::backend::winget::{parse_list, rows_to_scan, WingetRow};
+mod common;
+
+use common::fake_winget::FakeWinget;
+use dotpkg::backend::winget::{parse_list, rows_to_scan, Winget, WingetRow, NO_APPLICATIONS_FOUND};
+use dotpkg::backend::Backend;
 use dotpkg::model::Name;
 
 fn fixture(name: &str) -> String {
@@ -282,4 +286,58 @@ fn a_scan_with_nothing_unusual_produces_no_warnings_at_all() {
     // `contains(...)` assertion above by coincidence.
     let scan = rows_to_scan(parse_list(&fixture("list-single.txt")).unwrap());
     assert!(scan.warnings.is_empty(), "got {:?}", scan.warnings);
+}
+
+// -- Winget::scan (the WingetCmd seam) -------------------------------------
+//
+// Every test below uses `FakeWinget` (tests/common/fake_winget.rs). No test
+// in this crate may spawn `winget.exe` -- that is the entire reason
+// `WingetCmd` exists as a seam, the sibling rule to `tests/cli.rs`'s "no test
+// may provide a fake scoop binary".
+
+#[test]
+fn scan_asks_winget_exactly_once_with_the_argv_this_phase_measured() {
+    // The exit code is a function of the FILTER, not of the output:
+    // `list -s msstore` returns the same 53-byte sentence as
+    // `list -e --id <absent>` and exits 0 where the other exits 0x8A150014.
+    // So the argv is part of the contract and is pinned here.
+    let fake = FakeWinget::returning(0, fixture("list-single.txt"));
+    let scan = Backend::scan(&Winget::new(fake.clone())).unwrap();
+    assert_eq!(fake.calls(), vec![vec!["list", "--disable-interactivity"]]);
+    assert_eq!(scan.installed.len(), 1);
+}
+
+#[test]
+fn a_machine_without_winget_is_an_empty_scan_and_a_warning_not_an_error() {
+    // Symmetric with Scoop::scan, where a missing ~/scoop/apps is a valid
+    // empty state rather than a failure.
+    let fake = FakeWinget::failing_to_spawn();
+    let scan = Backend::scan(&Winget::new(fake)).unwrap();
+    assert!(scan.installed.is_empty() && scan.opaque.is_empty());
+    assert_eq!(scan.warnings.len(), 1);
+    assert!(
+        scan.warnings[0].contains("winget"),
+        "got {:?}",
+        scan.warnings
+    );
+}
+
+#[test]
+fn a_nonzero_exit_from_list_is_an_error_not_an_empty_machine() {
+    // An empty machine is exactly what mass_prune_guard exists to catch too
+    // late. A `list` that fails must never look like "nothing is installed".
+    let fake = FakeWinget::returning(NO_APPLICATIONS_FOUND, fixture("list-not-found.txt"));
+    let r = Backend::scan(&Winget::new(fake));
+    assert!(
+        r.is_err(),
+        "a failed list must not read as an empty machine"
+    );
+}
+
+#[test]
+fn the_backend_reports_the_name_the_lock_and_state_are_keyed_by() {
+    assert_eq!(
+        Backend::name(&Winget::new(FakeWinget::returning(0, String::new()))),
+        dotpkg::model::WINGET
+    );
 }

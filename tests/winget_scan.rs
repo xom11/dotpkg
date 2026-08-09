@@ -35,8 +35,10 @@ fn a_table_with_no_available_column_still_parses() {
     let rows = parse_list(&fixture("list-duplicate-id.txt")).unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r.available.is_none()));
-    assert!(rows.iter().all(|r| r.source.as_deref() == Some("winget")),
-            "Source must not be read out of the missing Available column: {rows:?}");
+    assert!(
+        rows.iter().all(|r| r.source.as_deref() == Some("winget")),
+        "Source must not be read out of the missing Available column: {rows:?}"
+    );
 }
 
 #[test]
@@ -61,7 +63,10 @@ fn a_version_winget_will_not_commit_to_is_kept_verbatim() {
 #[test]
 fn the_available_column_is_read_when_it_is_there() {
     let rows = parse_list(&fixture("list-upgrade-available.txt")).unwrap();
-    let chrome = rows.iter().find(|r| r.id == "Google.Chrome").expect("in the fixture");
+    let chrome = rows
+        .iter()
+        .find(|r| r.id == "Google.Chrome")
+        .expect("in the fixture");
     assert_eq!(chrome.version, "150.0.7871.187");
     assert_eq!(chrome.available.as_deref(), Some("151.0.7922.109"));
 }
@@ -124,22 +129,38 @@ fn the_whole_captured_machine_splits_into_exactly_these_counts() {
     let scan = rows_to_scan(parse_list(&fixture("list-full.txt")).unwrap());
     assert_eq!(scan.opaque.len(), 89);
     assert_eq!(scan.installed.len(), 37);
-    assert_eq!(scan.opaque.len() + scan.installed.len(), 126, "every id is one or the other");
-    assert!(scan.installed.iter().all(|i| i.backend == dotpkg::model::WINGET));
+    assert_eq!(
+        scan.opaque.len() + scan.installed.len(),
+        126,
+        "every id is one or the other"
+    );
+    assert!(scan
+        .installed
+        .iter()
+        .all(|i| i.backend == dotpkg::model::WINGET));
     assert!(
-        !scan.installed.iter().any(|i| i.name.key().starts_with("msix\\")
-                                    || i.name.key().starts_with("arp\\")),
+        !scan
+            .installed
+            .iter()
+            .any(|i| i.name.key().starts_with("msix\\") || i.name.key().starts_with("arp\\")),
         "no MSIX or ARP row may reach `installed`"
     );
 }
 
 #[test]
 fn duplicate_ids_that_agree_on_a_version_collapse_to_one_entry_and_warn() {
-    let rows = vec![row("WindowsAppRuntime.1.7", "1.7.9"), row("WindowsAppRuntime.1.7", "1.7.9")];
+    let rows = vec![
+        row("WindowsAppRuntime.1.7", "1.7.9"),
+        row("WindowsAppRuntime.1.7", "1.7.9"),
+    ];
     let scan = rows_to_scan(rows);
     assert_eq!(scan.installed.len(), 1, "one package is one entry");
     assert_eq!(scan.installed[0].version, "1.7.9");
-    assert_eq!(scan.warnings.len(), 1, "winget's export collapses these silently; dotpkg may not");
+    assert_eq!(
+        scan.warnings.len(),
+        1,
+        "winget's export collapses these silently; dotpkg may not"
+    );
     assert!(scan.warnings[0].contains("WindowsAppRuntime.1.7"));
 }
 
@@ -148,11 +169,17 @@ fn duplicate_ids_that_disagree_on_a_version_are_opaque_rather_than_guessed() {
     // 7zip.7zip is installed twice, at 26.01.00.0 and 26.02. Two versions of
     // one package is a state dotpkg has no vocabulary for; picking one would
     // be inventing a fact. winget's own export picks 26.02 and says nothing.
-    let scan = rows_to_scan(vec![row("7zip.7zip", "26.01.00.0"), row("7zip.7zip", "26.02")]);
+    let scan = rows_to_scan(vec![
+        row("7zip.7zip", "26.01.00.0"),
+        row("7zip.7zip", "26.02"),
+    ]);
     assert!(scan.installed.is_empty(), "got {:?}", scan.installed);
     assert_eq!(scan.opaque, vec![Name::new("7zip.7zip")]);
-    assert!(scan.warnings[0].contains("26.01.00.0") && scan.warnings[0].contains("26.02"),
-            "both versions must be named: {:?}", scan.warnings);
+    assert!(
+        scan.warnings[0].contains("26.01.00.0") && scan.warnings[0].contains("26.02"),
+        "both versions must be named: {:?}",
+        scan.warnings
+    );
 }
 
 #[test]
@@ -162,7 +189,10 @@ fn a_greater_than_version_is_opaque_because_it_is_not_a_version() {
     // every run and apply --yes acts on it.
     let scan = rows_to_scan(parse_list(&fixture("list-greater-prefix.txt")).unwrap());
     assert!(scan.installed.is_empty());
-    assert_eq!(scan.opaque, vec![Name::new("Microsoft.VisualStudio.2022.BuildTools")]);
+    assert_eq!(
+        scan.opaque,
+        vec![Name::new("Microsoft.VisualStudio.2022.BuildTools")]
+    );
 }
 
 #[test]
@@ -174,7 +204,82 @@ fn an_ordinary_single_row_becomes_an_ordinary_installed_entry() {
     assert_eq!(scan.installed.len(), 1);
     assert_eq!(scan.installed[0].name, Name::new("ajeetdsouza.zoxide"));
     assert_eq!(scan.installed[0].version, "0.10.0");
-    assert_eq!(scan.installed[0].arch, None, "winget does not expose an architecture");
+    assert_eq!(
+        scan.installed[0].arch, None,
+        "winget does not expose an architecture"
+    );
     assert_eq!(scan.installed[0].bucket, None);
-    assert!(scan.installed[0].bins.is_empty(), "and names no executables");
+    assert!(
+        scan.installed[0].bins.is_empty(),
+        "and names no executables"
+    );
+}
+
+#[test]
+fn the_84_sourceless_ids_produce_one_aggregate_warning_not_84_lines() {
+    // render.rs prints an opaque skip as "...see the warnings above" -- every
+    // opaque push must be backed by a warning somewhere, but src/main.rs
+    // prints every warning unconditionally on every run, so one warning per
+    // sourceless id (84 of them here) would flood every single invocation.
+    let scan = rows_to_scan(parse_list(&fixture("list-full.txt")).unwrap());
+    let sourceless: Vec<&String> = scan
+        .warnings
+        .iter()
+        .filter(|w| w.contains("no winget Source"))
+        .collect();
+    assert_eq!(
+        sourceless.len(),
+        1,
+        "one aggregate warning, not one per id: {:?}",
+        scan.warnings
+    );
+    assert!(
+        sourceless[0].contains("84"),
+        "must name the count: {:?}",
+        sourceless[0]
+    );
+}
+
+#[test]
+fn the_two_greater_than_prefixed_ids_are_each_named_in_their_own_warning() {
+    // Unlike the 84 sourceless ids, these are rare (2 of 126) and are the one
+    // bucket where a package the user actually declared can land in
+    // `opaque` -- so each gets its own warning naming the id and what
+    // winget reported, not folded into an aggregate.
+    let scan = rows_to_scan(parse_list(&fixture("list-full.txt")).unwrap());
+    let unusable: Vec<&String> = scan
+        .warnings
+        .iter()
+        .filter(|w| w.contains("at least"))
+        .collect();
+    assert_eq!(
+        unusable.len(),
+        2,
+        "one per id, not folded together: {:?}",
+        scan.warnings
+    );
+    assert!(
+        scan.warnings
+            .iter()
+            .any(|w| w.contains("Microsoft.VisualStudio.2022.BuildTools") && w.contains("17.14.37")),
+        "{:?}",
+        scan.warnings
+    );
+    assert!(
+        scan.warnings
+            .iter()
+            .any(|w| w.contains("Microsoft.WindowsAppRuntime.1.8") && w.contains("1.8.9")),
+        "{:?}",
+        scan.warnings
+    );
+}
+
+#[test]
+fn a_scan_with_nothing_unusual_produces_no_warnings_at_all() {
+    // The absence counterweight the two tests above need: without this, an
+    // implementation that always emits both warning shapes -- regardless of
+    // whether either condition actually occurred -- would satisfy every
+    // `contains(...)` assertion above by coincidence.
+    let scan = rows_to_scan(parse_list(&fixture("list-single.txt")).unwrap());
+    assert!(scan.warnings.is_empty(), "got {:?}", scan.warnings);
 }

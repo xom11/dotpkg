@@ -193,7 +193,14 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
 ///
 ///   1. **any row has no `Source`** -- measured 84 of 141 rows on a14, every
 ///      `MSIX\...` and `ARP\...` entry. Installed, but comparable against
-///      nothing: there is no index to check it against.
+///      nothing: there is no index to check it against. This is by far the
+///      most common reason (84 of 126 ids on the captured machine), so it is
+///      **not** warned about per id -- `src/main.rs` prints every warning
+///      unconditionally on every run, and 84 lines for the ordinary shape of
+///      a winget machine is exactly the false-positive flood that gets a
+///      feature silenced and never turned back on (the same argument
+///      `plan::SCOOP_HELPERS` was built on). Instead, one aggregate warning
+///      after the loop below names the count.
 ///   2. **any row's version starts with `"> "`** -- measured on two ids
 ///      (`Microsoft.VisualStudio.2022.BuildTools`,
 ///      `Microsoft.WindowsAppRuntime.1.8`). This is winget saying *at
@@ -203,7 +210,11 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
 ///      `"> 17.14.37" == "17.14.37"`, false forever, and `plan::is_older`
 ///      splits on non-digits so both sides reduce to the same digit sequence
 ///      and the remaining arm is `Downgrade` -- a false `↓` on every `status`
-///      run, and something `apply --yes` would act on.
+///      run, and something `apply --yes` would act on. At two ids out of 126
+///      a per-id warning costs nothing, and this is the one bucket where a
+///      package the user actually declared can land in `opaque` -- so unlike
+///      reason 1, this one is warned about individually, naming the id and
+///      what winget reported.
 ///   3. **the group's rows disagree on version** -- measured on three ids
 ///      (`7zip.7zip`, `Microsoft.UI.Xaml.2.8`, `Microsoft.WindowsAppRuntime.2`).
 ///      Two genuinely different installed versions of one id is a state this
@@ -217,6 +228,13 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
 /// warning records the collapse, because staying silent about it (as
 /// `winget export` does for every duplicate, agreeing or not) is the exact
 /// behaviour reason 3 above declines to copy.
+///
+/// Every `opaque` push here is paired with a warning that explains it --
+/// either a per-id one (reasons 2 and 3) or the one aggregate warning
+/// covering every reason-1 id -- because `render.rs` prints an opaque skip
+/// as "installed, but its state could not be read -- see the warnings
+/// above". An unpaired `opaque` push would make that sentence a promise this
+/// function did not keep.
 ///
 /// `arch` and `bucket` are always `None`: winget exposes neither. `bins` is
 /// always empty -- there is no winget-side manifest to read executable names
@@ -234,11 +252,21 @@ pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     }
 
     let mut scan = Scan::default();
+    let mut sourceless_count = 0usize;
     for (name, group) in groups {
-        if group
-            .iter()
-            .any(|r| r.source.is_none() || r.version.starts_with("> "))
-        {
+        if group.iter().any(|r| r.source.is_none()) {
+            scan.opaque.push(name);
+            sourceless_count += 1;
+            continue;
+        }
+
+        if let Some(unusable) = group.iter().find(|r| r.version.starts_with("> ")) {
+            scan.warnings.push(format!(
+                "{name}: winget reports the version as \"{}\" -- that is winget saying *at \
+                 least*, for an install whose exact version it could not determine, not a \
+                 version dotpkg can compare against",
+                unusable.version
+            ));
             scan.opaque.push(name);
             continue;
         }
@@ -278,6 +306,14 @@ pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
             bucket: None,
             bins: Vec::new(),
         });
+    }
+
+    if sourceless_count > 0 {
+        scan.warnings.push(format!(
+            "{sourceless_count} installed entries have no winget Source (every MSIX/ARP entry \
+             `winget list` prints) and cannot be compared against any index -- not warned about \
+             individually, to avoid one line per entry on every run"
+        ));
     }
 
     scan

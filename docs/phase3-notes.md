@@ -1072,6 +1072,29 @@ history**, so `adopt`'s refusal had to be constructed.
    doc comment gives the reason — but "point `--state` somewhere else and
    dotpkg writes nowhere else" is a reasonable belief and is false. Decide
    whether to document it in `--state`'s own help text.
+11. **`plan()` reads an unreadable manifest as "not installed" and emits
+   `Install`, not a skip.** `docs/dogfood-phase3-2026-08-09.md:110-127`: on
+   a14, `zellij` and `actionlint` are both installed at exactly the pinned
+   version, but their `manifest.json` cannot be traversed under plain
+   elevated `ssh` ("untrusted mount point", os error 448), so
+   `Scoop::scan` warns and omits them from `installed`. `plan()` only sees
+   the omission — `current = installed.iter().find(...)` comes back `None`
+   — and, having no way to tell "not installed" from "installed but
+   unreadable," emits `Action::Install` for both. The dogfood measured the
+   consequence: `--yes` under these conditions would reinstall two working
+   packages for no reason, i.e. uninstall-then-install a package that was
+   never actually absent — a real window in which it is. **New to this
+   phase**: in 2b-2 these packages were undeclared and so invisible to
+   `plan()`; Phase 3 is what declared them and made the misreading live.
+   This is distinct from the `adopt`-swallows-`scan.warnings` defect closed
+   above (`## What the dogfood added`) — that was `adopt` discarding a
+   warning it had; this is `plan()` never receiving one, because `Scan`
+   does not carry the names it could not read. The auditor's suggested
+   fix: give `Scan` a field for the names `scan` could not read, and have
+   `plan()` emit a skip for those names instead of `Install`. **Close this
+   before a second backend doubles the scanner** — each backend's `scan`
+   will need the same field, and retrofitting it after two implementations
+   exist is more work than adding it to the one that exists now.
 
 **Closed by this review, so not carried:** `adopt::run`'s call-site write order,
 which was unprotected on Windows and is now a compile error. Recorded here

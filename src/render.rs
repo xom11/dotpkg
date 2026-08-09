@@ -381,6 +381,33 @@ pub fn render_adopt(o: &AdoptOutcome) -> String {
     for (name, why) in &o.refused {
         out.push_str(&format!("  ! scoop  {name:<14} {why}\n"));
     }
+    // A write that stopped part way through is not a refusal: files really did
+    // change. Naming them is the whole point -- the error alone names only the
+    // file that failed, and until this the user saw that error and no line at
+    // all saying what had already been rewritten.
+    if let Some(p) = &o.partial_write {
+        out.push_str(&format!(
+            "  ! scoop  {:<14} a write failed part way through: {}\n",
+            p.name, p.why
+        ));
+        // The complement, computed rather than phrased: "and the rest were
+        // not" is the kind of line that goes stale the moment a fourth file
+        // appears.
+        let untouched: Vec<&str> = ["pkg.lock", "pkg.toml", "state.json"]
+            .into_iter()
+            .filter(|f| !p.wrote.contains(f))
+            .collect();
+        if p.wrote.is_empty() {
+            out.push_str("      nothing was changed on disk.\n");
+        } else {
+            out.push_str(&format!(
+                "      changed on disk: {}. Not changed: {}.\n",
+                p.wrote.join(", "),
+                untouched.join(", ")
+            ));
+        }
+        out.push_str("      The packages after it were not attempted.\n");
+    }
     out.push_str(&format!(
         "\n  {} adopted, {} refused. Nothing installed and nothing removed.\n",
         o.adopted.len(),
@@ -1183,6 +1210,7 @@ mod tests {
             ],
             refused: vec![],
             warnings: vec![],
+            partial_write: None,
         };
         let text = render_adopt(&out);
         assert!(
@@ -1209,6 +1237,7 @@ mod tests {
                 ),
             ],
             warnings: vec![],
+            partial_write: None,
         };
         let text = render_adopt(&out);
         assert!(text.contains("nothere is not installed"), "{text}");
@@ -1227,11 +1256,59 @@ mod tests {
             adopted: vec![(Name::new("aichat"), Matched::Content)],
             refused: vec![(Name::new("nothere"), "nothere is not installed".to_string())],
             warnings: vec![],
+            partial_write: None,
         };
         let text = render_adopt(&out);
         assert!(
             text.contains("1 adopted, 1 refused. Nothing installed and nothing removed."),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_partial_write_names_the_files_that_changed_and_the_files_that_did_not() {
+        // The whole point of carrying `partial_write` out of `adopt::run`
+        // rather than letting a `?` skip this function: the error names only
+        // the file that FAILED, and "which files did this leave changed" is
+        // the question the user actually has.
+        use crate::adopt::PartialWrite;
+        let out = AdoptOutcome {
+            partial_write: Some(PartialWrite {
+                name: Name::new("aichat"),
+                wrote: vec!["pkg.lock", "pkg.toml"],
+                why: "cannot create /x/state.json.tmp1234: Permission denied".into(),
+            }),
+            ..AdoptOutcome::default()
+        };
+        let text = render_adopt(&out);
+        assert!(
+            text.contains("changed on disk: pkg.lock, pkg.toml"),
+            "name what really changed: {text}"
+        );
+        assert!(
+            text.contains("Not changed: state.json"),
+            "and name what did not, so the two lists cannot be confused: {text}"
+        );
+        assert!(
+            text.contains("Permission denied"),
+            "the failure itself is still reported: {text}"
+        );
+        assert!(
+            text.contains("The packages after it were not attempted."),
+            "a write failure stops the run, unlike a refusal: {text}"
+        );
+
+        // The counterweight: an outcome with no partial write must say none of
+        // this. Without it, an unconditional block satisfies every assertion
+        // above -- and would tell every ordinary `adopt` that a write failed.
+        let clean = AdoptOutcome {
+            adopted: vec![(Name::new("aichat"), Matched::Content)],
+            ..AdoptOutcome::default()
+        };
+        let clean_text = render_adopt(&clean);
+        assert!(
+            !clean_text.contains("changed on disk") && !clean_text.contains("were not attempted"),
+            "a run that wrote everything has no partial write to report: {clean_text}"
         );
     }
 

@@ -604,9 +604,37 @@ fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
     // read-only directory behind for the OS to clean up.
     std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+    // Reported, not propagated. This used to be `result.is_err()`, which is
+    // what the `?` in `adopt::run` produced -- and that `?` skipped
+    // `render_adopt` entirely, so the user saw `cannot create
+    // .../state.json.tmpNNN` and no line anywhere saying pkg.lock and pkg.toml
+    // had already been rewritten. The files that changed are the one thing a
+    // user whose adopt died half way through needs to be told.
+    let out = result.expect("a partial write is reported through the outcome, not through `?`");
+    let partial = out
+        .partial_write
+        .as_ref()
+        .expect("the state write must genuinely have failed");
+    assert_eq!(partial.name, Name::new("aichat"));
+    assert_eq!(
+        partial.wrote,
+        vec!["pkg.lock", "pkg.toml"],
+        "exactly the two writes that landed, and not the one that failed"
+    );
     assert!(
-        result.is_err(),
-        "the state write must genuinely have failed"
+        partial.why.contains("state.json"),
+        "name the write that failed: {}",
+        partial.why
+    );
+    assert!(
+        out.adopted.is_empty(),
+        "a package whose write failed part way was not adopted: {:?}",
+        out.adopted
+    );
+    let text = dotpkg::render::render_adopt(&out);
+    assert!(
+        text.contains("pkg.lock") && text.contains("pkg.toml"),
+        "the report must name what really changed on disk: {text}"
     );
 
     // The first two writes stand.

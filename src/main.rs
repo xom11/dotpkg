@@ -536,7 +536,12 @@ fn main() -> Result<()> {
             }
             print!("{}", dotpkg::render::render_adopt(&out));
             std::io::stdout().flush().ok();
-            if !out.refused.is_empty() {
+            // A partial write is not a refusal -- files changed -- so exit 2
+            // ("refused, and nothing was touched") would be a lie about it.
+            // Exit 1, the same code a refusal uses, because from a script's
+            // point of view both mean the same thing: work the user asked for
+            // did not happen.
+            if !out.refused.is_empty() || out.partial_write.is_some() {
                 std::process::exit(1);
             }
         }

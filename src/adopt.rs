@@ -101,11 +101,36 @@ pub struct Outcome {
     /// was the one command that dropped them on the floor, and the Phase 3
     /// dogfood found it by adopting a package a junction made unreadable.
     pub warnings: Vec<String>,
+    /// A write that failed part way through, and which of the three files it
+    /// had already changed.
+    ///
+    /// This used to propagate with `?`, which skipped `render_adopt` entirely:
+    /// the user was told `cannot create ...\state.json.tmp1234` and nothing
+    /// anywhere said that `pkg.lock` and `pkg.toml` had already been rewritten.
+    /// Fatal to the run -- the packages after it are not attempted -- but
+    /// reported rather than swallowed.
+    pub partial_write: Option<PartialWrite>,
 }
 
-/// Adopt every named package. Per package it is all or nothing; across
-/// packages a refusal is reported and the rest proceed, the same shape as
-/// `prepare`.
+/// What a write that stopped part way through left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialWrite {
+    pub name: Name,
+    /// The files that really were rewritten, in the order they were written.
+    /// Never includes the one that failed.
+    pub wrote: Vec<&'static str>,
+    pub why: String,
+}
+
+/// Adopt every named package. Per package it is all or nothing.
+///
+/// Across packages, a **refusal** is reported and the rest proceed, the same
+/// shape as `prepare`. A **write failure** is not a refusal and does not work
+/// that way: the three files are re-read at the top of every iteration, so a
+/// half-written set makes every later package's guards read a state dotpkg
+/// itself does not understand. It stops the run, and it is recorded in
+/// `Outcome::partial_write` -- naming which files really did change -- rather
+/// than propagating out of a `?` that would skip the report entirely.
 ///
 /// **Write order: `pkg.lock`, then `pkg.toml`, then `state.json`.** Every
 /// prefix of that order is inert:
@@ -172,11 +197,18 @@ pub fn run(
                     },
                 );
                 state.set(crate::model::SCOOP, name, Ownership::Adopted);
-                write_in_order(
+                if let Err(failure) = write_in_order(
                     WriteLock(|| crate::lock::save(&lock, lock_path)),
                     WritePkgToml(|| crate::config_edit::save(config_path, &config_text)),
                     WriteState(|| state.save(state_path)),
-                )?;
+                ) {
+                    out.partial_write = Some(PartialWrite {
+                        name: name.clone(),
+                        wrote: failure.wrote,
+                        why: format!("{:#}", failure.error),
+                    });
+                    return Ok(out);
+                }
                 out.adopted.push((name.clone(), found.matched));
             }
         }
@@ -219,20 +251,40 @@ struct WriteState<F>(F);
 /// - **That the sequence survives a real interrupted write** -- held by
 ///   `tests/adopt.rs`'s `a_failed_last_write_leaves_a_prefix_that_plan_does_
 ///   nothing_about` (`#[cfg(unix)]`, a real filesystem failure).
+///
+/// The failure carries the prefix that really did land. The error alone names
+/// only the file that failed, and "which files did this leave changed" is the
+/// one question a user whose `adopt` died half way through actually has.
 fn write_in_order<L, P, S>(
     write_lock: WriteLock<L>,
     write_pkg_toml: WritePkgToml<P>,
     write_state: WriteState<S>,
-) -> Result<()>
+) -> std::result::Result<(), WriteFailure>
 where
     L: FnOnce() -> Result<()>,
     P: FnOnce() -> Result<()>,
     S: FnOnce() -> Result<()>,
 {
-    (write_lock.0)()?;
-    (write_pkg_toml.0)()?;
-    (write_state.0)()?;
+    let mut wrote: Vec<&'static str> = Vec::new();
+    if let Err(error) = (write_lock.0)() {
+        return Err(WriteFailure { wrote, error });
+    }
+    wrote.push("pkg.lock");
+    if let Err(error) = (write_pkg_toml.0)() {
+        return Err(WriteFailure { wrote, error });
+    }
+    wrote.push("pkg.toml");
+    if let Err(error) = (write_state.0)() {
+        return Err(WriteFailure { wrote, error });
+    }
     Ok(())
+}
+
+/// A write that stopped part way through, and the prefix it left behind.
+#[derive(Debug)]
+struct WriteFailure {
+    wrote: Vec<&'static str>,
+    error: anyhow::Error,
 }
 
 /// Everything that can refuse, before anything is written. Returns the pieces
@@ -293,14 +345,26 @@ fn adopt_one(
         }
     };
 
-    let installed_manifest = std::fs::read(
-        scoop_root
-            .join("apps")
-            .join(inst.name.to_string())
-            .join("current")
-            .join("manifest.json"),
-    )
-    .unwrap_or_default();
+    // Read, not `unwrap_or_default()`. An unreadable installed manifest used
+    // to become an EMPTY one, which no bucket blob can match -- so the content
+    // loop found nothing, the version loop answered, and the user was told
+    // "matched by version only -- the installed manifest differs". That line
+    // is false: the manifest was not compared at all. Low reachability (a
+    // TOCTOU window after `scan` read the same file) but it was the one place
+    // in the new code where an unreadable file became a benign default.
+    let manifest_path = scoop_root
+        .join("apps")
+        .join(inst.name.to_string())
+        .join("current")
+        .join("manifest.json");
+    let installed_manifest = std::fs::read(&manifest_path).map_err(|e| {
+        format!(
+            "cannot read the installed manifest at {}: {e}. Without it there is \
+             nothing to match against, and matching on the version alone would \
+             report a comparison that never happened.",
+            manifest_path.display()
+        )
+    })?;
 
     let found = match resolve_installed(&dir, name, &inst.version, &installed_manifest, &rev) {
         Ok(Some(f)) => f,
@@ -368,7 +432,14 @@ mod tests {
             }),
         );
 
-        assert!(result.is_err(), "the third write's failure must propagate");
+        let failure = result.expect_err("the third write's failure must propagate");
+        assert_eq!(
+            failure.wrote,
+            vec!["pkg.lock", "pkg.toml"],
+            "the two writes that really landed must be named, and the one that \
+             failed must not be: this list is what `render_adopt` tells the user \
+             was changed"
+        );
         assert_eq!(
             *log.borrow(),
             vec!["lock", "pkg.toml", "state.json"],
@@ -399,7 +470,13 @@ mod tests {
             }),
         );
 
-        assert!(result.is_err());
+        let failure = result.expect_err("the first write's failure must propagate");
+        assert!(
+            failure.wrote.is_empty(),
+            "the write that failed changed nothing, so nothing may be reported as \
+             written: {:?}",
+            failure.wrote
+        );
         assert_eq!(
             *log.borrow(),
             vec!["lock"],

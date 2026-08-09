@@ -157,9 +157,9 @@ pub fn run(
                 );
                 state.set(crate::model::SCOOP, name, Ownership::Adopted);
                 write_in_order(
-                    || crate::lock::save(&lock, lock_path),
-                    || crate::config_edit::save(config_path, &config_text),
-                    || state.save(state_path),
+                    WriteLock(|| crate::lock::save(&lock, lock_path)),
+                    WritePkgToml(|| crate::config_edit::save(config_path, &config_text)),
+                    WriteState(|| state.save(state_path)),
                 )?;
                 out.adopted.push((name.clone(), found.matched));
             }
@@ -168,6 +168,25 @@ pub fn run(
     Ok(out)
 }
 
+/// One wrapper per write, so the three cannot be passed in the wrong order.
+///
+/// Without these, `write_in_order` takes three closures of indistinguishable
+/// type, positionally, and swapping two of them at the call site compiles and
+/// ships. That mistake is exactly the `state.json`-first ordering this
+/// module's whole doc comment exists to forbid, and it was **measured** to be
+/// invisible: with the arguments reversed, all 175 library tests passed --
+/// including both seam tests below, which exercise `write_in_order` with their
+/// own recorders and therefore cannot observe what `run` hands it. The only
+/// test that caught it was `#[cfg(unix)]`, so on Windows -- this tool's only
+/// real target -- the reversal was undetectable.
+///
+/// Same move `Name` makes in `crate::model`: the type exists so that the wrong
+/// thing is not a bug to be caught but a program that cannot be written. It
+/// needs no test, runs on every platform, and cannot rot.
+struct WriteLock<F>(F);
+struct WritePkgToml<F>(F);
+struct WriteState<F>(F);
+
 /// The write order itself, behind a seam: lock, then pkg.toml, then
 /// state.json, stopping at the first failure. `run` always calls this with
 /// closures over the real `lock::save` / `config_edit::save` / `State::save`
@@ -175,21 +194,28 @@ pub fn run(
 /// observable in a test, by injecting closures that record each call, rather
 /// than only inferable from what a real interrupted write leaves behind.
 ///
-/// `tests/adopt.rs`'s `a_failed_last_write_leaves_a_prefix_that_plan_does_
-/// nothing_about` (`#[cfg(unix)]`, a real filesystem failure) and this
-/// module's own `write_in_order_calls_lock_then_pkg_toml_then_state...`
-/// (portable, a fake) are complementary: one proves the sequence survives a
-/// real interrupted write; the other proves the sequence itself, on every
-/// platform this crate ships to, including the one -- Windows -- that a
-/// `#[cfg(unix)]` test cannot reach at all.
-fn write_in_order(
-    write_lock: impl FnOnce() -> Result<()>,
-    write_pkg_toml: impl FnOnce() -> Result<()>,
-    write_state: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    write_lock()?;
-    write_pkg_toml()?;
-    write_state()?;
+/// Three properties, held by three different things, deliberately:
+///
+/// - **Which closure goes in which position** -- held by the wrapper types
+///   above, at compile time, on every platform.
+/// - **That this function calls them in order and short-circuits** -- held by
+///   the two seam tests below, portably.
+/// - **That the sequence survives a real interrupted write** -- held by
+///   `tests/adopt.rs`'s `a_failed_last_write_leaves_a_prefix_that_plan_does_
+///   nothing_about` (`#[cfg(unix)]`, a real filesystem failure).
+fn write_in_order<L, P, S>(
+    write_lock: WriteLock<L>,
+    write_pkg_toml: WritePkgToml<P>,
+    write_state: WriteState<S>,
+) -> Result<()>
+where
+    L: FnOnce() -> Result<()>,
+    P: FnOnce() -> Result<()>,
+    S: FnOnce() -> Result<()>,
+{
+    (write_lock.0)()?;
+    (write_pkg_toml.0)()?;
+    (write_state.0)()?;
     Ok(())
 }
 
@@ -309,18 +335,18 @@ mod tests {
         // where the FIRST write fails, is the short-circuit proof.
         let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
         let result = write_in_order(
-            || {
+            WriteLock(|| {
                 log.borrow_mut().push("lock");
                 Ok(())
-            },
-            || {
+            }),
+            WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml");
                 Ok(())
-            },
-            || {
+            }),
+            WriteState(|| {
                 log.borrow_mut().push("state.json");
                 anyhow::bail!("state.json write failed")
-            },
+            }),
         );
 
         assert!(result.is_err(), "the third write's failure must propagate");
@@ -340,18 +366,18 @@ mod tests {
     fn write_in_order_stops_immediately_when_the_first_write_fails() {
         let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
         let result = write_in_order(
-            || {
+            WriteLock(|| {
                 log.borrow_mut().push("lock");
                 anyhow::bail!("lock write failed")
-            },
-            || {
+            }),
+            WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml");
                 Ok(())
-            },
-            || {
+            }),
+            WriteState(|| {
                 log.borrow_mut().push("state.json");
                 Ok(())
-            },
+            }),
         );
 
         assert!(result.is_err());

@@ -88,10 +88,98 @@ Defined by what the operator must do next, not by what happened internally.
 - **2** — refused before anything was attempted; nothing changed. A guard
   fired, the user said no, or no answer was available.
 
+## `update`
+
+Re-resolves `pkg.toml` against the buckets on disk and rewrites `pkg.lock`.
+The only command that asks what is newest, and the only one that fetches.
+Never touches the machine — no install, no uninstall, no subprocess besides
+`git`.
+
+```console
+$ dotpkg update
+  + scoop  ripgrep        14.1.0                     (new pin)
+  ^ scoop  fzf            0.74.1 -> 0.74.2           (version changed)
+
+  2 changed, 23 unchanged, 0 could not be resolved.
+```
+
+Which declared bucket a package comes from is decided once and then pinned:
+an existing `pkg.lock` entry wins over everything (so `update` never silently
+moves a package to a different bucket), then `[scoop.opts] <pkg> = { bucket =
+"..." }`, then a search of every declared bucket — ambiguous if more than one
+carries it. A package whose bucket cannot be resolved at all (ambiguous, the
+named bucket is not declared, a declared bucket is not on disk, or nothing
+declared has it) never loses a pin it already had — a package re-resolving
+for the first time simply gains none — and the diff names the reason either
+way.
+
+`dotpkg update <pkg>...` re-resolves only the packages named — nothing else
+is rewritten and no entry is dropped, unlike a bare `dotpkg update`, which
+also drops the pin for anything no longer declared.
+
+### Flags
+
+- `--offline` — Do not fetch. `latest` then means whatever this machine last
+  pulled, and the output says so.
+- `--config <path>`, `--lock <path>` — same as `status` and `apply`.
+
+### Exit codes
+
+- **0** — `pkg.lock` was rewritten (or was already current, and so not
+  rewritten) and every package in scope resolved.
+- **1** — either `pkg.lock` could not be written because of a plain I/O
+  failure, or it was written (or needed no rewrite) but at least one package
+  could not be re-resolved; the diff names which and why.
+- **2** — refused before `pkg.lock` was touched: a package named on the
+  command line is not declared in `pkg.toml`, or the write was refused
+  because a carried-forward entry would make `apply` reject the resulting
+  lock — named, with per-entry repair advice, since `update`'s own advice
+  cannot be "run `dotpkg update`" when that is the command that just failed.
+
+## `adopt`
+
+Brings an already-installed package under dotpkg's management, without
+installing, removing, or otherwise touching anything scoop has on disk.
+Finds the commit whose manifest is the one actually running — matched by
+exact content across the bucket's whole history where possible, by version
+only where it is not — and writes `pkg.lock`, `pkg.toml` and `state.json`.
+There is deliberately no "adopt everything": at least one package must be
+named.
+
+```console
+$ dotpkg adopt aichat
+  + scoop  aichat         adopted (the installed manifest matches the bucket exactly)
+
+  1 adopted, 0 refused. Nothing installed and nothing removed.
+```
+
+Each named package is independent: one that cannot be adopted (not
+installed, already managed, ambiguous or absent bucket, no matching commit)
+is refused and reported by name, and the rest still proceed. A write that
+stops part way through a package (`pkg.lock` written, `pkg.toml` write then
+fails, say) is reported as what really changed on disk versus what did not
+— the packages after it are not attempted.
+
+### Flags
+
+- `--state <path>` — Where dotpkg records what it owns. Must be an absolute
+  path if given.
+- `--config <path>`, `--lock <path>` — same as `status` and `apply`.
+
+### Exit codes
+
+- **0** — every named package was adopted.
+- **1** — at least one named package was refused, or a write stopped part
+  way through (whatever it did write stays written — this is not undone).
+- **2** — refused before anything was attempted: `--state` did not resolve
+  to an absolute path, or resolved to a directory rather than the state file
+  itself.
+
 ## Not built yet
 
-- **`update` and `adopt`** — resolving bucket commits, and taking ownership of
-  packages already on the machine.
+- **`add`.** Install a new package, add it to `pkg.toml`, and record it in
+  `pkg.lock` — the other direction from `adopt`, which is for a package
+  already on the machine.
 - **The winget backend.** `pkg.toml` and `pkg.lock` accept `[winget]` and the
   planner reports every package declared there, but it cannot scan or act on
   them. They print as skipped, not as nothing.

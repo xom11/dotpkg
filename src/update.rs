@@ -231,27 +231,45 @@ pub fn run(
              machine last pulled."
                 .to_string(),
         );
-    } else {
-        for b in &declared.scoop.buckets {
-            let dir = scoop_root.join("buckets").join(b.name.key());
-            if !dir.join(".git").exists() {
-                continue;
-            }
-            if bucket::tip(&dir).stale.is_some() {
-                warnings.push(format!(
-                    "bucket {}: no upstream to fetch from, so `latest` is only as \
-                     current as this clone.",
-                    b.name
-                ));
-                continue;
-            }
-            if let Err(e) = bucket::fetch(&dir) {
-                warnings.push(format!(
-                    "bucket {}: could not fetch ({e:#}); resolving against what is \
-                     already on disk.",
-                    b.name
-                ));
-            }
+    }
+    // The presence check runs whether or not this is an offline run: a
+    // declared bucket that is not on this machine is a fact about the machine,
+    // not about the network, and it changes what every later resolution can
+    // possibly mean. The fetch itself is what `offline` skips.
+    for b in &declared.scoop.buckets {
+        let dir = scoop_root.join("buckets").join(b.name.key());
+        if !dir.join(".git").exists() {
+            // Until this, the loop did a bare `continue`. On a fresh machine,
+            // or on a pkg.toml that just grew a bucket line, that made EVERY
+            // declared package fail with "no declared bucket has it" and the
+            // run exit 1, with nothing anywhere saying the real problem was an
+            // uncloned bucket.
+            warnings.push(format!(
+                "bucket {}: declared in pkg.toml but not present at {}. Nothing was \
+                 fetched from it and nothing was searched in it -- `dotpkg apply \
+                 --clone-missing-buckets` clones it.",
+                b.name,
+                dir.display()
+            ));
+            continue;
+        }
+        if offline {
+            continue;
+        }
+        if bucket::tip(&dir).stale.is_some() {
+            warnings.push(format!(
+                "bucket {}: no upstream to fetch from, so `latest` is only as \
+                 current as this clone.",
+                b.name
+            ));
+            continue;
+        }
+        if let Err(e) = bucket::fetch(&dir) {
+            warnings.push(format!(
+                "bucket {}: could not fetch ({e:#}); resolving against what is \
+                 already on disk.",
+                b.name
+            ));
         }
     }
 
@@ -276,12 +294,15 @@ pub fn run(
                     ),
                 }
             }
-            BucketChoice::NotFound { searched } => {
-                let names: Vec<String> = searched.iter().map(|s| s.to_string()).collect();
-                Resolution::Failed {
-                    why: format!("no declared bucket has it (searched: {})", names.join(", ")),
-                }
-            }
+            BucketChoice::NotCloned {
+                name: bucket_name,
+                dir,
+            } => Resolution::Failed {
+                why: bucket::not_cloned_why("it", &bucket_name, &dir),
+            },
+            BucketChoice::NotFound { searched, missing } => Resolution::Failed {
+                why: bucket::not_found_why("it", &searched, &missing),
+            },
             BucketChoice::Chosen {
                 name: bucket_name,
                 dir,
@@ -295,7 +316,19 @@ pub fn run(
                         ));
                     }
                     Resolution::Resolved {
-                        bucket: bucket_name.to_string(),
+                        // `key()`, not the display spelling. `choose_bucket`
+                        // folds the directory it opens to `key()` and
+                        // `Scoop::stage` opens what the lock says verbatim, so
+                        // recording `Extras` for a directory that is really
+                        // `extras` resolves here and fails at `apply` on any
+                        // case-sensitive filesystem. Recording the folded key
+                        // records the directory that was actually opened and
+                        // read -- the display spelling names nothing that was
+                        // verified. (Folding inside `stage` instead would also
+                        // close the gap, but it would make `stage` accept a
+                        // bucket spelling that never existed on disk, and
+                        // pkg.lock is a committed file whose diff people read.)
+                        bucket: bucket_name.key().to_string(),
                         commit: latest.commit,
                         version: latest.version,
                     }

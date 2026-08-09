@@ -435,6 +435,60 @@ fn a_refusal_names_shallowness_when_that_is_the_likely_cause() {
 }
 
 #[test]
+fn a_declared_bucket_that_is_not_on_this_machine_is_named_as_absent_rather_than_as_manifestless() {
+    // `adopt`'s own arm of the CRITICAL. `install.json`'s `bucket` hint names
+    // `extras`, which pkg.toml declares and which was never cloned. Before the
+    // fix, `choose_bucket`'s `stated` branch had no `.git` check, so `extras`
+    // was opened as though it were there and the whole history walk came back
+    // empty -- refusing with "no commit in bucket extras carries aichat
+    // 0.30.0", which blames the bucket's contents for the bucket's absence.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(cur.join("manifest.json"), r#"{"version":"0.30.0"}"#).unwrap();
+    std::fs::write(cur.join("install.json"), r#"{"bucket":"extras"}"#).unwrap();
+
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 0, "{out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
+    let (_, why) = &out.refused[0];
+    assert!(why.contains("extras"), "name the bucket: {why}");
+    assert!(
+        why.contains("not present at"),
+        "say that the bucket itself is absent from this machine: {why}"
+    );
+    assert!(
+        !why.contains("no commit in bucket"),
+        "nothing was searched, so nothing may be reported as not found: {why}"
+    );
+    assert!(
+        why.contains("--clone-missing-buckets"),
+        "point at the command that fixes it: {why}"
+    );
+    assert!(!lock_path.exists(), "no lock written");
+    assert!(!state_path.exists(), "no state written");
+}
+
+#[test]
 fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
     let f = Fixture::new();
     f.bucket("main");

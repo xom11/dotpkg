@@ -512,7 +512,104 @@ fn a_package_no_declared_bucket_has_names_what_was_searched() {
         None,
     );
     match choice {
-        BucketChoice::NotFound { searched } => assert_eq!(searched, vec![Name::new("main")]),
+        BucketChoice::NotFound { searched, missing } => {
+            assert_eq!(searched, vec![Name::new("main")]);
+            assert!(
+                missing.is_empty(),
+                "every declared bucket is on disk here: {missing:?}"
+            );
+        }
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_declared_bucket_that_is_not_on_disk_is_reported_as_missing_not_as_searched() {
+    // The whole-branch review's CRITICAL. `main` is on disk and does not carry
+    // `tool`; `extras` is declared and was never cloned. The search loop used
+    // to `continue` past `extras` in silence and then report `searched: main,
+    // extras` -- naming a bucket it never opened. On a fresh machine, or on a
+    // pkg.toml that just grew a bucket line, that is what EVERY declared
+    // package gets, and nothing anywhere says an uncloned bucket is the cause.
+    //
+    // Note that `a_package_no_declared_bucket_has_names_what_was_searched`
+    // above declares `main` and creates `main`, so no test before this one
+    // could see any of it.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "other.json", "1.0.0", "v100");
+
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &Name::new("tool"),
+        None,
+    );
+    match choice {
+        BucketChoice::NotFound { searched, missing } => {
+            assert_eq!(
+                searched,
+                vec![Name::new("main")],
+                "only the bucket that is actually on this machine was searched"
+            );
+            assert_eq!(
+                missing,
+                vec![Name::new("extras")],
+                "a declared bucket that is not on this machine must be named as \
+                 missing rather than folded into the searched list"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_bucket_named_by_the_lock_or_by_an_opt_that_is_not_on_disk_is_reported_as_absent() {
+    // The same defect on the OTHER branch of `choose_bucket`. The `stated`
+    // branch had no `.git` check at all, unlike the search loop four lines
+    // below it, so an absent bucket was opened as if it were there: `tip()`
+    // fell to its `_` arm, every `git_show` failed, `resolve_latest` returned
+    // `Ok(None)`, and `update` rendered that as "bucket extras has no manifest
+    // for it" -- a flat lie about a bucket that has the manifest and is simply
+    // not cloned.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "tool.json", "1.0.0", "v100");
+    let config = cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n");
+
+    // Named by the lock.
+    match bucket::choose_bucket(&f.scoop_root(), &config, &Name::new("tool"), Some("extras")) {
+        BucketChoice::NotCloned { name, dir } => {
+            assert_eq!(name, Name::new("extras"));
+            assert_eq!(dir, f.scoop_root().join("buckets").join("extras"));
+        }
+        other => panic!(
+            "a bucket that is not on this machine must not be opened as though it were: {other:?}"
+        ),
+    }
+
+    // Named by `[scoop.opts]`, which reaches the same branch by the other
+    // route. Without this the fix could be made on the lock path alone.
+    match bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg(
+            "[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n\
+              [scoop.opts]\ntool = { bucket = \"extras\" }\n",
+        ),
+        &Name::new("tool"),
+        None,
+    ) {
+        BucketChoice::NotCloned { name, .. } => assert_eq!(name, Name::new("extras")),
+        other => panic!("{other:?}"),
+    }
+
+    // The counterweight: the same stated bucket, present on disk, must still
+    // be chosen. Without this a `.git` check that always failed would satisfy
+    // both assertions above.
+    let extras = f.bucket("extras");
+    f.commit(&extras, "tool.json", "2.0.0", "v200");
+    match bucket::choose_bucket(&f.scoop_root(), &config, &Name::new("tool"), Some("extras")) {
+        BucketChoice::Chosen { name, .. } => assert_eq!(name, Name::new("extras")),
+        other => panic!("a bucket that IS on this machine must still be opened: {other:?}"),
     }
 }

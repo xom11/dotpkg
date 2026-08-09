@@ -105,6 +105,153 @@ fn an_ambiguous_bucket_is_refused_rather_than_guessed_and_names_both_candidates(
 }
 
 #[test]
+fn a_declared_bucket_that_is_not_on_this_machine_is_warned_about_by_name_and_path() {
+    // The fetch loop used to `continue` past an absent bucket with no warning
+    // at all, so the ONLY signal a user got was every package failing with
+    // "no declared bucket has it".
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "tool.json", "1.0.0", "v100");
+
+    let config = cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n");
+    // Both runs: the presence of a bucket is a fact about the machine, not
+    // about the network, so `--offline` must not suppress it either.
+    for offline in [true, false] {
+        let (_u, warnings) = update::run(
+            &f.scoop_root(),
+            &config,
+            &Lock::default(),
+            &Scope::WholeRun,
+            offline,
+        );
+        let absent: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("not present at"))
+            .collect();
+        assert_eq!(
+            absent.len(),
+            1,
+            "exactly one bucket is absent (offline={offline}): {warnings:?}"
+        );
+        let w = absent[0];
+        assert!(w.contains("extras"), "name the bucket: {w}");
+        assert!(
+            w.contains(
+                &f.scoop_root()
+                    .join("buckets")
+                    .join("extras")
+                    .display()
+                    .to_string()
+            ),
+            "say where it was looked for, so the user can see it is a path and \
+             not a typo: {w}"
+        );
+        assert!(
+            w.contains("--clone-missing-buckets"),
+            "point at the command that fixes it: {w}"
+        );
+        // The counterweight, and what makes the assertions above discriminate:
+        // `main` IS on this machine, so it must never be reported as absent.
+        // An unconditional warning would satisfy everything above on its own.
+        assert!(
+            !w.contains("main"),
+            "a bucket that is present must not be reported as absent: {w}"
+        );
+    }
+}
+
+#[test]
+fn the_refusal_names_only_the_buckets_actually_searched_and_says_which_were_missing() {
+    // The CRITICAL, end to end. Before the fix this run produced
+    // `no declared bucket has it (searched: main, extras)` -- naming `extras`,
+    // which is not on this machine and was never opened.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "other.json", "1.0.0", "v100");
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    match &u.changes[0] {
+        Change::Kept { why, .. } => {
+            assert!(
+                why.contains("searched: main"),
+                "name what was really searched: {why}"
+            );
+            // The assertion the negative control is aimed at. Reverting
+            // `choose_bucket` to `searched: declared_names` puts `extras`
+            // back into the searched list, and this is what catches it.
+            assert!(
+                !why.contains("searched: main, extras"),
+                "`extras` is not on this machine and was never opened -- it must \
+                 not be reported as searched: {why}"
+            );
+            assert!(
+                why.contains("not searched: extras"),
+                "name the bucket that could not be searched, and say so: {why}"
+            );
+            assert!(
+                why.contains("--clone-missing-buckets"),
+                "point at the command that fixes it: {why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_locked_bucket_that_is_not_on_this_machine_is_not_reported_as_a_missing_manifest() {
+    // The `stated` branch, end to end. `extras` really does carry `tool` --
+    // upstream -- but it is not cloned here. Before the fix this printed
+    // "bucket extras has no manifest for it", which is false twice over: the
+    // bucket has the manifest, and dotpkg never looked.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "tool.json", "1.0.0", "v100");
+
+    let mut old = Lock::default();
+    old.scoop.insert(
+        Name::new("tool"),
+        Pin::ScoopCommit {
+            bucket: "extras".into(),
+            commit: "a".repeat(40),
+            version: "0.9.0".into(),
+        },
+    );
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &old,
+        &Scope::WholeRun,
+        true,
+    );
+    match &u.changes[0] {
+        Change::Kept { why, .. } => {
+            assert!(
+                !why.contains("no manifest"),
+                "a bucket that is not on this machine has not been shown to lack \
+                 anything: {why}"
+            );
+            assert!(
+                why.contains("not present at"),
+                "say that the bucket itself is absent: {why}"
+            );
+            assert!(why.contains("extras"), "name the bucket: {why}");
+            assert!(
+                why.contains("--clone-missing-buckets"),
+                "point at the command that fixes it: {why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_bucket_with_no_upstream_warns_that_latest_is_only_as_current_as_the_clone() {
     // A locally-created bucket cannot be fetched. Resolving is still possible;
     // calling the answer "latest" without saying so is not.

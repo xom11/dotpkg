@@ -417,12 +417,84 @@ pub enum BucketChoice {
     },
     /// More than one declared bucket carries it. Never resolved by declaration
     /// order: reordering `buckets` would silently move a pin.
-    Ambiguous {
-        candidates: Vec<Name>,
-    },
+    Ambiguous { candidates: Vec<Name> },
+    /// The bucket the lock or `[scoop.opts]` names is declared, but is not on
+    /// this machine, so **nothing** about this package could be read at all.
+    ///
+    /// A separate variant rather than a `NotFound` with an empty `searched`,
+    /// because it is a different fact: `NotFound` means a search happened and
+    /// came back empty, and this one means no search was possible. Reported as
+    /// `NotFound` it read as `bucket <name> has no manifest for it` -- a flat
+    /// lie about a bucket that has the manifest and simply is not cloned.
+    NotCloned { name: Name, dir: std::path::PathBuf },
+    /// The search ran and found nothing.
+    ///
+    /// `searched` is the buckets that were really opened and looked in;
+    /// `missing` is the declared buckets that are not on this machine and so
+    /// were never looked at. The two lists are separate because reporting the
+    /// full declared list as "searched" is a false line, and it is the false
+    /// line a fresh machine gets for **every** package.
     NotFound {
         searched: Vec<Name>,
+        missing: Vec<Name>,
     },
+}
+
+/// Why a search that looked in `searched` and could not look in `missing`
+/// found nothing, as one sentence.
+///
+/// `subject` is what was being looked for, spelled as the caller's sentence
+/// needs it: `update` says "it" (its lines are already keyed by package name),
+/// `adopt` names the package. Shared rather than written twice because the two
+/// call sites are the same fact, and the version of this that *was* written
+/// twice is how "searched: main, extras" got printed about a machine that had
+/// only `main`.
+pub fn not_found_why(subject: &str, searched: &[Name], missing: &[Name]) -> String {
+    let list = |ns: &[Name]| {
+        ns.iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (searched.is_empty(), missing.is_empty()) {
+        (false, true) => format!(
+            "no declared bucket has {subject} (searched: {})",
+            list(searched)
+        ),
+        (false, false) => format!(
+            "no declared bucket on this machine has {subject} (searched: {}). \
+             Declared but not on this machine, so not searched: {} -- \
+             `dotpkg apply --clone-missing-buckets` clones them.",
+            list(searched),
+            list(missing)
+        ),
+        (true, false) => format!(
+            "nothing was searched for {subject}: every declared bucket ({}) is \
+             missing from this machine -- `dotpkg apply --clone-missing-buckets` \
+             clones them.",
+            list(missing)
+        ),
+        // `pkg.toml` declares packages but no buckets at all. Reachable, and
+        // "searched: " with an empty list is the least useful thing to print
+        // about it.
+        (true, true) => {
+            format!("pkg.toml declares no buckets, so there was nowhere to look for {subject}")
+        }
+    }
+}
+
+/// Why a bucket that was named rather than searched for could not be opened.
+///
+/// Deliberately does not say *what* named it: the lock, `[scoop.opts]` and (in
+/// `adopt`) `install.json` all land here, and naming the wrong one would be
+/// exactly the kind of confidently-wrong line this fix exists to remove.
+/// Shared by `update` and `adopt` for the same reason as `not_found_why`.
+pub fn not_cloned_why(subject: &str, name: &Name, dir: &Path) -> String {
+    format!(
+        "{subject} resolves to bucket {name}, which is declared but is not present \
+         at {} -- `dotpkg apply --clone-missing-buckets` clones it.",
+        dir.display()
+    )
 }
 
 /// Decide which declared bucket a package comes from.
@@ -465,30 +537,47 @@ pub fn choose_bucket(
     .flatten()
     .next()
     {
-        return if declared_names.contains(&stated) {
+        if !declared_names.contains(&stated) {
+            return BucketChoice::NotFound {
+                searched: vec![stated],
+                missing: Vec::new(),
+            };
+        }
+        // The same `.git` check the search loop below makes, which this branch
+        // did not have. Without it an absent bucket is opened as if it were
+        // there: `tip()` falls to its `_` arm, every `git_show` fails, and
+        // `resolve_latest` returns `Ok(None)` -- which `update` renders as
+        // "bucket <name> has no manifest for it" about a bucket that has the
+        // manifest and simply is not cloned.
+        let dir = scoop_root.join("buckets").join(stated.key());
+        return if dir.join(".git").exists() {
             open(&stated)
         } else {
-            BucketChoice::NotFound {
-                searched: vec![stated],
-            }
+            BucketChoice::NotCloned { name: stated, dir }
         };
     }
 
     let mut found = Vec::new();
+    let mut searched = Vec::new();
+    let mut missing = Vec::new();
     for name in &declared_names {
         let dir = scoop_root.join("buckets").join(name.key());
+        // Recorded, not discarded. A declared bucket that is not on disk is
+        // the ordinary case on a fresh machine and on a `pkg.toml` that just
+        // grew a bucket line, and reporting it inside `searched` told every
+        // user that a bucket which was never opened had been looked in.
         if !dir.join(".git").exists() {
+            missing.push(name.clone());
             continue;
         }
+        searched.push(name.clone());
         let at = tip(&dir);
         if manifest_path(&dir, app, &at.rev).is_some() {
             found.push(name.clone());
         }
     }
     match found.len() {
-        0 => BucketChoice::NotFound {
-            searched: declared_names,
-        },
+        0 => BucketChoice::NotFound { searched, missing },
         1 => open(&found[0]),
         _ => BucketChoice::Ambiguous { candidates: found },
     }

@@ -162,7 +162,11 @@ pub fn run(
                 lock.scoop.insert(
                     name.clone(),
                     Pin::ScoopCommit {
-                        bucket: bucket_name.to_string(),
+                        // `key()`, matching `update`: `choose_bucket` opened
+                        // `buckets/<key>` and `Scoop::stage` opens what the
+                        // lock says verbatim, so the display spelling would
+                        // name a directory nothing verified.
+                        bucket: bucket_name.key().to_string(),
                         commit: found.commit.clone(),
                         version: found.version.clone(),
                     },
@@ -277,11 +281,14 @@ fn adopt_one(
                 names.join(", ")
             ));
         }
-        bucket::BucketChoice::NotFound { searched } => {
-            let names: Vec<String> = searched.iter().map(|s| s.to_string()).collect();
-            return Err(format!(
-                "no declared bucket has {name} (searched: {})",
-                names.join(", ")
+        bucket::BucketChoice::NotCloned { name: b, dir } => {
+            return Err(bucket::not_cloned_why(&name.to_string(), &b, &dir));
+        }
+        bucket::BucketChoice::NotFound { searched, missing } => {
+            return Err(bucket::not_found_why(
+                &name.to_string(),
+                &searched,
+                &missing,
             ));
         }
     };

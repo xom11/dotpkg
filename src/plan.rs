@@ -137,11 +137,36 @@ struct BackendView<'a> {
     helpers: &'static [&'static str],
 }
 
+/// Keeps at most one `Installed` per name for `backend`, first one wins.
+/// Keyed by `Name`'s case-folding `Ord`, not by raw strings, so two spellings
+/// of one package still collapse to one entry -- the same rule every other
+/// name comparison in this crate follows.
+///
+/// Pulled out of the undeclared loop as its own pure function so this
+/// property is unit-testable directly, in every build profile. Going through
+/// `plan_backend` instead would also go through its `debug_assert!` just
+/// above, which panics on exactly the duplicate-name input this function
+/// exists to guard against -- so a test that only called `plan_backend`
+/// could observe this property in a release build alone, where the assert is
+/// compiled out. See `dedupe_installed_for_backend_keeps_only_the_first_entry_for_a_duplicated_name`.
+fn dedupe_installed_for_backend<'a>(
+    installed: &'a [Installed],
+    backend: &str,
+) -> Vec<&'a Installed> {
+    let mut acted: BTreeSet<&Name> = BTreeSet::new();
+    installed
+        .iter()
+        .filter(|i| i.backend == backend)
+        .filter(|i| acted.insert(&i.name))
+        .collect()
+}
+
 /// One backend's full pass: declared packages first (install / upgrade /
 /// downgrade / skip, plus arch drift), then installed-but-undeclared packages
 /// (prune if owned, report if not, ignore helpers). Appends into the shared
 /// `actions` / `prunes` / `reports` that `plan()` orders and concatenates
 /// once every backend view has run.
+#[allow(clippy::too_many_arguments)]
 fn plan_backend(
     view: &BackendView,
     installed: &[Installed],
@@ -283,15 +308,11 @@ fn plan_backend(
 
     // Installed but undeclared: prune if owned, report if not, ignore helpers.
     //
-    // `acted` is the release-build twin of the `debug_assert!` above: if a
-    // backend does hand back two `Installed` entries for one name, this still
-    // emits at most one Prune/Skip/Unmanaged for it rather than one per
-    // duplicate.
-    let mut acted: BTreeSet<&Name> = BTreeSet::new();
-    for inst in installed.iter().filter(|i| i.backend == view.backend) {
-        if !acted.insert(&inst.name) {
-            continue;
-        }
+    // `dedupe_installed_for_backend` is the release-build twin of the
+    // `debug_assert!` above: if a backend does hand back two `Installed`
+    // entries for one name, this still emits at most one
+    // Prune/Skip/Unmanaged for it rather than one per duplicate.
+    for inst in dedupe_installed_for_backend(installed, view.backend) {
         if declared_set.contains(&inst.name) {
             continue;
         }
@@ -445,5 +466,73 @@ mod tests {
         // an installed `nightly` against a pinned `1.0.0` is a silent
         // downgrade-shaped reinstall.
         assert!(!is_older("nightly", "1.0.0"), "one side has no digits");
+    }
+
+    fn installed(backend: &str, name: &str, version: &str) -> Installed {
+        Installed {
+            backend: backend.to_string(),
+            name: Name::new(name),
+            version: version.to_string(),
+            arch: None,
+            bucket: None,
+            bins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dedupe_installed_for_backend_keeps_only_the_first_entry_for_a_duplicated_name() {
+        // Measured: winget's `list` returns 7zip.7zip twice, with two
+        // different versions (26.01.00.0 and 26.02). This is the property
+        // that keeps that from becoming two Prune actions for one package,
+        // tested directly rather than only through `plan_backend` -- which
+        // would also trip its `debug_assert!` on this exact input and be
+        // observable only in a release build.
+        let all = vec![
+            installed(SCOOP, "7zip", "26.01.00.0"),
+            installed(SCOOP, "7zip", "26.02"),
+        ];
+        let kept = dedupe_installed_for_backend(&all, SCOOP);
+        assert_eq!(kept.len(), 1, "one package is one entry, got {kept:?}");
+        assert_eq!(
+            kept[0].version, "26.01.00.0",
+            "first entry wins, matching the `.find()` the declared loop uses"
+        );
+    }
+
+    #[test]
+    fn dedupe_installed_for_backend_folds_case_like_every_other_name_comparison() {
+        // `Name`'s `Ord` folds case; a dedup keyed on raw strings would keep
+        // "FZF" and "fzf" as two separate entries for what is one package.
+        let all = vec![installed(SCOOP, "FZF", "1"), installed(SCOOP, "fzf", "2")];
+        let kept = dedupe_installed_for_backend(&all, SCOOP);
+        assert_eq!(
+            kept.len(),
+            1,
+            "two spellings of one package are one entry, got {kept:?}"
+        );
+    }
+
+    #[test]
+    fn dedupe_installed_for_backend_leaves_other_backends_alone() {
+        // A duplicate id on winget must not swallow an unrelated scoop entry
+        // of the same name, and an unrequested backend's own duplicates must
+        // not be touched by a call scoped to a different one.
+        let all = vec![
+            installed(SCOOP, "git", "1"),
+            installed(WINGET, "git", "2"),
+            installed(WINGET, "git", "3"),
+        ];
+        let kept = dedupe_installed_for_backend(&all, SCOOP);
+        assert_eq!(kept.len(), 1, "got {kept:?}");
+        assert_eq!(kept[0].backend, SCOOP);
+    }
+
+    #[test]
+    fn dedupe_installed_for_backend_does_not_touch_distinct_names() {
+        // The guard must not turn into an accidental "one entry per backend"
+        // truncation -- it only collapses entries that share a name.
+        let all = vec![installed(SCOOP, "fzf", "1"), installed(SCOOP, "bat", "1")];
+        let kept = dedupe_installed_for_backend(&all, SCOOP);
+        assert_eq!(kept.len(), 2, "distinct names must both survive: {kept:?}");
     }
 }

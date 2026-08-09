@@ -886,21 +886,21 @@ fn an_undeclared_package_the_scan_could_not_read_is_not_a_stray_and_not_a_prune(
 }
 
 // `plan_backend`'s `debug_assert!` fires on this exact input (two `Installed`
-// entries for one `(backend, name)`), which means the two properties Task 5
-// promises -- "fails loudly in a debug build" and "a release build cannot
-// double-prune" -- cannot both be observed from one execution of one test:
-// the `debug_assert!` panics before `plan()` can return anything for the
-// second half to inspect. `tests/execute.rs`'s
+// entries for one `(backend, name)`), which means the assert half and the
+// dedup half of the same invariant cannot both be observed from one
+// execution of one test: the `debug_assert!` panics before `plan()` can
+// return anything for a `prunes == 1` check to inspect. `tests/execute.rs`'s
 // `exit_code_asserts_a_refused_run_changed_nothing` hit the identical shape
-// of conflict for a different `debug_assert!` and resolved it the same way:
-// two tests, gated to opposite build profiles. Following that precedent here
-// rather than inventing a new pattern.
+// of conflict for a different `debug_assert!` and resolved it by gating a
+// `#[should_panic]` test to the profile where the assert exists. Following
+// that precedent here for the assert half; the dedup half no longer needs a
+// profile-gated twin here at all -- it is unit-tested directly, in every
+// profile, as `dedupe_installed_for_backend_keeps_only_the_first_entry_for_a_duplicated_name`
+// in `src/plan.rs`, which calls the extracted `dedupe_installed_for_backend`
+// without going through `plan_backend`'s assert at all.
 
-/// The declared-side half: `plan_backend`'s `debug_assert!`, proven firing
-/// rather than merely trusted. Its release-build twin -- the `acted` dedup
-/// guard that stops this same input from becoming two Prune actions once the
-/// assert is compiled out -- is
-/// `two_installed_entries_for_one_package_do_not_produce_two_prunes` below.
+/// `plan_backend`'s `debug_assert!`, proven firing rather than merely
+/// trusted.
 ///
 /// Gated `debug_assertions`, not `not(debug_assertions)`, for the same reason
 /// `tests/execute.rs`'s equivalent test is: `debug_assert!` is compiled out
@@ -922,38 +922,55 @@ fn a_backend_returning_two_installed_entries_for_one_name_panics_loudly_in_a_deb
     );
 }
 
-/// The undeclared-side half, and the release-build backstop: even if a
-/// backend does violate the one-`Installed`-per-name invariant, `plan()`
-/// must still emit exactly one `Prune` for it, not one per duplicate.
-///
-/// Gated `not(debug_assertions)` -- see the block comment above this test's
-/// sibling for why: under a debug profile, `plan_backend`'s `debug_assert!`
-/// panics on this exact input before `plan()` can return anything, so this
-/// property can only be observed to hold under `cargo test --release`.
-#[cfg(not(debug_assertions))]
 #[test]
-fn two_installed_entries_for_one_package_do_not_produce_two_prunes() {
-    // Measured: winget's `list` returns 7zip.7zip twice, with two different
-    // versions. plan()'s declared loop takes the first with `.find()`; its
-    // undeclared loop iterates all of them and would emit TWO Prune actions
-    // for one package. The invariant "at most one Installed per (backend,
-    // name)" has never been written down and is false for the second backend.
+fn a_running_owned_undeclared_scoop_package_now_prints_before_the_winget_stub_not_after() {
+    // Task 5 folded scoop's declared and undeclared loops into one
+    // per-backend pass (`plan_backend`), which moved the winget stub loop
+    // from between them to after both. Verified against the pre-Task-5
+    // source: the order used to be scoop-declared -> winget-stub ->
+    // scoop-undeclared; it is now scoop-declared -> scoop-undeclared ->
+    // winget-stub.
+    //
+    // `render.rs` prints `plan.actions` in order with no sort, so this is a
+    // real, visible change: with a declared winget package *and* a running,
+    // owned, undeclared scoop package (the only combination that can tell
+    // the two orderings apart), the scoop `Skip{Running}` line now prints
+    // before the winget stub's line instead of after. Display order only --
+    // the property that actually matters, install-before-uninstall, is
+    // untouched (prunes and reports are still appended last, unconditionally)
+    // and is pinned separately by
+    // `actions_are_ordered_installs_then_prunes_then_reports`. This test
+    // exists so that whichever order is current, it is pinned by something,
+    // and a future change to the backend-view grouping is a deliberate
+    // decision rather than a silent flip of a user-visible line order.
     let mut state = State::default();
-    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+    state.set(SCOOP, &Name::new("kanata"), Ownership::Installed);
+
     let p = plan(
-        &config::parse("[scoop]\npackages = []\n").unwrap(),
-        &lock::parse("").unwrap(),
-        &[installed("aichat", "0.30.0"), installed("aichat", "0.29.0")],
+        &config::parse("[scoop]\npackages = []\n\n[winget]\npackages = [\"Git.Git\"]\n").unwrap(),
+        &lock::Lock::default(),
+        &[installed("kanata", "1.12.0")],
         &[],
         &state,
-        &Running::default(),
+        &Running::new(BTreeSet::from(["kanata".to_string()]), Default::default()),
     );
-    let prunes = p
-        .actions
-        .iter()
-        .filter(|a| matches!(a, Action::Prune { .. }))
-        .count();
-    assert_eq!(prunes, 1, "one package is one prune, got {:?}", p.actions);
+    assert_eq!(
+        p.actions,
+        vec![
+            Action::Skip {
+                backend: SCOOP.into(),
+                name: "kanata".into(),
+                reason: SkipReason::Running,
+            },
+            Action::Skip {
+                backend: WINGET.into(),
+                name: "Git.Git".into(),
+                reason: SkipReason::BackendNotImplemented,
+            },
+        ],
+        "got {:?}",
+        p.actions
+    );
 }
 
 #[test]

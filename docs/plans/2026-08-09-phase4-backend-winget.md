@@ -1036,7 +1036,8 @@ Rules, all measured:
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `cargo test --no-fail-fast --test winget_scan`
-Expected: PASS, all eight.
+Expected: PASS, all seven. (Count them in the output — a filter or a target
+that selects fewer than you expect prints a green `ok` either way.)
 
 - [ ] **Step 5: Negative controls**
 

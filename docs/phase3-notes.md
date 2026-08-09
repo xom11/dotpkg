@@ -515,13 +515,36 @@ from one whose cause is "missing test", and averaging the two into a single
 score hides both.
 
 **`src/render.rs:181` — `ex.changed() > 0 || ex.touched() > 0` with `>` → `<`.**
-ACCEPTED as very likely equivalent. `changed() < 0` on a `usize` is always
-false, leaving `touched() > 0`. The comment above that line argues `touched()`
-catches cases `changed()` misses, which implies `touched() ⊇ changed()` — and if
-that containment holds, the `changed()` disjunct is redundant and the mutant is
-behaviourally identical. Not proven either way here. Phase 4 should either prove
-the containment and delete the disjunct, or find the case where they differ and
-test it.
+NOT equivalent — the mutant is live. **Correction:** this entry originally
+reasoned that the comment above the line, which says `touched()` catches
+cases `changed()` misses, implies `touched() ⊇ changed()`, and that if that
+containment holds the `changed()` disjunct is redundant and the mutant is
+behaviourally identical. The containment is backwards. `changed()` counts
+`ItemResult::Done`; `touched()` counts `ItemResult::Failed { touched: true }`
+(`Execution::changed`/`touched`, `src/execute.rs:292-318`) — **disjoint
+sets**, not nested ones. `touched() >= changed()` only holds when
+`changed() == 0`; it says nothing when `changed() > 0`.
+
+The differing case is constructible and reachable: one `Done` and one
+`Failed { touched: false }` — the latter reachable via `Step::Remove`'s
+uninstall-command-failed arm (`src/execute.rs:221`), which fails before
+touching the machine. `changed() == 1`, `touched() == 0`. Real code:
+`1 > 0 || 0 > 0` is true, prints "Some packages were changed and some were
+not." Mutant: `usize < 0` is always false on both disjuncts, so it prints
+"Nothing was changed" instead — a false statement about a machine that just
+gained a package. Verified by hand-applying the mutation and confirming the
+constructed case goes red.
+
+Closed: `src/render.rs`'s
+`a_done_package_alongside_an_untouched_failure_still_says_some_changed` test
+now covers this shape, with a negative control (the `>` → `<` mutation
+applied by hand, run, and confirmed red) firing on its first assertion
+(`out.contains("Some packages were changed and some were not")`) with output
+ending in "Nothing was changed; the failure(s) above are everything that
+happened." — the mutant's sentence in place of the real one. Deleting the
+`changed()` disjunct, as this entry previously recommended, would have
+reintroduced exactly the class of false printed line this phase fixed twice
+elsewhere (see "Accepted, with reasons" above and the closed entries below).
 
 ## The negative-control audit, re-derived and fired
 
@@ -1010,9 +1033,14 @@ history**, so `adopt`'s refusal had to be constructed.
    only on its benign path**, in three separate places. `lock.rs:99` was closed
    here; `verify.rs:146` and `backend/scoop.rs:227` were not. One fix, three
    places.
-5. **`render.rs:181` may be an equivalent mutant.** Prove the `touched() ⊇
-   changed()` containment and delete the redundant disjunct, or find the case
-   where they differ.
+5. ~~**`render.rs:181` may be an equivalent mutant.**~~ CLOSED. It is not
+   equivalent: `changed()` and `touched()` are disjoint, not nested, so the
+   claimed containment only holds when `changed() == 0`. One `Done` and one
+   `Failed { touched: false }` makes the real code and the `>` → `<` mutant
+   print different, and differently false, sentences. See the corrected
+   "Accepted, with reasons" entry above and the new
+   `a_done_package_alongside_an_untouched_failure_still_says_some_changed`
+   test.
 6. **The lock-beats-a-conflicting-opt precedence claim is inspection-only.**
 7. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.

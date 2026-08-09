@@ -948,6 +948,51 @@ mod tests {
     }
 
     #[test]
+    fn a_done_package_alongside_an_untouched_failure_still_says_some_changed() {
+        // render.rs:181's `changed() > 0 || touched() > 0` looked like it
+        // might be an equivalent mutant under `>` -> `<`, reasoning that
+        // `touched()` is a superset of `changed()` (the comment above the
+        // line argues `touched()` catches cases `changed()` misses). But the
+        // two sets are disjoint, not nested: `changed()` counts `Done`;
+        // `touched()` counts `Failed { touched: true }` (`execute.rs`'s
+        // `Execution::changed`/`touched`). `touched() >= changed()` only
+        // holds when `changed() == 0`.
+        //
+        // This is the case where it does not: one `Done` and one
+        // `Failed { touched: false }` (reachable -- `Step::Remove`'s
+        // uninstall-command-failed arm, `execute.rs:221`, never touches the
+        // machine). `changed() == 1`, `touched() == 0`. The real code's
+        // `changed() > 0` disjunct is true and prints the "some changed"
+        // sentence. The `>` -> `<` mutant compares a `usize` against 0 with
+        // `<`, which is always false, so both disjuncts are permanently
+        // false and it prints "Nothing was changed" instead -- a false
+        // claim about a machine that just gained a package.
+        let ex = Execution {
+            results: vec![
+                (Name::new("bat"), ItemResult::Done),
+                (
+                    Name::new("fzf"),
+                    ItemResult::Failed {
+                        why: "install did not happen".into(),
+                        touched: false,
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        assert!(
+            out.contains("Some packages were changed and some were not"),
+            "a Done alongside an untouched failure must say so, not claim \
+             nothing changed: {out}"
+        );
+        assert!(
+            !out.contains("Nothing was changed"),
+            "changed() == 1, so this must not be reached: {out}"
+        );
+    }
+
+    #[test]
     fn a_failed_recovery_write_is_surfaced_not_silently_dropped() {
         // `execute` already prints a warning the moment `write_recovery`
         // fails, above however many minutes of scoop output follow -- but

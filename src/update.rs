@@ -26,25 +26,36 @@ pub enum Resolution {
 /// new commit, and `apply` -- whose decision is `cur.version == want` -- will
 /// do nothing about it. This is the only place a user can see that gap, so it
 /// is a named variant rather than folded into `Unchanged`.
+///
+/// Every variant carries `backend` (`SCOOP` or `WINGET`) since Task 15, which
+/// resolves both through one `Vec<Change>`. Before that, every `Change` was a
+/// scoop fact by construction and `render_update` hardcoded the word
+/// "scoop" into every line it printed; a mixed run needs to say which backend
+/// each line is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Added {
+        backend: &'static str,
         name: Name,
         version: String,
     },
     VersionChanged {
+        backend: &'static str,
         name: Name,
         from: String,
         to: String,
     },
     RepinnedSameVersion {
+        backend: &'static str,
         name: Name,
         version: String,
     },
     Unchanged {
+        backend: &'static str,
         name: Name,
     },
     Dropped {
+        backend: &'static str,
         name: Name,
         version: String,
     },
@@ -61,6 +72,7 @@ pub enum Change {
     /// this codebase avoids everywhere else, and it very nearly let
     /// `render_update` print a false line here.
     Kept {
+        backend: &'static str,
         name: Name,
         version: Option<String>,
         why: String,
@@ -106,30 +118,39 @@ impl Update {
     }
 }
 
-/// Fold what the buckets said into a new lock, and say what changed.
+/// Fold one backend's resolutions into its own map of a `Lock` under
+/// construction, appending to `changes`. Shared by scoop and winget so the
+/// "added / version-changed / unchanged / re-pinned / kept / dropped"
+/// judgement -- the actual substance of `update` -- is written once and
+/// applies identically to both, rather than drifting between two near-copies.
 ///
-/// Pure. Every git result arrives as a `Resolution`, which is what lets the
-/// whole of `update`'s judgement be tested with no repository at all.
-pub fn resolve_into_lock(
-    old: &Lock,
+/// `canonical` is the one place the two backends genuinely differ: scoop's
+/// own resolvers never touch `ResolveCtx::canonical` (nothing renames a scoop
+/// package), so the map handed in for scoop is always empty and every entry
+/// is stored under the name it was declared with -- unchanged from Phase 3.
+/// Winget's is populated per resolved name from what
+/// `Winget::resolve_latest` read back out of `Found <name> [<Id>]`, and
+/// **that** is the key an entry is stored under, not the spelling `pkg.toml`
+/// declared -- the mirror of Phase 3's scoop-bucket fix, pointing the other
+/// way: record the thing that actually resolved. `previous` is always looked
+/// up by the DECLARED name regardless: `Name`'s `Eq`/`Ord` fold case, so a
+/// prior entry stored under a different-case canonical key is still found.
+#[allow(clippy::too_many_arguments)]
+fn fold_backend(
+    backend: &'static str,
+    lock_map: &mut BTreeMap<Name, Pin>,
+    old_map: &BTreeMap<Name, Pin>,
     declared: &[Name],
     resolutions: &BTreeMap<Name, Resolution>,
+    canonical: &BTreeMap<Name, Name>,
     scope: &Scope,
-) -> Update {
-    // Phase 3 resolves scoop only. Carrying the winget map through untouched
-    // is deliberate: dropping pins this command cannot resolve would delete
-    // what Phase 4 needs.
-    let mut lock = Lock {
-        scoop: BTreeMap::new(),
-        winget: old.winget.clone(),
-    };
-    let mut changes = Vec::new();
-
+    changes: &mut Vec<Change>,
+) {
     for name in declared {
-        let previous = old.scoop.get(name);
+        let previous = old_map.get(name);
         if !scope.covers(name) {
             if let Some(p) = previous {
-                lock.scoop.insert(name.clone(), p.clone());
+                lock_map.insert(name.clone(), p.clone());
             }
             continue;
         }
@@ -137,39 +158,47 @@ pub fn resolve_into_lock(
             Some(Resolution::Resolved { pin }) => {
                 let fresh = pin.clone();
                 let version = fresh.version().to_string();
+                let key = canonical.get(name).cloned().unwrap_or_else(|| name.clone());
                 changes.push(match previous {
                     None => Change::Added {
+                        backend,
                         name: name.clone(),
                         version: version.clone(),
                     },
-                    Some(p) if *p == fresh => Change::Unchanged { name: name.clone() },
+                    Some(p) if *p == fresh => Change::Unchanged {
+                        backend,
+                        name: name.clone(),
+                    },
                     Some(p) if p.version() != version => Change::VersionChanged {
+                        backend,
                         name: name.clone(),
                         from: p.version().to_string(),
                         to: version.clone(),
                     },
                     Some(_) => Change::RepinnedSameVersion {
+                        backend,
                         name: name.clone(),
                         version: version.clone(),
                     },
                 });
-                lock.scoop.insert(name.clone(), fresh);
+                lock_map.insert(key, fresh);
             }
             Some(Resolution::Failed { why }) => {
                 changes.push(Change::Kept {
+                    backend,
                     name: name.clone(),
                     version: previous.map(|p| p.version().to_string()),
                     why: why.clone(),
                 });
                 if let Some(p) = previous {
-                    lock.scoop.insert(name.clone(), p.clone());
+                    lock_map.insert(name.clone(), p.clone());
                 }
             }
             // Not resolved and not failed: the driver never asked about it,
             // which happens for a named run's untouched neighbours. Keep it.
             None => {
                 if let Some(p) = previous {
-                    lock.scoop.insert(name.clone(), p.clone());
+                    lock_map.insert(name.clone(), p.clone());
                 }
             }
         }
@@ -178,41 +207,84 @@ pub fn resolve_into_lock(
     // Entries for packages pkg.toml no longer declares. Only a whole run drops
     // them: `update fzf` must not quietly delete a stale aichat pin the user
     // did not mention.
-    for (name, pin) in &old.scoop {
+    for (name, pin) in old_map {
         if declared.contains(name) {
             continue;
         }
         match scope {
             Scope::WholeRun => changes.push(Change::Dropped {
+                backend,
                 name: name.clone(),
                 version: pin.version().to_string(),
             }),
             Scope::Named(_) => {
-                lock.scoop.insert(name.clone(), pin.clone());
+                lock_map.insert(name.clone(), pin.clone());
             }
         }
     }
+}
 
+/// Fold what the buckets said into a new lock, and say what changed.
+///
+/// Pure. Every git result arrives as a `Resolution`, which is what lets the
+/// whole of `update`'s judgement be tested with no repository at all.
+///
+/// Scoop only: `run` below is the caller that also resolves winget, and it
+/// calls `fold_backend` a second time itself (with winget's own declared
+/// list, resolutions and canonical-id map) rather than through this function
+/// -- kept this way, rather than widened to take both backends' inputs at
+/// once, so every one of this function's own tests (all of them scoop-only,
+/// several predating Task 15) keeps its exact existing signature and meaning.
+pub fn resolve_into_lock(
+    old: &Lock,
+    declared: &[Name],
+    resolutions: &BTreeMap<Name, Resolution>,
+    scope: &Scope,
+) -> Update {
+    // Carrying the winget map through untouched here is deliberate: this
+    // function's own callers -- its unit tests, all scoop-only -- must not
+    // see winget pins vanish just because this particular fold never touches
+    // them. `run` below overwrites `lock.winget` with the real result of its
+    // own winget fold immediately after calling this.
+    let mut lock = Lock {
+        scoop: BTreeMap::new(),
+        winget: old.winget.clone(),
+    };
+    let mut changes = Vec::new();
+    fold_backend(
+        crate::model::SCOOP,
+        &mut lock.scoop,
+        &old.scoop,
+        declared,
+        resolutions,
+        &BTreeMap::new(),
+        scope,
+        &mut changes,
+    );
     Update { lock, changes }
 }
 
 use crate::backend::scoop::Scoop;
+use crate::backend::winget::{Winget, WingetCmd};
 use crate::backend::{Backend, ResolveCtx};
 use crate::bucket;
 use crate::config::Config;
 use std::cell::RefCell;
 use std::path::Path;
 
-/// Resolve every declared scoop package against the buckets on disk.
+/// Resolve every declared package, scoop and winget alike, against what is
+/// actually on disk (scoop) or in winget's own index.
 ///
 /// Returns the decision plus the warnings that belong on stderr. Warnings are
 /// returned rather than printed so that this whole function is testable.
 ///
-/// `offline` skips the fetch. Everything else about the run is identical, and
-/// the caller is told, because "latest" out of a bucket nobody fetched is
-/// "latest as of whenever something else last pulled it".
-pub fn run(
+/// `offline` skips both fetches -- scoop's per-bucket `git fetch` and
+/// winget's own `source update`. Everything else about the run is identical,
+/// and the caller is told, because "latest" out of an index nobody refreshed
+/// is "latest as of whenever something else last pulled it".
+pub fn run<C: WingetCmd>(
     scoop_root: &Path,
+    winget: &Winget<C>,
     declared: &Config,
     old: &Lock,
     scope: &Scope,
@@ -281,12 +353,16 @@ pub fn run(
     // root-canonicalisation.
     let scoop = Scoop::new(scoop_root.to_path_buf());
     let fallback_warnings: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let canonical_sink: RefCell<Option<Name>> = RefCell::new(None);
+    let matched_sink: RefCell<Option<crate::adopt::Matched>> = RefCell::new(None);
     let ctx = ResolveCtx {
         offline,
         declared,
         scoop_root,
         old,
         warnings: &fallback_warnings,
+        canonical: &canonical_sink,
+        matched: &matched_sink,
     };
 
     let mut resolutions = BTreeMap::new();
@@ -296,23 +372,104 @@ pub fn run(
         }
         resolutions.insert(name.clone(), scoop.resolve_latest(name, &ctx));
     }
-    // Emitted in the same relative order as before this task: per-package
-    // fallback warnings belong here, ahead of the whole-run winget notice
-    // below, matching where the loop used to push them directly.
-    warnings.extend(fallback_warnings.into_inner());
 
+    // Winget's analogue of the per-bucket fetch above: `winget source update
+    // --name winget`. Measured inert when scoped this way (
+    // `docs/measurements-2026-08-09-winget.md` §9, "Repeated, scoped" -- 141
+    // rows before and after, on a machine already through one such update,
+    // with the `(Name, Id, Version, Source)` multiset identical and zero
+    // `Available`-column moves), unlike the BARE form, which installs
+    // winget's own `winget-font` source MSIX and is never used here. Gated on
+    // a non-empty `[winget] packages`, the same way the bucket loop above is
+    // implicitly gated on `[scoop] buckets`: nothing declared means nothing
+    // needs a fresher index this run.
     if !declared.winget.packages.is_empty() {
-        warnings.push(format!(
-            "{} winget package(s) were not resolved: the winget backend lands in \
-             phase 4. Their existing pins are untouched.",
-            declared.winget.packages.len()
-        ));
+        if offline {
+            warnings.push(
+                "offline: winget's index was not refreshed, so `latest` means \
+                 whatever this machine last pulled."
+                    .to_string(),
+            );
+        } else if let Err(e) = winget.update_source() {
+            warnings.push(format!(
+                "winget: could not refresh its index ({e:#}); resolving against \
+                 whatever it already has."
+            ));
+        }
     }
 
-    (
-        resolve_into_lock(old, &declared.scoop.packages, &resolutions, scope),
-        warnings,
-    )
+    let mut winget_resolutions: BTreeMap<Name, Resolution> = BTreeMap::new();
+    let mut winget_canonical: BTreeMap<Name, Name> = BTreeMap::new();
+    for name in &declared.winget.packages {
+        if !scope.covers(name) {
+            continue;
+        }
+        let resolution = winget.resolve_latest(name, &ctx);
+        // Read and cleared immediately: `canonical` is a per-call sink (see
+        // `ResolveCtx`'s own doc comment), not an accumulator like
+        // `warnings`, so it must be drained right after the one call it
+        // belongs to and before the next iteration's call can overwrite it.
+        if let Some(c) = canonical_sink.borrow_mut().take() {
+            let declared_spelling = name.to_string();
+            let matched_spelling = c.to_string();
+            if matched_spelling != declared_spelling {
+                // The canonical-id rule, the mirror of Phase 3's scoop-bucket
+                // fix: `pkg.lock` records what winget actually matched, and a
+                // `pkg.toml` whose spelling differs in case is reported, not
+                // silently rewritten -- `pkg.toml` is the user's file.
+                //
+                // Both interpolations below are plain `String`s obtained via
+                // `Name`'s `Display` (`to_string()`, already computed above
+                // for the comparison), never `Name`'s own `Debug`: that
+                // derive dumps its private `display`/`key` fields verbatim
+                // (`Name { display: "Git.Git", key: "git.git" }`), which is
+                // not a sentence a user should see. Measured by this task's
+                // own negative control: a `{name:?}`-based version of this
+                // message still happened to contain both spellings as
+                // substrings of that struct dump, so a `.contains()`-only
+                // test could not have caught the wrong format specifier by
+                // itself -- it surfaced only by rerunning the control and
+                // reading the panic message it printed.
+                warnings.push(format!(
+                    "{declared_spelling}: pkg.toml declares this as {declared_spelling:?}, but \
+                     winget matches it as {matched_spelling:?} -- pkg.lock records the \
+                     canonical spelling; pkg.toml is left as you wrote it."
+                ));
+            }
+            winget_canonical.insert(name.clone(), c);
+        }
+        winget_resolutions.insert(name.clone(), resolution);
+    }
+    // Extended only now, after every use of `ctx` (which borrows
+    // `fallback_warnings`) in both loops above -- moving this earlier is a
+    // borrow-checker error, not merely a style choice, since `ctx` is shared
+    // by the scoop loop and the winget loop rather than rebuilt per backend.
+    // Per-package fallback warnings from BOTH backends land here, together,
+    // ahead of the winget-specific warnings pushed directly above.
+    warnings.extend(fallback_warnings.into_inner());
+
+    let mut update = resolve_into_lock(old, &declared.scoop.packages, &resolutions, scope);
+    // `resolve_into_lock` seeded `update.lock.winget` with `old.winget`
+    // unchanged (see its own doc comment: that is correct for ITS callers,
+    // all scoop-only). Cleared here so `fold_backend` rebuilds it from
+    // scratch, the same starts-empty contract `lock.scoop` gets inside
+    // `resolve_into_lock` itself -- otherwise a genuinely dropped winget
+    // entry (declared once, no longer declared, `Scope::WholeRun`) would
+    // survive in the carried-through copy even though `fold_backend` never
+    // re-inserts it.
+    update.lock.winget = BTreeMap::new();
+    fold_backend(
+        crate::model::WINGET,
+        &mut update.lock.winget,
+        &old.winget,
+        &declared.winget.packages,
+        &winget_resolutions,
+        &winget_canonical,
+        scope,
+        &mut update.changes,
+    );
+
+    (update, warnings)
 }
 
 #[cfg(test)]
@@ -360,6 +517,7 @@ mod tests {
         assert_eq!(
             u.changes,
             vec![Change::Added {
+                backend: crate::model::SCOOP,
                 name: Name::new("fzf"),
                 version: "0.74.2".into()
             }]
@@ -378,6 +536,7 @@ mod tests {
         assert_eq!(
             u.changes,
             vec![Change::VersionChanged {
+                backend: crate::model::SCOOP,
                 name: Name::new("fzf"),
                 from: "0.74.1".into(),
                 to: "0.74.2".into()
@@ -400,6 +559,7 @@ mod tests {
         assert_eq!(
             u.changes,
             vec![Change::RepinnedSameVersion {
+                backend: crate::model::SCOOP,
                 name: Name::new("fzf"),
                 version: "0.74.1".into()
             }]
@@ -424,6 +584,7 @@ mod tests {
         assert_eq!(
             u.changes,
             vec![Change::Unchanged {
+                backend: crate::model::SCOOP,
                 name: Name::new("fzf")
             }]
         );
@@ -441,6 +602,7 @@ mod tests {
             &Scope::WholeRun,
         );
         assert!(u.changes.contains(&Change::Dropped {
+            backend: crate::model::SCOOP,
             name: Name::new("aichat"),
             version: "0.30.0".into()
         }));
@@ -507,6 +669,7 @@ mod tests {
         assert_eq!(
             u.changes,
             vec![Change::Kept {
+                backend: crate::model::SCOOP,
                 name: Name::new("zellij"),
                 version: Some("0.44.3".into()),
                 why: "bucket \"extras\" has no zellij.json".into()
@@ -548,10 +711,92 @@ mod tests {
         }
     }
 
+    // -- fold_backend: the routing item 1 of Task 15's brief names ------
+    //
+    // `resolve_into_lock`'s own tests above never pass a non-empty
+    // `canonical` map, so none of them can tell "stored under the declared
+    // name" apart from "stored under a canonical override" -- that
+    // distinction is `fold_backend`'s alone, and these pin it directly,
+    // below the level of any particular backend.
+
     #[test]
-    fn winget_entries_survive_a_scoop_update_untouched() {
-        // Phase 3 resolves scoop only. Dropping the winget map because this
-        // command cannot resolve it would delete pins Phase 4 is going to need.
+    fn fold_backend_stores_a_resolved_entry_under_its_canonical_key_when_one_is_given() {
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+        let mut canonical = BTreeMap::new();
+        canonical.insert(Name::new("git.git"), Name::new("Git.Git"));
+
+        fold_backend(
+            crate::model::WINGET,
+            &mut lock_map,
+            &BTreeMap::new(),
+            &[Name::new("git.git")],
+            &res(&[(
+                "git.git",
+                Resolution::Resolved {
+                    pin: Pin::WingetVersion {
+                        version: "2.55.0".into(),
+                    },
+                },
+            )]),
+            &canonical,
+            &Scope::WholeRun,
+            &mut changes,
+        );
+
+        assert_eq!(lock_map.len(), 1, "not stored under both spellings");
+        let (stored_key, _) = lock_map.get_key_value(&Name::new("git.git")).unwrap();
+        assert_eq!(
+            stored_key.to_string(),
+            "Git.Git",
+            "the map records the canonical spelling, not the declared one: {:?}",
+            lock_map.keys().collect::<Vec<_>>()
+        );
+        match &changes[0] {
+            Change::Added { backend, name, .. } => {
+                assert_eq!(*backend, crate::model::WINGET);
+                // The reported NAME is still the declared spelling -- only
+                // the map key changes. `render_update` reads the change list,
+                // and "git.git added" is what the user typed and expects to
+                // see, not a spelling correction sprung on them mid-report.
+                assert_eq!(name.to_string(), "git.git");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_backend_stores_under_the_declared_name_when_no_canonical_override_is_given() {
+        // The positive control: an empty `canonical` map -- what every scoop
+        // call passes -- must leave the ordinary declared-name key alone.
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+
+        fold_backend(
+            crate::model::SCOOP,
+            &mut lock_map,
+            &BTreeMap::new(),
+            &[Name::new("fzf")],
+            &res(&[("fzf", resolved("main", 'a', "0.74.2"))]),
+            &BTreeMap::new(),
+            &Scope::WholeRun,
+            &mut changes,
+        );
+
+        assert!(lock_map.contains_key(&Name::new("fzf")));
+        match &changes[0] {
+            Change::Added { backend, .. } => assert_eq!(*backend, crate::model::SCOOP),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn winget_entries_survive_a_scoop_only_resolve_into_lock_call_untouched() {
+        // `resolve_into_lock` itself is scoop-only (see its own doc comment);
+        // `run` is what folds winget in, by calling `fold_backend` a second
+        // time for it. Calling `resolve_into_lock` directly, as every other
+        // test in this module does, must still carry an existing winget map
+        // through unchanged rather than dropping it.
         let mut old = Lock::default();
         old.winget.insert(
             Name::new("Git.Git"),
@@ -577,9 +822,11 @@ mod tests {
             lock: Lock::default(),
             changes: vec![
                 Change::Unchanged {
+                    backend: crate::model::SCOOP,
                     name: Name::new("fzf"),
                 },
                 Change::Unchanged {
+                    backend: crate::model::SCOOP,
                     name: Name::new("bat"),
                 },
             ],
@@ -596,9 +843,11 @@ mod tests {
             lock: Lock::default(),
             changes: vec![
                 Change::Unchanged {
+                    backend: crate::model::SCOOP,
                     name: Name::new("fzf"),
                 },
                 Change::Added {
+                    backend: crate::model::SCOOP,
                     name: Name::new("bat"),
                     version: "0.26.1".into(),
                 },
@@ -619,6 +868,7 @@ mod tests {
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::Kept {
+                backend: crate::model::SCOOP,
                 name: Name::new("zellij"),
                 version: Some("0.44.3".into()),
                 why: "bucket \"extras\" has no zellij.json".into(),

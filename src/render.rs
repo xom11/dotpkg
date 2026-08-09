@@ -301,19 +301,36 @@ pub fn render_update(u: &Update) -> String {
     let mut out = String::new();
     for c in &u.changes {
         let line = match c {
-            Change::Added { name, version } => {
-                format!("  + scoop  {name:<14} {version:<26} (new pin)")
+            Change::Added {
+                backend,
+                name,
+                version,
+            } => {
+                format!("  + {backend:<6} {name:<14} {version:<26} (new pin)")
             }
-            Change::VersionChanged { name, from, to } => format!(
-                "  ^ scoop  {name:<14} {:<26} (version changed)",
+            Change::VersionChanged {
+                backend,
+                name,
+                from,
+                to,
+            } => format!(
+                "  ^ {backend:<6} {name:<14} {:<26} (version changed)",
                 format!("{from} -> {to}")
             ),
-            Change::RepinnedSameVersion { name, version } => format!(
-                "  = scoop  {name:<14} {:<26} (apply will not act on this)",
+            Change::RepinnedSameVersion {
+                backend,
+                name,
+                version,
+            } => format!(
+                "  = {backend:<6} {name:<14} {:<26} (apply will not act on this)",
                 format!("{version}, commit re-pinned")
             ),
-            Change::Dropped { name, version } => {
-                format!("  - scoop  {name:<14} {version:<26} (dropped, no longer declared)")
+            Change::Dropped {
+                backend,
+                name,
+                version,
+            } => {
+                format!("  - {backend:<6} {name:<14} {version:<26} (dropped, no longer declared)")
             }
             // Two different facts share this variant, and they must not read
             // the same: a package that already had a pin genuinely keeps it
@@ -322,18 +339,20 @@ pub fn render_update(u: &Update) -> String {
             // to keep at all -- saying "kept the previous pin" about it would
             // be a false line the reader has no way to catch.
             Change::Kept {
+                backend,
                 name,
                 version: Some(v),
                 why,
             } => {
-                format!("  ! scoop  {name:<14} {v:<26} kept the previous pin: {why}")
+                format!("  ! {backend:<6} {name:<14} {v:<26} kept the previous pin: {why}")
             }
             Change::Kept {
+                backend,
                 name,
                 version: None,
                 why,
             } => {
-                format!("  ! scoop  {name:<14} could not be resolved, nothing to keep: {why}")
+                format!("  ! {backend:<6} {name:<14} could not be resolved, nothing to keep: {why}")
             }
             // An unchanged package is the ordinary case and would drown the
             // lines that matter. Counted in the summary instead.
@@ -377,12 +396,18 @@ pub fn render_update(u: &Update) -> String {
 
 use crate::adopt::{Matched, Outcome as AdoptOutcome};
 
-pub fn render_adopt(o: &AdoptOutcome) -> String {
+/// `backend` is the one `--backend` the whole `adopt` invocation ran under
+/// (`SCOOP` or `WINGET`, `src/model.rs`): every package `o` names was adopted
+/// from that single backend -- `adopt::run` dispatches to exactly one of
+/// `run_scoop`/`run_winget` per call -- so it is a parameter here rather than
+/// a field threaded through every tuple in `Outcome`.
+pub fn render_adopt(backend: &str, o: &AdoptOutcome) -> String {
     let mut out = String::new();
     for (name, matched, previous_version) in &o.adopted {
         let how = match matched {
             Matched::Content => "the installed manifest matches the bucket exactly",
             Matched::Version => "matched by version only -- the installed manifest differs",
+            Matched::WingetConfirmed => "winget confirms this version is still in its index",
         };
         // `adopt_one` does not refuse when `pkg.lock` already pins this name
         // (see `Outcome::adopted`'s doc comment), so this write can silently
@@ -391,13 +416,13 @@ pub fn render_adopt(o: &AdoptOutcome) -> String {
         // a pin changing is reported, not folded into a bare "adopted".
         match previous_version {
             Some(prev) => out.push_str(&format!(
-                "  + scoop  {name:<14} adopted ({how}); replaced the existing pin {prev}\n"
+                "  + {backend:<6} {name:<14} adopted ({how}); replaced the existing pin {prev}\n"
             )),
-            None => out.push_str(&format!("  + scoop  {name:<14} adopted ({how})\n")),
+            None => out.push_str(&format!("  + {backend:<6} {name:<14} adopted ({how})\n")),
         }
     }
     for (name, why) in &o.refused {
-        out.push_str(&format!("  ! scoop  {name:<14} {why}\n"));
+        out.push_str(&format!("  ! {backend:<6} {name:<14} {why}\n"));
     }
     // A write that stopped part way through is not a refusal: files really did
     // change. Naming them is the whole point -- the error alone names only the
@@ -405,7 +430,7 @@ pub fn render_adopt(o: &AdoptOutcome) -> String {
     // all saying what had already been rewritten.
     if let Some(p) = &o.partial_write {
         out.push_str(&format!(
-            "  ! scoop  {:<14} a write failed part way through: {}\n",
+            "  ! {backend:<6} {:<14} a write failed part way through: {}\n",
             p.name, p.why
         ));
         // The complement, computed rather than phrased: "and the rest were
@@ -1091,28 +1116,34 @@ mod tests {
             lock: Lock::default(),
             changes: vec![
                 Change::Added {
+                    backend: SCOOP,
                     name: Name::new("fzf"),
                     version: "0.74.2".into(),
                 },
                 Change::VersionChanged {
+                    backend: SCOOP,
                     name: Name::new("bat"),
                     from: "0.25.0".into(),
                     to: "0.26.1".into(),
                 },
                 Change::RepinnedSameVersion {
+                    backend: SCOOP,
                     name: Name::new("ripgrep"),
                     version: "14.1.0".into(),
                 },
                 Change::Dropped {
+                    backend: SCOOP,
                     name: Name::new("aichat"),
                     version: "0.30.0".into(),
                 },
                 Change::Kept {
+                    backend: SCOOP,
                     name: Name::new("zellij"),
                     version: Some("0.44.3".into()),
                     why: "bucket \"extras\" has no zellij.json".into(),
                 },
                 Change::Unchanged {
+                    backend: SCOOP,
                     name: Name::new("neovim"),
                 },
             ],
@@ -1135,6 +1166,62 @@ mod tests {
     }
 
     #[test]
+    fn a_winget_change_is_labelled_winget_not_hardcoded_scoop() {
+        // Before Task 15, `Change` carried no backend at all and every line
+        // this function printed said "scoop" unconditionally -- true by
+        // construction while `update` only ever resolved scoop, and false
+        // the moment it also resolves winget. Every line format is exercised
+        // here, not just one, since each used to have its own hardcoded
+        // literal.
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![
+                Change::Added {
+                    backend: WINGET,
+                    name: Name::new("Git.Git"),
+                    version: "2.55.0".into(),
+                },
+                Change::VersionChanged {
+                    backend: WINGET,
+                    name: Name::new("Brave.Brave"),
+                    from: "151.1.93.132".into(),
+                    to: "151.1.93.134".into(),
+                },
+                Change::Dropped {
+                    backend: WINGET,
+                    name: Name::new("OpenAI.Codex"),
+                    version: "0.145.0".into(),
+                },
+                Change::Kept {
+                    backend: WINGET,
+                    name: Name::new("BurntSushi.ripgrep.MSVC"),
+                    version: Some("15.1.0".into()),
+                    why: "version 15.1.0 is no longer in the winget index".into(),
+                },
+            ],
+        };
+        let out = render_update(&u);
+        assert!(out.contains("+ winget Git.Git"), "Added: {out}");
+        assert!(
+            out.contains("^ winget Brave.Brave"),
+            "VersionChanged: {out}"
+        );
+        assert!(out.contains("- winget OpenAI.Codex"), "Dropped: {out}");
+        assert!(
+            out.contains("! winget BurntSushi.ripgrep.MSVC"),
+            "Kept: {out}"
+        );
+        // The counterweight the four `contains` checks above cannot carry on
+        // their own: a version that hardcoded "scoop" INSTEAD of reading
+        // `backend` would still contain "Git.Git" et al., just on the wrong
+        // line -- this is what actually proves the literal word is gone.
+        assert!(
+            !out.contains("scoop"),
+            "nothing here is a scoop package: {out}"
+        );
+    }
+
+    #[test]
     fn the_repin_line_says_outright_that_apply_will_not_act_on_it() {
         // The whole answer to "does update converge by version or by commit"
         // that a user can actually see. Asserted on the substring that
@@ -1142,6 +1229,7 @@ mod tests {
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::RepinnedSameVersion {
+                backend: SCOOP,
                 name: Name::new("ripgrep"),
                 version: "14.1.0".into(),
             }],
@@ -1162,6 +1250,7 @@ mod tests {
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::Kept {
+                backend: SCOOP,
                 name: Name::new("zellij"),
                 version: Some("0.44.3".into()),
                 why: "bucket \"extras\" has no zellij.json".into(),
@@ -1187,6 +1276,7 @@ mod tests {
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::Kept {
+                backend: SCOOP,
                 name: Name::new("tool"),
                 version: None,
                 why: "2 declared buckets carry it (main, extras)".into(),
@@ -1206,21 +1296,26 @@ mod tests {
             lock: Lock::default(),
             changes: vec![
                 Change::Added {
+                    backend: SCOOP,
                     name: Name::new("a"),
                     version: "1.0".into(),
                 },
                 Change::VersionChanged {
+                    backend: SCOOP,
                     name: Name::new("b"),
                     from: "1.0".into(),
                     to: "2.0".into(),
                 },
                 Change::Unchanged {
+                    backend: SCOOP,
                     name: Name::new("c"),
                 },
                 Change::Unchanged {
+                    backend: SCOOP,
                     name: Name::new("d"),
                 },
                 Change::Kept {
+                    backend: SCOOP,
                     name: Name::new("e"),
                     version: Some("1.0".into()),
                     why: "no bucket has it".into(),
@@ -1257,6 +1352,7 @@ mod tests {
         let converged = Update {
             lock: Lock::default(),
             changes: vec![Change::Unchanged {
+                backend: SCOOP,
                 name: Name::new("fzf"),
             }],
         };
@@ -1269,6 +1365,7 @@ mod tests {
         let changed = Update {
             lock: Lock::default(),
             changes: vec![Change::Added {
+                backend: SCOOP,
                 name: Name::new("fzf"),
                 version: "1.0".into(),
             }],
@@ -1292,6 +1389,7 @@ mod tests {
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::Kept {
+                backend: SCOOP,
                 name: Name::new("tool"),
                 version: None,
                 why: "no declared bucket has it (searched: main)".into(),
@@ -1329,7 +1427,7 @@ mod tests {
             warnings: vec![],
             partial_write: None,
         };
-        let text = render_adopt(&out);
+        let text = render_adopt(SCOOP, &out);
         assert!(
             text.contains("aichat")
                 && text.contains("the installed manifest matches the bucket exactly"),
@@ -1339,6 +1437,34 @@ mod tests {
             text.contains("legacy-tool")
                 && text.contains("matched by version only -- the installed manifest differs"),
             "a Version match must say it is the weaker rule: {text}"
+        );
+    }
+
+    #[test]
+    fn render_adopt_labels_a_winget_adoption_winget_and_names_its_own_confirmation_rule() {
+        // winget has no commit history to search, so `Matched::WingetConfirmed`
+        // is neither `Content` nor `Version` -- it must read as its own
+        // sentence, not as either scoop rule, and the line must say "winget",
+        // not the hardcoded "scoop" every line used to print.
+        let out = AdoptOutcome {
+            adopted: vec![(Name::new("Git.Git"), Matched::WingetConfirmed, None)],
+            refused: vec![],
+            warnings: vec![],
+            partial_write: None,
+        };
+        let text = render_adopt(WINGET, &out);
+        assert!(
+            text.contains("+ winget Git.Git"),
+            "the backend passed in must label the line: {text}"
+        );
+        assert!(
+            text.contains("winget confirms this version is still in its index"),
+            "its own confirmation rule, not one of scoop's two: {text}"
+        );
+        assert!(
+            !text.contains("the installed manifest"),
+            "winget has no manifest to compare -- neither scoop sentence may \
+             appear here: {text}"
         );
     }
 
@@ -1356,7 +1482,7 @@ mod tests {
             warnings: vec![],
             partial_write: None,
         };
-        let text = render_adopt(&out);
+        let text = render_adopt(SCOOP, &out);
         assert!(
             text.contains("replaced the existing pin 0.74.2"),
             "a replaced pin must be named, and what it was: {text}"
@@ -1372,7 +1498,7 @@ mod tests {
             warnings: vec![],
             partial_write: None,
         };
-        let fresh_text = render_adopt(&fresh);
+        let fresh_text = render_adopt(SCOOP, &fresh);
         assert!(
             !fresh_text.contains("replaced"),
             "a first-time adopt has no pin to replace: {fresh_text}"
@@ -1393,7 +1519,7 @@ mod tests {
             warnings: vec![],
             partial_write: None,
         };
-        let text = render_adopt(&out);
+        let text = render_adopt(SCOOP, &out);
         assert!(text.contains("nothere is not installed"), "{text}");
         assert!(
             text.contains("no commit in bucket main carries aichat 9.9.9"),
@@ -1412,7 +1538,7 @@ mod tests {
             warnings: vec![],
             partial_write: None,
         };
-        let text = render_adopt(&out);
+        let text = render_adopt(SCOOP, &out);
         assert!(
             text.contains("1 adopted, 1 refused. Nothing installed and nothing removed."),
             "{text}"
@@ -1434,7 +1560,7 @@ mod tests {
             }),
             ..AdoptOutcome::default()
         };
-        let text = render_adopt(&out);
+        let text = render_adopt(SCOOP, &out);
         assert!(
             text.contains("changed on disk: pkg.lock, pkg.toml"),
             "name what really changed: {text}"
@@ -1459,7 +1585,7 @@ mod tests {
             adopted: vec![(Name::new("aichat"), Matched::Content, None)],
             ..AdoptOutcome::default()
         };
-        let clean_text = render_adopt(&clean);
+        let clean_text = render_adopt(SCOOP, &clean);
         assert!(
             !clean_text.contains("changed on disk") && !clean_text.contains("were not attempted"),
             "a run that wrote everything has no partial write to report: {clean_text}"
@@ -1468,7 +1594,7 @@ mod tests {
 
     #[test]
     fn render_adopt_of_an_empty_outcome_still_prints_the_zero_summary() {
-        let text = render_adopt(&AdoptOutcome::default());
+        let text = render_adopt(SCOOP, &AdoptOutcome::default());
         assert!(
             text.contains("0 adopted, 0 refused. Nothing installed and nothing removed."),
             "{text}"

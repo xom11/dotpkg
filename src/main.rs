@@ -97,6 +97,10 @@ enum Command {
         /// Where dotpkg records what it owns. Must be absolute if given.
         #[arg(long)]
         state: Option<PathBuf>,
+        /// Which backend to adopt from. Defaults to "scoop", unchanged from
+        /// before winget adoption existed.
+        #[arg(long, default_value = "scoop")]
+        backend: String,
         /// The packages to adopt. At least one -- there is deliberately no
         /// "adopt everything", which would be one keystroke from letting a
         /// later pkg.toml edit delete the whole machine.
@@ -535,7 +539,11 @@ fn main() -> Result<()> {
             };
             if let dotpkg::update::Scope::Named(names) = &scope {
                 for n in names {
-                    if !declared.scoop.packages.contains(n) {
+                    // Both backends: a name declared only under [winget] is
+                    // not "not declared" just because the check only ever
+                    // looked at [scoop] packages.
+                    if !declared.scoop.packages.contains(n) && !declared.winget.packages.contains(n)
+                    {
                         refuse(anyhow::anyhow!(
                             "{n} is not declared in {}. `update` re-resolves what pkg.toml \
                              already asks for; add it there first.",
@@ -546,7 +554,9 @@ fn main() -> Result<()> {
             }
 
             let scoop = Scoop::discover();
-            let (u, warnings) = dotpkg::update::run(scoop.root(), &declared, &old, &scope, offline);
+            let winget = Winget::new(RealWinget);
+            let (u, warnings) =
+                dotpkg::update::run(scoop.root(), &winget, &declared, &old, &scope, offline);
             for w in &warnings {
                 eprintln!("warning: {w}");
             }
@@ -601,6 +611,7 @@ fn main() -> Result<()> {
             config,
             lock,
             state,
+            backend,
             packages,
         } => {
             let state_path = state.unwrap_or_else(State::default_path);
@@ -627,14 +638,26 @@ fn main() -> Result<()> {
             let names =
                 dotpkg::model::fold_names(packages, "the packages named on the command line")?;
             let scoop = Scoop::discover();
-            let out = dotpkg::adopt::run(scoop.root(), &names, &config, &lock, &state_path)?;
+            let winget = Winget::new(RealWinget);
+            let out = dotpkg::adopt::run(
+                scoop.root(),
+                &winget,
+                &backend,
+                &names,
+                &config,
+                &lock,
+                &state_path,
+            )?;
             // Before the outcome, not after, and for the same reason `status`
             // and `apply` print theirs first: a package dotpkg could not read
             // is refused as "not installed", and that line is false on its own.
+            // Attributed to the backend this run actually asked for -- the
+            // hardcoded "scoop" here used to be right by construction, before
+            // a winget `adopt` existed at all.
             for w in &out.warnings {
-                eprintln!("warning: scoop: {w}");
+                eprintln!("warning: {backend}: {w}");
             }
-            print!("{}", dotpkg::render::render_adopt(&out));
+            print!("{}", dotpkg::render::render_adopt(&backend, &out));
             std::io::stdout().flush().ok();
             // A partial write is not a refusal -- files changed -- so exit 2
             // ("refused, and nothing was touched") would be a lie about it.

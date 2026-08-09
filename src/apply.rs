@@ -75,7 +75,11 @@ pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
 /// including the prune that would otherwise clear it.
 pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
     for (name, pin) in &lock.scoop {
-        entry_coherence(name, pin)
+        entry_coherence(name, pin, crate::model::SCOOP)
+            .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
+    }
+    for (name, pin) in &lock.winget {
+        entry_coherence(name, pin, crate::model::WINGET)
             .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
     }
     Ok(())
@@ -87,19 +91,65 @@ pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
 /// update`" points at -- can name the blocking entries without repeating that
 /// advice back at the user who is already running it. The rules live here
 /// once; the two callers differ only in what they say afterwards.
-fn entry_coherence(name: &Name, pin: &Pin) -> Result<()> {
-    let Pin::ScoopCommit {
-        bucket,
-        commit,
-        version,
-    } = pin
-    else {
-        anyhow::bail!("pkg.lock [scoop.{name}] holds a winget pin");
-    };
-    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "bucket", bucket)?;
-    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)?;
-    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "package name", name.key())?;
-    crate::backend::scoop::ensure_commit_hash(name, commit)?;
+///
+/// One arm per `Pin` shape, not one function per backend, per the brief this
+/// task followed -- but `in_map` (`SCOOP` or `WINGET`, the map this entry was
+/// actually read from) is still a parameter, not dropped: `Task 7` changed
+/// `Resolution::Resolved` to carry a `Pin` so a winget resolution carrying a
+/// commit is a compile error, but nothing at the type level stops the
+/// REVERSE mistake -- a `Pin::WingetVersion` landing in `lock.scoop` because
+/// `src/update.rs`'s `fold_backend` (Task 15's own routing) has a bug.
+/// Before this task, `entry_coherence` caught exactly that by bailing on any
+/// non-`ScoopCommit` pin unconditionally; matching on `pin`'s shape alone
+/// (dropping `in_map`) would silently accept a `Pin::WingetVersion` wherever
+/// it happens to sit, including the map it must never reach. `in_map` is
+/// what lets each arm refuse a pin that is coherent in itself but sitting in
+/// the wrong map, without a second function and without duplicating that
+/// check at each of this function's two callers.
+///
+/// The winget arm is Task 15's: a non-empty version, and
+/// `ensure_plain_component` over both the version and the id -- **the id
+/// spelled as winget spells it** (`name.to_string()`, the display form, not
+/// `name.key()`). `ensure_plain_component`'s own rules (empty, `.`, `..`,
+/// absolute, a leading `-`, a path separator) do not actually depend on
+/// case, so this choice changes no verdict today -- it is made anyway
+/// because the display spelling is what a winget lock entry's key genuinely
+/// is (`update`/`adopt` write the canonical, cased id `winget show` echoed
+/// back, never the folded form), and checking the string that is actually
+/// stored is the correct thing to validate even where it happens not to
+/// matter yet. Scoop's own arm keeps checking the folded `key()`, unchanged,
+/// because scoop opens a directory on a case-folding filesystem.
+fn entry_coherence(name: &Name, pin: &Pin, in_map: &'static str) -> Result<()> {
+    match pin {
+        Pin::ScoopCommit {
+            bucket,
+            commit,
+            version,
+        } => {
+            anyhow::ensure!(
+                in_map == crate::model::SCOOP,
+                "pkg.lock [{in_map}.{name}] holds a scoop pin"
+            );
+            crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "bucket", bucket)?;
+            crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)?;
+            crate::backend::scoop::ensure_plain_component(
+                name,
+                "pkg.lock",
+                "package name",
+                name.key(),
+            )?;
+            crate::backend::scoop::ensure_commit_hash(name, commit)?;
+        }
+        Pin::WingetVersion { version } => {
+            anyhow::ensure!(
+                in_map == crate::model::WINGET,
+                "pkg.lock [{in_map}.{name}] holds a winget pin"
+            );
+            crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)?;
+            let id = name.to_string();
+            crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "package id", &id)?;
+        }
+    }
     Ok(())
 }
 
@@ -108,12 +158,21 @@ fn entry_coherence(name: &Name, pin: &Pin) -> Result<()> {
 /// The guard stops at the first, which is right for a guard: its product is
 /// "refuse or don't". `update`'s failure message has a different product --
 /// the user needs to know which entries to repair, and stopping at the first
-/// turns one repair into N runs.
+/// turns one repair into N runs. Both maps, for the same reason
+/// `lock_coherence_guard` above checks both: a winget entry has never been
+/// coherence-checked before Task 15, and `update`'s repair message must be
+/// able to name one.
 pub fn incoherent_entries(lock: &Lock) -> Vec<(Name, String)> {
     lock.scoop
         .iter()
-        .filter_map(|(name, pin)| {
-            entry_coherence(name, pin)
+        .map(|(name, pin)| (name, pin, crate::model::SCOOP))
+        .chain(
+            lock.winget
+                .iter()
+                .map(|(name, pin)| (name, pin, crate::model::WINGET)),
+        )
+        .filter_map(|(name, pin, in_map)| {
+            entry_coherence(name, pin, in_map)
                 .err()
                 .map(|e| (name.clone(), format!("{e:#}")))
         })
@@ -1594,6 +1653,102 @@ mod tests {
             },
         );
         lock_coherence_guard(&lock).unwrap();
+    }
+
+    // -- entry_coherence's winget arm (Task 15) --------------------------
+    //
+    // Before this task `apply::incoherent_entries` iterated `lock.scoop`
+    // only, so a winget pin had never been coherence-checked at all --
+    // `lock::parse` accepts `[winget."Git.Git"] version = ""` just fine (see
+    // `lock.rs`'s own `parse_accepts_a_commit_the_guards_reject_and_that_
+    // split_is_deliberate` for why a too-broken-to-run lock must still be
+    // READABLE), and only this guard is what stands between that and
+    // `dotpkg update` writing it back out unrepaired.
+
+    #[test]
+    fn an_incoherent_winget_entry_is_named_by_the_same_guard_as_a_scoop_one() {
+        let lock =
+            crate::lock::parse("[winget.\"Git.Git\"]\nversion = \"\"\npin = \"version-only\"\n")
+                .unwrap();
+        let bad = incoherent_entries(&lock);
+        assert_eq!(bad.len(), 1, "an empty version must be refused: {bad:?}");
+        assert_eq!(bad[0].0.to_string(), "Git.Git");
+        assert!(
+            bad[0].1.contains("version"),
+            "name what about it is wrong, not just that it is: {}",
+            bad[0].1
+        );
+    }
+
+    #[test]
+    fn a_coherent_winget_entry_passes_the_same_guard() {
+        // The positive sibling: without it, a guard that refuses every
+        // winget entry unconditionally -- which would ALSO make the test
+        // above pass -- goes undetected.
+        let lock = crate::lock::parse(
+            "[winget.\"Git.Git\"]\nversion = \"2.55.0\"\npin = \"version-only\"\n",
+        )
+        .unwrap();
+        assert!(
+            incoherent_entries(&lock).is_empty(),
+            "a well-formed winget entry must not be reported as incoherent"
+        );
+        lock_coherence_guard(&lock).unwrap();
+    }
+
+    #[test]
+    fn a_pin_shape_that_does_not_match_the_map_it_is_stored_in_is_still_refused() {
+        // The property Task 15's own brief names as its job to preserve:
+        // Task 7 made a winget resolution carrying a commit a compile error,
+        // but nothing stops the OTHER mistake -- a `Pin::WingetVersion`
+        // landing in `lock.scoop` because of a routing bug in
+        // `src/update.rs`'s `fold_backend`. `entry_coherence`'s per-variant
+        // match alone cannot catch this (a well-formed `WingetVersion` is
+        // coherent by ITS OWN rules regardless of which map holds it) --
+        // `in_map` is what still catches it. Built directly rather than
+        // through `lock::parse`, which cannot produce this shape at all: a
+        // `[scoop.*]` table always parses to `Pin::ScoopCommit` and a
+        // `[winget.*]` table always parses to `Pin::WingetVersion` (see
+        // `lock.rs`'s own `RawScoop`/`RawWinget`), so this is a state only
+        // `resolve_into_lock` -- Rust code, not TOML -- could produce.
+        use crate::lock::Pin;
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("tool"),
+            Pin::WingetVersion {
+                version: "1.0.0".into(),
+            },
+        );
+        let result = lock_coherence_guard(&lock);
+        assert!(
+            result.is_err(),
+            "a Pin::WingetVersion in lock.scoop must be refused: {result:?}"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("winget pin") && msg.contains("scoop"),
+            "name what is wrong, not just that something is: {msg}"
+        );
+
+        let mut reversed = Lock::default();
+        reversed.winget.insert(
+            Name::new("tool"),
+            Pin::ScoopCommit {
+                bucket: "main".into(),
+                commit: "a".repeat(40),
+                version: "1.0.0".into(),
+            },
+        );
+        let reversed_result = lock_coherence_guard(&reversed);
+        assert!(
+            reversed_result.is_err(),
+            "the reverse mismatch (a Pin::ScoopCommit in lock.winget) must be refused too: \
+             {reversed_result:?}"
+        );
+        assert!(
+            format!("{:#}", reversed_result.unwrap_err()).contains("scoop pin"),
+            "and name what is wrong about it"
+        );
     }
 
     #[test]

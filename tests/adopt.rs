@@ -1,8 +1,36 @@
 mod common;
 
+use common::fake_winget::FakeWinget;
 use common::*;
 use dotpkg::adopt::{self, Matched};
-use dotpkg::model::Name;
+use dotpkg::backend::winget::Winget;
+use dotpkg::model::{Name, SCOOP};
+
+/// `adopt::run` dispatches on a backend name and needs a `Winget<C>`
+/// instance even for a scoop-only call (see its own doc comment). Every
+/// test in this file predates winget adoption and exercises the scoop path
+/// only, so this wraps the new 7-argument signature back down to the old
+/// 5-argument shape every call site below already uses -- `FakeWinget::
+/// unreachable()` turns "the winget path was somehow reached from a
+/// scoop-backend call" into a loud panic rather than a silent pass.
+fn run_scoop(
+    scoop_root: &std::path::Path,
+    names: &[Name],
+    config_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    state_path: &std::path::Path,
+) -> anyhow::Result<adopt::Outcome> {
+    let winget = Winget::new(FakeWinget::unreachable());
+    adopt::run(
+        scoop_root,
+        &winget,
+        SCOOP,
+        names,
+        config_path,
+        lock_path,
+        state_path,
+    )
+}
 
 /// The installed manifest, as scoop leaves it: the bucket's bytes with CRLF.
 fn as_scoop_installs_it(body: &str) -> Vec<u8> {
@@ -203,7 +231,7 @@ fn adopt_writes_the_lock_then_pkg_toml_then_state_and_each_prefix_is_safe() {
     )
     .unwrap();
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -302,7 +330,7 @@ fn adopting_over_an_existing_unowned_pin_replaces_it_and_reports_the_previous_ve
     )
     .unwrap();
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("fzf")],
         &config_path,
@@ -348,7 +376,7 @@ fn adopting_over_an_existing_unowned_pin_replaces_it_and_reports_the_previous_ve
         "a skipped write must not leave a .bak behind"
     );
 
-    let rendered = dotpkg::render::render_adopt(&out);
+    let rendered = dotpkg::render::render_adopt(SCOOP, &out);
     assert!(
         rendered.contains("replaced the existing pin 0.74.2"),
         "the end-to-end render must say a pin was replaced and what it was: \
@@ -384,7 +412,7 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
     )
     .unwrap();
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -457,7 +485,7 @@ fn a_package_whose_version_is_not_in_the_bucket_writes_nothing_at_all() {
     std::fs::create_dir_all(&cur).unwrap();
     std::fs::write(cur.join("manifest.json"), r#"{"version":"9.9.9"}"#).unwrap();
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -519,7 +547,7 @@ fn a_refusal_names_shallowness_when_that_is_the_likely_cause() {
     std::fs::create_dir_all(&cur).unwrap();
     std::fs::write(cur.join("manifest.json"), r#"{"version":"0.29.0"}"#).unwrap();
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -566,7 +594,7 @@ fn a_declared_bucket_that_is_not_on_this_machine_is_named_as_absent_rather_than_
 
     let lock_path = f.home.path().join("pkg.lock");
     let state_path = f.home.path().join("state.json");
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -621,7 +649,7 @@ fn install_json_naming_a_bucket_pkg_toml_does_not_declare_is_named_and_told_to_d
 
     let lock_path = f.home.path().join("pkg.lock");
     let state_path = f.home.path().join("state.json");
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -661,7 +689,7 @@ fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
 
     let lock_path = f.home.path().join("pkg.lock");
     let state_path = f.home.path().join("state.json");
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("nothere")],
         &config_path,
@@ -753,7 +781,7 @@ fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
     .unwrap();
 
     std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let result = dotpkg::adopt::run(
+    let result = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -791,7 +819,7 @@ fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
         "a package whose write failed part way was not adopted: {:?}",
         out.adopted
     );
-    let text = dotpkg::render::render_adopt(&out);
+    let text = dotpkg::render::render_adopt(SCOOP, &out);
     assert!(
         text.contains("pkg.lock") && text.contains("pkg.toml"),
         "the report must name what really changed on disk: {text}"
@@ -869,7 +897,7 @@ fn an_unreadable_state_file_refuses_the_whole_package_before_anything_is_written
     let state_path = f.home.path().join("state.json");
     std::fs::create_dir_all(state_path.join("occupied")).unwrap();
 
-    let result = dotpkg::adopt::run(
+    let result = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -1011,7 +1039,7 @@ fn adopting_an_already_managed_package_again_is_refused_not_repeated() {
     )
     .unwrap();
 
-    let first = dotpkg::adopt::run(
+    let first = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -1021,7 +1049,7 @@ fn adopting_an_already_managed_package_again_is_refused_not_repeated() {
     .unwrap();
     assert_eq!(first.adopted.len(), 1, "{first:?}");
 
-    let second = dotpkg::adopt::run(
+    let second = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -1068,7 +1096,7 @@ fn adopting_two_packages_in_one_command_does_not_lose_the_first() {
         std::fs::write(cur.join("manifest.json"), f.blob(&dir, "HEAD", file)).unwrap();
     }
 
-    let out = dotpkg::adopt::run(
+    let out = run_scoop(
         &f.scoop_root(),
         &[Name::new("aichat"), Name::new("widget")],
         &config_path,

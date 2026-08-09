@@ -83,28 +83,68 @@ pub struct ResolveCtx<'a> {
     /// it changing the `Resolved`/`Failed` verdict. See this struct's own doc
     /// comment for why a sink, rather than a field on `Resolution`.
     pub warnings: &'a RefCell<Vec<String>>,
+    /// The id a resolver actually matched, when that differs from -- or
+    /// simply needs recording independently of -- the name it was asked
+    /// about.
+    ///
+    /// Winget-only: measured, `winget --id <spelling>` without `--exact`
+    /// folds case on the way in and hands back the canonical id in `Found
+    /// <name> [<Id>]` (`docs/measurements-2026-08-09-winget.md` §3). Both
+    /// `Winget::resolve_latest` and `Winget::resolve_installed` set this on a
+    /// successful resolution; `Scoop`'s two resolvers never touch it. A sink
+    /// rather than a field on `Resolution`, for the same reason `warnings`
+    /// is one: `Resolution` is deliberately just `Resolved { pin }` / `Failed
+    /// { why }`, and the caller -- `update::run` / `adopt::run` -- reads this
+    /// immediately after each per-package call and clears it with `take()`,
+    /// so unlike `warnings` (which accumulates across a whole loop) this one
+    /// is scoped to exactly the last call.
+    pub canonical: &'a RefCell<Option<Name>>,
+    /// Which rule confirmed an ALREADY-INSTALLED package during
+    /// `resolve_installed`, for `adopt` to report.
+    ///
+    /// Scoop-only: `Scoop::resolve_installed` sets it (`Matched::Content` or
+    /// `Matched::Version`, from the free function `adopt::resolve_installed`
+    /// it delegates to); `Winget::resolve_installed` has no such distinction
+    /// (an installed version either still resolves in the index or it does
+    /// not) and never touches it; neither `resolve_latest` implementation
+    /// does either -- there is no "already installed" to confirm when
+    /// resolving "latest". Read the same way `canonical` is: immediately
+    /// after the call, via `take()`.
+    pub matched: &'a RefCell<Option<crate::adopt::Matched>>,
 }
 
 impl ResolveCtx<'static> {
     /// A context with nothing declared, no lock, and `offline: true` -- for a
     /// caller (today, only a test) that exercises a resolver reading none of
-    /// `declared`/`scoop_root`/`old`. Every referenced value is leaked
-    /// (`Box::leak`, never freed) rather than held in a `static`: the
-    /// `warnings` sink is a `RefCell`, which is not `Sync` and so cannot live
-    /// in a `static` at all, and leaking a few small, short-lived test
-    /// allocations is cheaper than giving every field its own synchronization
-    /// just so one of them could be `Sync`.
+    /// `declared`/`scoop_root`/`old`. `adopt::adopt_one_winget` reads none of
+    /// them either (winget has no bucket to choose and `adopt` reaches no
+    /// network in the first place), but builds its own throwaway `Config`/
+    /// `Lock`/`Path` locals rather than calling this: that function has a
+    /// natural lifetime to borrow from (its own stack frame, once per
+    /// adopted package), so there is no reason for it to leak memory the way
+    /// this constructor deliberately does for a caller that has none. Every
+    /// referenced value here is leaked (`Box::leak`, never freed) rather
+    /// than held in a `static`: the `warnings`/`canonical`/`matched` sinks
+    /// are `RefCell`s, which are not `Sync` and so cannot live in a `static`
+    /// at all, and leaking a few small, short-lived allocations is cheaper
+    /// than giving every field its own synchronization just so one of them
+    /// could be `Sync`.
     pub fn offline() -> ResolveCtx<'static> {
         let declared: &'static Config = Box::leak(Box::new(Config::default()));
         let scoop_root: &'static Path = Box::leak(PathBuf::from(".").into_boxed_path());
         let old: &'static Lock = Box::leak(Box::new(Lock::default()));
         let warnings: &'static RefCell<Vec<String>> = Box::leak(Box::new(RefCell::new(Vec::new())));
+        let canonical: &'static RefCell<Option<Name>> = Box::leak(Box::new(RefCell::new(None)));
+        let matched: &'static RefCell<Option<crate::adopt::Matched>> =
+            Box::leak(Box::new(RefCell::new(None)));
         ResolveCtx {
             offline: true,
             declared,
             scoop_root,
             old,
             warnings,
+            canonical,
+            matched,
         }
     }
 }

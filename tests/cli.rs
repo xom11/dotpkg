@@ -1505,6 +1505,35 @@ fn update_refuses_a_package_pkg_toml_does_not_declare_and_writes_nothing() {
 }
 
 #[test]
+fn update_named_scope_accepts_a_package_declared_only_under_winget() {
+    // `main.rs`'s Named-scope pre-check used to test `declared.scoop.
+    // packages.contains(n)` only, so `dotpkg update Git.Git` for a package
+    // declared solely under `[winget]` was refused as "not declared" before
+    // `update::run` was ever called -- the same class of scoop-only
+    // assumption Task 15 exists to close. This is the CLI-level proof of the
+    // fix in `main.rs`; the corresponding lower-level property (a `Scope::
+    // Named` covers a winget package the same way it covers a scoop one) is
+    // `fold_backend`'s own job and is not re-proven here.
+    let f = Fixture::new("[winget]\npackages = [\"Git.Git\"]\n", "{}");
+
+    let out = f.run(&["update", "Git.Git"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert!(
+        !stderr.contains("is not declared in"),
+        "a winget-only declared package must not be refused as undeclared: {stderr}"
+    );
+    // It still cannot resolve -- winget is absent from PATH by construction
+    // -- but that is a later, different failure than the refusal under test.
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+}
+
+#[test]
 fn adopt_brings_an_installed_package_under_management_and_exits_zero() {
     // The positive sibling for the two adopt refusals below, and the only
     // end-to-end proof that the three writes happen through the real CLI.
@@ -1655,6 +1684,145 @@ fn adopt_refuses_a_relative_state_path_before_anything_runs() {
     assert!(
         !f.work.path().join("pkg.lock").exists(),
         "the refusal must land before any write"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+// -- Task 15: update and adopt over both backends, through the real binary --
+//
+// `path_without_winget()` makes winget's absence fixture-enforced (see the
+// Task 14 section's own doc comment above), so none of these can exercise a
+// real resolve or a real winget-side adoption -- only that `update` and
+// `adopt --backend winget` reach for winget for real (through `RealWinget`,
+// wired in `main.rs`) and handle its absence the same graceful way `status`
+// and `apply` already do for `scan`, rather than panicking or hanging.
+
+#[test]
+fn update_with_a_declared_winget_package_does_not_crash_when_winget_is_absent() {
+    // `update` now calls `Winget::update_source` and `Winget::resolve_latest`
+    // for real. Both fail to spawn `winget` (absent from `PATH` by
+    // construction), which must become an ordinary per-package `Kept` plus a
+    // warning -- not a panic, not a hang, and not the deleted phase-4
+    // warning, whose absence is asserted here too, at the level a real user
+    // actually runs this at.
+    let f = Fixture::new("[winget]\npackages = [\"Git.Git\"]\n", "{}");
+
+    let out = f.run(&["update"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert!(
+        out.status.code().is_some(),
+        "the process must exit cleanly, not be killed by a signal: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("lands in phase 4"),
+        "the deleted phase-4 warning must not reappear: {stderr}"
+    );
+    assert!(
+        !stdout.contains("panicked") && !stderr.contains("panicked"),
+        "no panic: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Git.Git"),
+        "the package was genuinely reached, not silently skipped: {stdout}"
+    );
+    // A resolve that could not even spawn winget is a failure, so `update`
+    // exits 1 -- the same code an unresolvable scoop package would.
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "nothing resolved, so nothing was written"
+    );
+}
+
+#[test]
+fn adopt_backend_winget_refuses_gracefully_when_the_package_is_not_installed() {
+    // Winget absent from `PATH` -> `Winget::scan` returns an empty scan plus
+    // one warning (its own graceful-absence path, unchanged by this task) ->
+    // the named package is not in `scan.installed` -> an ordinary refusal,
+    // not a crash. This is also the winget-side proof of item 4: `adopt`
+    // must not drop a backend's `scan.warnings` on the floor the way it once
+    // did for scoop (`docs/phase3-notes.md`).
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+
+    let out = f.run(&["adopt", "--backend", "winget", "Git.Git"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a refusal is outstanding work: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Git.Git") && stdout.contains("not installed"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("warning: winget:"),
+        "winget's own scan warning must reach the user, the same way scoop's \
+         already does: {stderr}"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "a refused adopt writes nothing"
+    );
+}
+
+#[test]
+fn adopt_backend_defaults_to_scoop_so_every_pre_task_15_invocation_is_unchanged() {
+    // The positive control for the two tests above: `adopt fzf` with no
+    // `--backend` at all must still mean scoop, exactly as it did before
+    // this flag existed. Otherwise both refusal tests above could pass for
+    // the wrong reason -- a version that silently ignored `--backend`
+    // entirely and always used scoop would satisfy their assertions too.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+
+    let out = f.run(&["adopt", "fzf"]);
+    let stdout = text(&out.stdout);
+
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    let lock = fs::read_to_string(f.work.path().join("pkg.lock")).unwrap();
+    assert!(lock.contains("[scoop.fzf]"), "{lock}");
+}
+
+#[test]
+fn adopt_rejects_an_unknown_backend_value_rather_than_guessing() {
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    let before = f.snapshot();
+
+    let out = f.run(&["adopt", "--backend", "nope", "fzf"]);
+    let stderr = text(&out.stderr);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "an unknown backend must not silently succeed: {stderr}"
+    );
+    assert!(stderr.contains("nope"), "name the bad value: {stderr}");
+    assert!(
+        stderr.contains("scoop") && stderr.contains("winget"),
+        "say what the real choices are: {stderr}"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "nothing may be written for a backend dotpkg does not recognise"
     );
     f.assert_nothing_was_touched(before);
 }

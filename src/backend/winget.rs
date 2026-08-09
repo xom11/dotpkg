@@ -625,11 +625,15 @@ impl<C: WingetCmd> Backend for Winget<C> {
     /// `parse_show` reads -- ask with what the user wrote, `parse_show`
     /// records what winget matched.
     ///
-    /// `ctx` is unused: unlike `Scoop::resolve_latest`, nothing here reads
-    /// `declared`, `scoop_root`, `old` or `offline` -- winget has no bucket to
-    /// choose and this call is not gated on network reachability, matching
-    /// the brief's own test (`ResolveCtx::offline()` still resolves).
-    fn resolve_latest(&self, name: &Name, _ctx: &ResolveCtx) -> Resolution {
+    /// `declared`, `scoop_root`, `old` and `offline` are unused: unlike
+    /// `Scoop::resolve_latest`, nothing here reads any of them -- winget has
+    /// no bucket to choose and this call is not gated on network
+    /// reachability, matching the brief's own test (`ResolveCtx::offline()`
+    /// still resolves). `ctx.canonical` IS used, on the success path: the
+    /// canonical id `parse_show` read out of `Found <name> [<Id>]` is what
+    /// Task 15's `update` writes into `pkg.lock`'s key, not the spelling this
+    /// method was asked with.
+    fn resolve_latest(&self, name: &Name, ctx: &ResolveCtx) -> Resolution {
         let id = name.to_string();
         let out = match self
             .cmd
@@ -662,11 +666,14 @@ impl<C: WingetCmd> Backend for Winget<C> {
             };
         }
         match parse_show(&out.stdout) {
-            Ok(found) => Resolution::Resolved {
-                pin: Pin::WingetVersion {
-                    version: found.version,
-                },
-            },
+            Ok(found) => {
+                *ctx.canonical.borrow_mut() = Some(Name::new(found.id));
+                Resolution::Resolved {
+                    pin: Pin::WingetVersion {
+                        version: found.version,
+                    },
+                }
+            }
             Err(e) => Resolution::Failed {
                 why: format!("{e:#}"),
             },
@@ -696,7 +703,7 @@ impl<C: WingetCmd> Backend for Winget<C> {
     /// `NO_APPLICATIONS_FOUND` means the package itself is gone -- a
     /// different fact, so a different message, never conflated with the
     /// version-only one above.
-    fn resolve_installed(&self, inst: &Installed, _ctx: &ResolveCtx) -> Resolution {
+    fn resolve_installed(&self, inst: &Installed, ctx: &ResolveCtx) -> Resolution {
         if inst.version.starts_with("> ") {
             return Resolution::Failed {
                 why: format!(
@@ -773,14 +780,54 @@ impl<C: WingetCmd> Backend for Winget<C> {
             };
         }
         match parse_show(&out.stdout) {
-            Ok(found) => Resolution::Resolved {
-                pin: Pin::WingetVersion {
-                    version: found.version,
-                },
-            },
+            Ok(found) => {
+                *ctx.canonical.borrow_mut() = Some(Name::new(found.id));
+                Resolution::Resolved {
+                    pin: Pin::WingetVersion {
+                        version: found.version,
+                    },
+                }
+            }
             Err(e) => Resolution::Failed {
                 why: format!("{e:#}"),
             },
         }
+    }
+}
+
+impl<C: WingetCmd> Winget<C> {
+    /// Refresh winget's own index for the one source dotpkg reads --
+    /// `["source", "update", "--name", "winget", "--disable-interactivity"]`.
+    ///
+    /// Measured (`docs/measurements-2026-08-09-winget.md` §9, "Repeated,
+    /// scoped"): scoped to `--name winget`, this exits `0` and changes
+    /// nothing on the machine it was run against twice -- 141 rows before and
+    /// after, the `(Name, Id, Version, Source)` multiset identical, zero
+    /// `Available`-column moves. That measurement is what makes it safe to
+    /// call unconditionally, unlike the **bare** `winget source update` (no
+    /// `--name`), which installed winget's own `winget-font` source MSIX and
+    /// is never used by this crate.
+    ///
+    /// This is winget's analogue of `bucket::fetch` -- the thing `--offline`
+    /// skips -- and it is not a `Backend` trait method for the same reason
+    /// `bucket::fetch` is not one: it is not "resolve one package", it is a
+    /// whole-run, once-per-invocation refresh that only ever makes sense for
+    /// winget, the same way per-bucket fetching only ever makes sense for
+    /// scoop.
+    pub fn update_source(&self) -> Result<()> {
+        let out = self.cmd.run(&[
+            "source",
+            "update",
+            "--name",
+            "winget",
+            "--disable-interactivity",
+        ])?;
+        anyhow::ensure!(
+            out.code == 0,
+            "winget source update exited {}: {}",
+            out.code,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        );
+        Ok(())
     }
 }

@@ -471,13 +471,21 @@ impl Backend for Scoop {
             &installed_manifest,
             &rev,
         ) {
-            Ok(Some(found)) => Resolution::Resolved {
-                pin: Pin::ScoopCommit {
-                    bucket: bucket_name.key().to_string(),
-                    commit: found.commit,
-                    version: found.version,
-                },
-            },
+            Ok(Some(found)) => {
+                // `adopt::run` reads this back via `ctx.matched.take()` right
+                // after this call -- it is the ONLY way "which rule found the
+                // commit" survives the trip through `Resolution`, which (like
+                // `Resolution::Resolved`'s own doc comment explains for
+                // `canonical`) is deliberately just `{ pin }` / `{ why }`.
+                *ctx.matched.borrow_mut() = Some(found.matched);
+                Resolution::Resolved {
+                    pin: Pin::ScoopCommit {
+                        bucket: bucket_name.key().to_string(),
+                        commit: found.commit,
+                        version: found.version,
+                    },
+                }
+            }
             Ok(None) => {
                 let shallow = if bucket::is_shallow(&dir) {
                     format!(

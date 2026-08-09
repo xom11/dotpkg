@@ -1,12 +1,37 @@
 mod common;
 
+use common::fake_winget::FakeWinget;
 use common::*;
+use dotpkg::backend::winget::Winget;
 use dotpkg::lock::{Lock, Pin};
-use dotpkg::model::Name;
+use dotpkg::model::{Name, SCOOP, WINGET};
 use dotpkg::update::{self, Change, Resolution, Scope};
 
 fn cfg(text: &str) -> dotpkg::config::Config {
     dotpkg::config::parse(text).unwrap()
+}
+
+/// The winget instance for every test in this file that declares no `[winget]`
+/// packages at all: `update::run`'s winget loop only ever iterates
+/// `declared.winget.packages`, so with nothing declared there it must never
+/// be called -- `FakeWinget::unreachable` makes that a loud panic rather than
+/// a silent assumption.
+fn no_winget() -> Winget<FakeWinget> {
+    Winget::new(FakeWinget::unreachable())
+}
+
+/// Read a winget fixture, keeping the CRLF it was captured with -- the same
+/// reason `tests/winget_resolve.rs`'s own `fixture` helper does this rather
+/// than using `std::fs::read_to_string`'s default (which does not, in fact,
+/// translate anything on any platform Rust runs on, but matching the
+/// established helper's own doc comment here rather than re-deriving it).
+fn winget_fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/winget")
+            .join(name),
+    )
+    .unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
 #[test]
@@ -36,6 +61,7 @@ fn update_resolves_a_declared_package_against_the_bucket_on_disk() {
 
     let (u, _warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -45,6 +71,7 @@ fn update_resolves_a_declared_package_against_the_bucket_on_disk() {
     assert_eq!(
         u.changes,
         vec![Change::Added {
+            backend: SCOOP,
             name: Name::new("tool"),
             version: "2.0.0".into()
         }]
@@ -73,6 +100,7 @@ fn the_lock_update_writes_is_one_apply_would_accept() {
 
     let (u, _) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -104,6 +132,7 @@ fn an_ambiguous_bucket_is_refused_rather_than_guessed_and_names_both_candidates(
 
     let (u, _) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -137,6 +166,7 @@ fn a_declared_bucket_that_is_not_on_this_machine_is_warned_about_by_name_and_pat
     for offline in [true, false] {
         let (_u, warnings) = update::run(
             &f.scoop_root(),
+            &no_winget(),
             &config,
             &Lock::default(),
             &Scope::WholeRun,
@@ -189,6 +219,7 @@ fn the_refusal_names_only_the_buckets_actually_searched_and_says_which_were_miss
 
     let (u, _warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -243,6 +274,7 @@ fn a_locked_bucket_that_is_not_on_this_machine_is_not_reported_as_a_missing_mani
 
     let (u, _warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
         &old,
         &Scope::WholeRun,
@@ -294,6 +326,7 @@ fn a_locked_bucket_that_pkg_toml_does_not_declare_is_named_and_told_to_declare_i
 
     let (u, _warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
         &old,
         &Scope::WholeRun,
@@ -332,6 +365,7 @@ fn a_bucket_with_no_upstream_warns_that_latest_is_only_as_current_as_the_clone()
 
     let (_u, warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -353,6 +387,7 @@ fn offline_skips_the_fetch_and_says_the_result_may_be_stale() {
 
     let (_u, warnings) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
         &Lock::default(),
         &Scope::WholeRun,
@@ -364,18 +399,180 @@ fn offline_skips_the_fetch_and_says_the_result_may_be_stale() {
     );
 }
 
-#[test]
-fn declared_winget_packages_are_named_in_a_warning_and_their_pins_survive() {
-    // Phase 3 resolves scoop only. This warning is the only thing standing
-    // between "your winget packages were skipped, on purpose, and Phase 4
-    // will do them" and a user believing `update` handled the whole file.
-    // Untested until the Task 14 mutation run, which found `delete !` at
-    // src/update.rs:314 surviving the entire suite because no test had ever
-    // declared a [winget] section at all.
-    let f = Fixture::new();
-    let dir = f.bucket("main");
-    f.commit(&dir, "tool.json", "1.0.0", "v100");
+// -- winget, resolved rather than warned about (Task 15) ------------------
+//
+// `declared_winget_packages_are_named_in_a_warning_and_their_pins_survive`
+// stood here through Phase 3: it asserted the exact warning this task
+// deletes ("N winget package(s) were not resolved: the winget backend lands
+// in phase 4") and that `u.lock.winget` came back byte-identical to `old`,
+// which is what "not resolved" means. Both are now false by design, so the
+// test is gone rather than adjusted -- its "no unconditional warning" half
+// is subsumed by `no_winget()` itself: every scoop-only test above this
+// point declares no `[winget]` section and passes a `FakeWinget` that PANICS
+// if `update::run`'s winget loop is ever reached for it at all, which is a
+// stronger, structural counterweight than a single `.any()` check could be.
 
+#[test]
+fn update_resolves_winget_packages_instead_of_warning_that_it_cannot() {
+    // The replacement for the deleted phase-4 warning: its absence is
+    // asserted, not assumed.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-git.txt"));
+    let winget = Winget::new(fake);
+
+    let (u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"Git.Git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("lands in phase 4")),
+        "the phase-4 warning must be gone: {warnings:?}"
+    );
+    assert_eq!(u.lock.winget.len(), 1, "the package really was resolved");
+    assert!(
+        u.lock.scoop.is_empty(),
+        "nothing here declared a scoop package: {:?}",
+        u.lock.scoop
+    );
+}
+
+#[test]
+fn a_winget_lock_entry_is_written_with_the_canonical_id_not_the_declared_case() {
+    // MEASURED (`show-canonical-echo.txt`): asked as `git.git`, winget
+    // answers `Found Git [Git.Git]`. The lock must record what winget
+    // matched.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-canonical-echo.txt"));
+    let winget = Winget::new(fake);
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    // `get_key_value`, not indexing by `Name::new("git.git")` and stopping
+    // there: `Name`'s `Eq` folds case, so indexing alone cannot tell "Git.Git"
+    // apart from "git.git" -- the key this lookup actually returns is what
+    // proves which one was really stored. `.to_string()` goes through
+    // `Display`, which does not fold (`clippy::cmp_owned` would rather this
+    // compared `Name`'s own `PartialEq<&str>` directly, but that impl folds
+    // case too and would make this assertion pass no matter which spelling
+    // won).
+    let (stored_key, _) = u.lock.winget.get_key_value(&Name::new("git.git")).unwrap();
+    assert_eq!(
+        stored_key.to_string(),
+        "Git.Git",
+        "the lock records what winget matched: {:?}",
+        u.lock.winget.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_case_difference_between_pkg_toml_and_the_canonical_id_is_reported_not_rewritten() {
+    // The canonical-id rule's other half: `pkg.toml` is the user's file, and
+    // `update` never touches it at all (only `pkg.lock`) -- so "not silently
+    // rewritten" is true by construction here, and this test is really
+    // about the WARNING half: the user must be told the two spellings
+    // differ, naming both.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-canonical-echo.txt"));
+    let winget = Winget::new(fake);
+
+    let (_u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("git.git") && w.contains("Git.Git")),
+        "name both spellings: {warnings:?}"
+    );
+}
+
+#[test]
+fn a_declared_spelling_that_already_matches_the_canonical_one_is_not_warned_about() {
+    // The counterweight to the test above: without it, a version that warns
+    // on every resolved winget package regardless of case would satisfy the
+    // positive test on its own. `show-git.txt` is `Git.Git` asked AS
+    // `Git.Git` -- no case difference at all.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-git.txt"));
+    let winget = Winget::new(fake);
+
+    let (_u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"Git.Git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.contains("pkg.lock records the canonical spelling")),
+        "an exact-case match has nothing to report: {warnings:?}"
+    );
+}
+
+#[test]
+fn a_failed_winget_resolution_keeps_the_previous_pin_the_same_way_scoop_does() {
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(
+        dotpkg::backend::winget::NO_APPLICATIONS_FOUND,
+        winget_fixture("show-package-gone.txt"),
+    );
+    let winget = Winget::new(fake);
+
+    let mut old = Lock::default();
+    old.winget.insert(
+        Name::new("Xyzzy.NoSuch"),
+        Pin::WingetVersion {
+            version: "1.0.0".into(),
+        },
+    );
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"Xyzzy.NoSuch\"]\n"),
+        &old,
+        &Scope::WholeRun,
+        true,
+    );
+    assert_eq!(
+        u.lock.winget[&Name::new("Xyzzy.NoSuch")],
+        old.winget[&Name::new("Xyzzy.NoSuch")],
+        "the previous pin must survive a failed re-resolve, exactly as scoop's does"
+    );
+    match &u.changes[0] {
+        Change::Kept { backend, why, .. } => {
+            assert_eq!(*backend, WINGET);
+            assert!(why.contains("no longer") || why.contains("not in"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_winget_package_no_longer_declared_is_dropped_on_a_whole_run() {
+    // No `[winget]` packages are DECLARED here (the config is empty), so
+    // `no_winget()`'s panic-on-any-call guarantee still holds -- this proves
+    // the drop side of `fold_backend`'s winget call without needing a real
+    // resolution at all.
+    let f = Fixture::new();
     let mut old = Lock::default();
     old.winget.insert(
         Name::new("Git.Git"),
@@ -384,34 +581,150 @@ fn declared_winget_packages_are_named_in_a_warning_and_their_pins_survive() {
         },
     );
 
-    let with_winget = cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n\
-         \n[winget]\npackages = [\"Git.Git\"]\n");
-    let (u, warnings) = update::run(&f.scoop_root(), &with_winget, &old, &Scope::WholeRun, true);
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("winget") && w.contains('1')),
-        "name how many were skipped, and that they were winget: {warnings:?}"
-    );
-    assert_eq!(
-        u.lock.winget, old.winget,
-        "a command that cannot resolve them must not drop them either"
-    );
-
-    // The counterweight, and what makes the assertion above discriminate: the
-    // same run with no [winget] section must not mention winget at all. An
-    // unconditional warning would satisfy the positive test on its own.
-    let (_, quiet) = update::run(
+    let (u, _warnings) = update::run(
         &f.scoop_root(),
-        &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
-        &Lock::default(),
+        &no_winget(),
+        &cfg(""),
+        &old,
         &Scope::WholeRun,
         true,
     );
     assert!(
-        !quiet.iter().any(|w| w.contains("winget")),
-        "a pkg.toml with no winget packages has nothing to warn about: {quiet:?}"
+        !u.lock.winget.contains_key(&Name::new("Git.Git")),
+        "no longer declared, whole run: it must be dropped"
     );
+    assert!(u.changes.iter().any(|c| matches!(
+        c,
+        Change::Dropped { backend, name, .. } if *backend == WINGET && *name == "Git.Git"
+    )));
+}
+
+// -- winget source update (Task 15 / Task 1's measurement) -----------------
+
+#[test]
+fn update_refreshes_wingets_index_before_resolving_when_not_offline() {
+    // Measured inert when scoped this way
+    // (`docs/measurements-2026-08-09-winget.md` §9, "Repeated, scoped"), so
+    // `update` may call it unconditionally whenever something is declared
+    // for it to refresh. The ORDER matters: the index must be refreshed
+    // before the one package that depends on it is resolved.
+    let f = Fixture::new();
+    let fake = FakeWinget::script(vec![
+        (0, "Updating source: winget...\nDone\n".to_string()),
+        (0, winget_fixture("show-canonical-echo.txt")),
+    ]);
+    let winget = Winget::new(fake.clone());
+
+    let (_u, _warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        false,
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            vec![
+                "source",
+                "update",
+                "--name",
+                "winget",
+                "--disable-interactivity"
+            ],
+            vec!["show", "--id", "git.git", "--disable-interactivity"],
+        ],
+        "the index must be refreshed before any package is resolved"
+    );
+}
+
+#[test]
+fn offline_skips_wingets_index_refresh_but_still_resolves_against_it() {
+    // The direct counterpart to `offline_skips_the_fetch_and_says_the_
+    // result_may_be_stale` (scoop's own bucket fetch) -- `--offline` skips
+    // the NETWORK call, never the resolution itself.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-canonical-echo.txt"));
+    let winget = Winget::new(fake.clone());
+
+    let (u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![vec!["show", "--id", "git.git", "--disable-interactivity"]],
+        "no source-update call when offline: {:?}",
+        fake.calls()
+    );
+    assert_eq!(
+        u.lock.winget.len(),
+        1,
+        "offline still resolves against whatever the index already has"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("offline") && w.contains("winget")),
+        "say the index was not refreshed: {warnings:?}"
+    );
+}
+
+#[test]
+fn a_failed_winget_index_refresh_is_a_warning_not_a_refusal() {
+    let f = Fixture::new();
+    let fake = FakeWinget::script(vec![
+        (1, "some transient failure\n".to_string()),
+        (0, winget_fixture("show-canonical-echo.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let (u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        false,
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("could not refresh")),
+        "{warnings:?}"
+    );
+    // The counterweight: resolution still proceeds against whatever the
+    // (unrefreshed) index has, rather than refusing the whole run.
+    assert_eq!(
+        u.lock.winget.len(),
+        1,
+        "a refresh failure must not block resolution"
+    );
+}
+
+#[test]
+fn winget_source_update_is_never_called_when_nothing_is_declared_for_it() {
+    // The gate: `update` does not reach for the network on winget's behalf
+    // just because a `Winget` instance exists. `no_winget()`'s
+    // panic-on-any-call already proves this for every scoop-only test above,
+    // but this one is explicit about exactly this property, unconditional
+    // on `offline`.
+    for offline in [true, false] {
+        let f = Fixture::new();
+        let (_u, _warnings) = update::run(
+            &f.scoop_root(),
+            &no_winget(),
+            &cfg("[scoop]\npackages = []\n"),
+            &Lock::default(),
+            &Scope::WholeRun,
+            offline,
+        );
+        // Reaching this line at all (rather than panicking inside
+        // `FakeWinget::unreachable`) is the assertion.
+    }
 }
 
 #[test]
@@ -439,6 +752,7 @@ fn a_fetch_moves_the_pin_forward() {
     let config = cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n");
     let (stale, _) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &config,
         &Lock::default(),
         &Scope::WholeRun,
@@ -447,6 +761,7 @@ fn a_fetch_moves_the_pin_forward() {
     assert_eq!(
         stale.changes,
         vec![Change::Added {
+            backend: SCOOP,
             name: Name::new("tool"),
             version: "1.0.0".into()
         }],
@@ -455,6 +770,7 @@ fn a_fetch_moves_the_pin_forward() {
 
     let (fresh, _) = update::run(
         &f.scoop_root(),
+        &no_winget(),
         &config,
         &Lock::default(),
         &Scope::WholeRun,
@@ -463,6 +779,7 @@ fn a_fetch_moves_the_pin_forward() {
     assert_eq!(
         fresh.changes,
         vec![Change::Added {
+            backend: SCOOP,
             name: Name::new("tool"),
             version: "2.0.0".into()
         }],

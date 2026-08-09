@@ -26,6 +26,8 @@ enum Plan {
     /// `run` always errors, matching what happens when `winget.exe` is not on
     /// `PATH` at all.
     FailingToSpawn,
+    /// `run` panics. See `FakeWinget::unreachable`'s own doc comment.
+    Unreachable,
 }
 
 struct Inner {
@@ -65,6 +67,18 @@ impl FakeWinget {
         })))
     }
 
+    /// `run` panics if ever called. Task 15's `update`/`adopt` tests that
+    /// declare no winget packages at all must never touch winget in any
+    /// way -- this is what turns "the winget loop was accidentally reached
+    /// anyway" into a loud, immediate test failure instead of a silent
+    /// pass-for-the-wrong-reason.
+    pub fn unreachable() -> FakeWinget {
+        FakeWinget(Rc::new(RefCell::new(Inner {
+            plan: Plan::Unreachable,
+            calls: Vec::new(),
+        })))
+    }
+
     /// Every argv this fake was asked to run, in call order.
     pub fn calls(&self) -> Vec<Vec<String>> {
         self.0.borrow().calls.clone()
@@ -99,6 +113,10 @@ impl WingetCmd for FakeWinget {
                 Ok(out)
             }
             Plan::FailingToSpawn => Err(anyhow::anyhow!("winget.exe not found on PATH (fake)")),
+            Plan::Unreachable => panic!(
+                "FakeWinget::unreachable was called with {args:?} -- this test declared \
+                 no winget packages and must never touch winget at all"
+            ),
         }
     }
 }

@@ -10,8 +10,9 @@ use crate::model::Name;
 use anyhow::Result;
 use std::path::Path;
 
-/// Which rule found the commit. Reported, because the two are not equally
-/// strong and a user is entitled to know which one answered.
+/// Which rule found the commit -- or, for winget, confirmed the pin at all.
+/// Reported, because the strength of the evidence differs and a user is
+/// entitled to know which one answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Matched {
     /// The installed manifest and the bucket blob are the same file. Exact,
@@ -20,6 +21,13 @@ pub enum Matched {
     /// Only the version agreed. Weaker: measured, when a bucket amends a
     /// manifest without bumping the version, this picks the newer of the two.
     Version,
+    /// Winget has no commit history to search and no local manifest to
+    /// compare -- the installed version either still resolves in winget's
+    /// own index (`Backend::resolve_installed`) or it does not. Neither
+    /// `Content` nor `Version` describes that: both are scoop's two-tier
+    /// evidence over a bucket's git history, which winget has no analogue
+    /// of at all.
+    WingetConfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,10 +91,14 @@ fn blob_version(body: &[u8]) -> Option<String> {
     v.get("version")?.as_str().map(str::to_string)
 }
 
-use crate::backend::Backend;
+use crate::backend::scoop::Scoop;
+use crate::backend::winget::{Winget, WingetCmd};
+use crate::backend::{Backend, ResolveCtx};
 use crate::config::Config;
 use crate::lock::{Lock, Pin};
+use crate::model::{SCOOP, WINGET};
 use crate::state::{Ownership, State};
+use std::cell::RefCell;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -156,14 +168,41 @@ pub struct PartialWrite {
 /// The dangerous order is `state.json` first, which makes the package
 /// `installed ∧ ¬declared ∧ owned` -- a **prune candidate** (`src/plan.rs`).
 /// This mirrors the executor's own reasoning about claiming ownership late.
-pub fn run(
+///
+/// **Dispatches on `backend`** (`SCOOP` or `WINGET`, `src/model.rs`) to
+/// exactly one of `run_scoop`/`run_winget` below -- an `adopt` invocation
+/// names one backend, via `--backend` on the CLI (`SCOOP` by default, for
+/// every caller that predates Task 15), and adopts every one of `names` from
+/// that backend only. `winget` is threaded through unconditionally, even for
+/// a scoop-only call, the same way `apply::load_everything` always builds
+/// both backends: constructing a `Winget<C>` spawns nothing by itself, and
+/// `run_scoop` never calls any of its methods.
+pub fn run<C: WingetCmd>(
+    scoop_root: &Path,
+    winget: &Winget<C>,
+    backend: &str,
+    names: &[Name],
+    config_path: &Path,
+    lock_path: &Path,
+    state_path: &Path,
+) -> Result<Outcome> {
+    match backend {
+        SCOOP => run_scoop(scoop_root, names, config_path, lock_path, state_path),
+        WINGET => run_winget(winget, names, config_path, lock_path, state_path),
+        other => Err(anyhow::anyhow!(
+            "{other:?} is not a backend dotpkg knows -- pass \"scoop\" or \"winget\""
+        )),
+    }
+}
+
+fn run_scoop(
     scoop_root: &Path,
     names: &[Name],
     config_path: &Path,
     lock_path: &Path,
     state_path: &Path,
 ) -> Result<Outcome> {
-    let scoop = crate::backend::scoop::Scoop::new(scoop_root.to_path_buf());
+    let scoop = Scoop::new(scoop_root.to_path_buf());
     let scan = Backend::scan(&scoop)?;
     let mut out = Outcome {
         warnings: scan.warnings.clone(),
@@ -187,6 +226,7 @@ pub fn run(
 
         match adopt_one(
             scoop_root,
+            &scoop,
             &scan,
             &declared,
             &lock,
@@ -195,27 +235,20 @@ pub fn run(
             config_path,
         ) {
             Err(why) => out.refused.push((name.clone(), why)),
-            Ok((bucket_name, found, config_text, config_changed)) => {
+            Ok((pin, matched, config_text, config_changed)) => {
                 // Captured before the insert below overwrites it. `adopt_one`
                 // refuses on `state.owns` and on "not installed", but not on
                 // `pkg.lock` already carrying a pin for this name -- see
-                // `Outcome::adopted`'s doc comment. `Pin::version` reads
-                // either variant, though only `ScoopCommit` pins land in
-                // `lock.scoop` through this module.
+                // `Outcome::adopted`'s doc comment.
                 let previous_version = lock.scoop.get(name).map(|p| p.version().to_string());
-                lock.scoop.insert(
-                    name.clone(),
-                    Pin::ScoopCommit {
-                        // `key()`, matching `update`: `choose_bucket` opened
-                        // `buckets/<key>` and `Scoop::stage` opens what the
-                        // lock says verbatim, so the display spelling would
-                        // name a directory nothing verified.
-                        bucket: bucket_name.key().to_string(),
-                        commit: found.commit.clone(),
-                        version: found.version.clone(),
-                    },
-                );
-                state.set(crate::model::SCOOP, name, Ownership::Adopted);
+                // `pin` is already the exact `Pin::ScoopCommit` `Backend::
+                // resolve_installed` built -- bucket spelled by `key()`,
+                // matching `update`: `choose_bucket` opened `buckets/<key>`
+                // and `Scoop::stage` opens what the lock says verbatim, so
+                // the display spelling would name a directory nothing
+                // verified.
+                lock.scoop.insert(name.clone(), pin);
+                state.set(SCOOP, name, Ownership::Adopted);
                 if let Err(failure) = write_in_order(
                     WriteLock(|| crate::lock::save(&lock, lock_path)),
                     WritePkgToml(|| {
@@ -239,8 +272,66 @@ pub fn run(
                     });
                     return Ok(out);
                 }
+                out.adopted.push((name.clone(), matched, previous_version));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `run_scoop`'s twin for winget. Same all-or-nothing-per-package shape, same
+/// re-read-everything-per-iteration reasoning, same three-file write order
+/// through the same `write_in_order` seam -- only `adopt_one_winget` and
+/// which lock map/state backend/`pkg.toml` section get written differ.
+fn run_winget<C: WingetCmd>(
+    winget: &Winget<C>,
+    names: &[Name],
+    config_path: &Path,
+    lock_path: &Path,
+    state_path: &Path,
+) -> Result<Outcome> {
+    let scan = Backend::scan(winget)?;
+    let mut out = Outcome {
+        warnings: scan.warnings.clone(),
+        ..Outcome::default()
+    };
+
+    for name in names {
+        let declared = crate::config::load(config_path)?;
+        let mut lock = crate::lock::load_or_empty(lock_path)?;
+        let mut state = State::load_or_empty(state_path)?;
+
+        match adopt_one_winget(winget, &scan, &declared, &state, name, config_path) {
+            Err(why) => out.refused.push((name.clone(), why)),
+            Ok((canonical, pin, config_text, config_changed)) => {
+                // Looked up by the CANONICAL name -- the key a previous
+                // `adopt`/`update` would have written -- not the name this
+                // call was given, for the same fold-case reason
+                // `resolve_into_lock`'s `previous` lookup in `src/update.rs`
+                // works regardless of which case a prior entry's key used.
+                let previous_version = lock.winget.get(&canonical).map(|p| p.version().to_string());
+                lock.winget.insert(canonical.clone(), pin);
+                state.set(WINGET, &canonical, Ownership::Adopted);
+                if let Err(failure) = write_in_order(
+                    WriteLock(|| crate::lock::save(&lock, lock_path)),
+                    WritePkgToml(|| {
+                        if config_changed {
+                            crate::config_edit::save(config_path, &config_text).map(|()| true)
+                        } else {
+                            Ok(false)
+                        }
+                    }),
+                    WriteState(|| state.save(state_path)),
+                ) {
+                    out.partial_write = Some(PartialWrite {
+                        name: name.clone(),
+                        wrote: failure.wrote,
+                        why: format!("{:#}", failure.error),
+                    });
+                    return Ok(out);
+                }
                 out.adopted
-                    .push((name.clone(), found.matched, previous_version));
+                    .push((canonical, Matched::WingetConfirmed, previous_version));
             }
         }
     }
@@ -329,20 +420,35 @@ struct WriteFailure {
 
 /// Everything that can refuse, before anything is written. Returns the pieces
 /// the caller needs, so no partial state can exist between a check and a write.
+///
+/// The bucket-choice-then-history-search sequence this used to hold inline is
+/// gone: it is exactly what `Scoop::resolve_installed` (`src/backend/
+/// scoop.rs`) already does, moved onto the `Backend` trait unchanged by
+/// Task 13 but never actually CALLED from here until this rewiring -- which
+/// is what made it dead code despite being tested directly. A reviewer
+/// line-compared the two before this change and found them equivalent except
+/// for which spelling one error message names (`name`, the declared
+/// spelling, here; `inst.name`, the scan-derived spelling, in the trait
+/// method) -- a cosmetic divergence, reachable only when the user types a
+/// different case than what `scan` found on disk, and not "fixed" by picking
+/// a side: going through the trait method means that message now carries
+/// its wording, which is the whole point of routing through one seam instead
+/// of two copies.
 #[allow(clippy::too_many_arguments)]
 fn adopt_one(
     scoop_root: &Path,
+    scoop: &Scoop,
     scan: &crate::backend::Scan,
     declared: &Config,
     lock: &Lock,
     state: &State,
     name: &Name,
     config_path: &Path,
-) -> std::result::Result<(Name, Found, String, bool), String> {
+) -> std::result::Result<(Pin, Matched, String, bool), String> {
     let Some(inst) = scan
         .installed
         .iter()
-        .find(|i| i.backend == crate::model::SCOOP && &i.name == name)
+        .find(|i| i.backend == SCOOP && &i.name == name)
     else {
         return Err(format!(
             "{name} is not installed. `adopt` brings an existing package under \
@@ -350,87 +456,40 @@ fn adopt_one(
              `dotpkg apply`."
         ));
     };
-    if state.owns(crate::model::SCOOP, name) {
+    if state.owns(SCOOP, name) {
         return Err(format!("{name} is already managed by dotpkg"));
     }
 
-    let already = lock.scoop.get(name).and_then(|p| match p {
-        Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
-        Pin::WingetVersion { .. } => None,
-    });
-    // install.json's `bucket` is a legitimate hint here and nowhere else:
-    // adopt targets packages dotpkg has never touched, and it is dotpkg's own
-    // installs that lose the field.
-    let hint = already.or(inst.bucket.as_deref());
-    let (bucket_name, dir, rev) = match bucket::choose_bucket(scoop_root, declared, name, hint) {
-        bucket::BucketChoice::Chosen { name: b, dir, tip } => (b, dir, tip.rev),
-        bucket::BucketChoice::Ambiguous { candidates } => {
-            let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
-            return Err(format!(
-                "{} declared buckets carry {name} ({}). Say which with \
-                     `[scoop.opts] {name} = {{ bucket = \"...\" }}`.",
-                candidates.len(),
-                names.join(", ")
-            ));
-        }
-        bucket::BucketChoice::NotCloned { name: b, dir } => {
-            return Err(bucket::not_cloned_why(&name.to_string(), &b, &dir));
-        }
-        bucket::BucketChoice::Undeclared { name: b } => {
-            return Err(bucket::not_declared_why(&name.to_string(), &b));
-        }
-        bucket::BucketChoice::NotFound { searched, missing } => {
-            return Err(bucket::not_found_why(
-                &name.to_string(),
-                &searched,
-                &missing,
-            ));
-        }
+    let warnings_sink: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let canonical_sink: RefCell<Option<Name>> = RefCell::new(None);
+    let matched_sink: RefCell<Option<Matched>> = RefCell::new(None);
+    let ctx = ResolveCtx {
+        // `adopt` reaches no network at all -- this module's own top-of-file
+        // doc comment -- so `offline: true` is simply a true fact here, not
+        // a flag anything downstream reads: `Scoop::resolve_installed` never
+        // consults it.
+        offline: true,
+        declared,
+        scoop_root,
+        old: lock,
+        warnings: &warnings_sink,
+        canonical: &canonical_sink,
+        matched: &matched_sink,
     };
-
-    // Read, not `unwrap_or_default()`. An unreadable installed manifest used
-    // to become an EMPTY one, which no bucket blob can match -- so the content
-    // loop found nothing, the version loop answered, and the user was told
-    // "matched by version only -- the installed manifest differs". That line
-    // is false: the manifest was not compared at all. Low reachability (a
-    // TOCTOU window after `scan` read the same file) but it was the one place
-    // in the new code where an unreadable file became a benign default.
-    let manifest_path = scoop_root
-        .join("apps")
-        .join(inst.name.to_string())
-        .join("current")
-        .join("manifest.json");
-    let installed_manifest = std::fs::read(&manifest_path).map_err(|e| {
+    let pin = match Backend::resolve_installed(scoop, inst, &ctx) {
+        crate::update::Resolution::Resolved { pin } => pin,
+        crate::update::Resolution::Failed { why } => return Err(why),
+    };
+    // `Scoop::resolve_installed` sets this on every `Resolved` it returns
+    // (see its own doc comment) -- absent here would mean the trait method
+    // itself has a bug, not a state this function should paper over with a
+    // guessed default that would misreport the evidence's strength.
+    let matched = matched_sink.into_inner().ok_or_else(|| {
         format!(
-            "cannot read the installed manifest at {}: {e}. Without it there is \
-             nothing to match against, and matching on the version alone would \
-             report a comparison that never happened.",
-            manifest_path.display()
+            "{name}: resolved without recording which rule matched -- an internal \
+             inconsistency in Scoop::resolve_installed, not a fact about this package"
         )
     })?;
-
-    let found = match resolve_installed(&dir, name, &inst.version, &installed_manifest, &rev) {
-        Ok(Some(f)) => f,
-        Ok(None) => {
-            // Measured: a shallow clone gives exactly this answer with no
-            // other signal, and the user cannot tell the two apart.
-            let shallow = if bucket::is_shallow(&dir) {
-                format!(
-                    " -- and bucket {bucket_name} is a SHALLOW clone, so most of its \
-                     history is not on this machine. `git -C {} fetch --unshallow` \
-                     and try again.",
-                    dir.display()
-                )
-            } else {
-                String::new()
-            };
-            return Err(format!(
-                "no commit in bucket {bucket_name} carries {name} {}{}",
-                inst.version, shallow
-            ));
-        }
-        Err(e) => return Err(format!("{e:#}")),
-    };
 
     // Prepared, not written: the caller writes all three in order only once
     // every refusal above has been passed.
@@ -447,7 +506,89 @@ fn adopt_one(
     // unedited-`text` branch. The caller uses this to skip a `config_edit::
     // save` that would rewrite `pkg.toml` with the same bytes and leave a
     // `pkg.toml.bak` carrying that same content behind it, for no reason.
-    Ok((bucket_name, found, config_text, !already_declared))
+    Ok((pin, matched, config_text, !already_declared))
+}
+
+/// Everything `adopt`'s winget path needs, before anything is written --
+/// `adopt_one`'s twin, one backend over. No bucket, no history, no manifest
+/// on disk to read: winget's own index answers the one question that
+/// matters, through `Backend::resolve_installed`.
+#[allow(clippy::too_many_arguments)]
+fn adopt_one_winget<C: WingetCmd>(
+    winget: &Winget<C>,
+    scan: &crate::backend::Scan,
+    declared: &Config,
+    state: &State,
+    name: &Name,
+    config_path: &Path,
+) -> std::result::Result<(Name, Pin, String, bool), String> {
+    let Some(inst) = scan
+        .installed
+        .iter()
+        .find(|i| i.backend == WINGET && &i.name == name)
+    else {
+        return Err(format!(
+            "{name} is not installed. `adopt` brings an existing package under \
+             management; to install one, declare it and run `dotpkg update` then \
+             `dotpkg apply`."
+        ));
+    };
+    if state.owns(WINGET, name) {
+        return Err(format!("{name} is already managed by dotpkg"));
+    }
+
+    // `Winget::resolve_installed` reads none of `declared`/`scoop_root`/
+    // `old`/`offline` -- winget has no bucket to choose and `adopt` reaches
+    // no network in the first place (this module's own top-of-file doc
+    // comment) -- so these three are throwaway values, built fresh per call
+    // rather than via `ResolveCtx::offline()`'s LEAKED statics: that
+    // constructor exists for callers with no natural lifetime to borrow from
+    // (today, only tests), and this function has one -- its own stack frame
+    // -- so there is no reason to leak memory on every adopted package.
+    let empty_declared = Config::default();
+    let empty_lock = Lock::default();
+    let warnings_sink: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let canonical_sink: RefCell<Option<Name>> = RefCell::new(None);
+    let matched_sink: RefCell<Option<Matched>> = RefCell::new(None);
+    let ctx = ResolveCtx {
+        offline: true,
+        declared: &empty_declared,
+        scoop_root: Path::new("."),
+        old: &empty_lock,
+        warnings: &warnings_sink,
+        canonical: &canonical_sink,
+        matched: &matched_sink,
+    };
+
+    let version = match Backend::resolve_installed(winget, inst, &ctx) {
+        crate::update::Resolution::Resolved { pin } => pin.version().to_string(),
+        crate::update::Resolution::Failed { why } => return Err(why),
+    };
+    // The canonical-id rule: `Winget::resolve_installed` reads `inst.name`
+    // back to winget (`show --id <inst.name> -v <inst.version>`), and
+    // `inst.name` is already whatever `winget list`'s `Id` column printed --
+    // canonical by construction, not something this call could get wrong the
+    // way a hand-typed `pkg.toml` spelling could. `canonical_sink` is read
+    // anyway, for the same reason `update::run` reads it: recording what
+    // actually resolved, not assuming it, is the rule this task exists to
+    // apply consistently.
+    let canonical = canonical_sink
+        .into_inner()
+        .unwrap_or_else(|| inst.name.clone());
+    let pin = Pin::WingetVersion { version };
+
+    let text = std::fs::read_to_string(config_path).map_err(|e| format!("{e}"))?;
+    let already_declared = declared.winget.packages.contains(name);
+    let config_text = if already_declared {
+        text
+    } else {
+        // The user's own spelling, deliberately -- never `canonical`.
+        // `pkg.toml` is the user's file; the canonical-id rule is reported,
+        // not silently rewritten into it.
+        crate::config_edit::add_winget_package(&text, name).map_err(|e| format!("{e:#}"))?
+    };
+
+    Ok((canonical, pin, config_text, !already_declared))
 }
 
 #[cfg(test)]

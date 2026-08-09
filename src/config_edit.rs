@@ -94,6 +94,83 @@ fn verify_round_trip(before: &crate::config::Config, name: &Name, out: &str) -> 
     Ok(())
 }
 
+/// Add `name` to `[winget] packages`, preserving comments, ordering and
+/// formatting. `adopt`'s winget path.
+///
+/// The mirror of `add_scoop_package`, one section over: same three refusals
+/// (does not parse, already declared, round trip disagrees), same
+/// multiline-preserving append. `name` is whatever spelling the caller wants
+/// written -- `adopt::adopt_one_winget` passes the spelling the user typed on
+/// the command line, deliberately never the canonical id `winget` echoed
+/// back: `pkg.toml` is the user's file, and the canonical-id rule
+/// (`src/backend/winget.rs`) says that spelling is reported, not silently
+/// rewritten. A pkg.toml that already declares the canonical spelling (or
+/// any other case-fold of it) never reaches the "already declared" ensure
+/// below as a failure, because `Config::winget.packages.contains` also folds
+/// case.
+pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
+    let before =
+        crate::config::parse(text).context("refusing to edit a pkg.toml that does not parse")?;
+    anyhow::ensure!(
+        !before.winget.packages.contains(name),
+        "{name} is already declared in pkg.toml (package names are compared \
+         without regard to case)"
+    );
+
+    let mut doc: DocumentMut = text
+        .parse()
+        .context("refusing to edit a pkg.toml that does not parse as TOML")?;
+
+    let winget = doc
+        .entry("winget")
+        .or_insert_with(|| Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .context("pkg.toml's [winget] is not a table")?;
+    let packages = winget
+        .entry("packages")
+        .or_insert_with(|| Item::Value(Value::Array(Array::new())))
+        .as_array_mut()
+        .context("pkg.toml's [winget] packages is not an array")?;
+
+    let multiline = packages.iter().count() > 0 && packages.to_string().contains('\n');
+    packages.push(name.to_string());
+    if multiline {
+        let last_idx = packages.len() - 1;
+        if let Some(last) = packages.get_mut(last_idx) {
+            last.decor_mut().set_prefix("\n  ");
+        }
+        packages.set_trailing_comma(true);
+        packages.set_trailing("\n");
+    }
+
+    let out = doc.to_string();
+    verify_round_trip_winget(&before, name, &out)?;
+    Ok(out)
+}
+
+/// `verify_round_trip`'s mirror for the winget section: everything must be
+/// unchanged except `[winget] packages`, compared as one `ScoopSection`
+/// equality rather than field by field -- `ScoopSection` derives `PartialEq`
+/// and nothing in it is what this function touches, unlike
+/// `verify_round_trip` above, which has to compare three of `ScoopSection`'s
+/// own fields individually because `[scoop] packages` -- part of the SAME
+/// section -- is exactly what `add_scoop_package` changes.
+fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
+    let after = crate::config::parse(out)
+        .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
+    anyhow::ensure!(
+        after.scoop == before.scoop,
+        "the edit changed something other than [winget] packages; refusing to write it"
+    );
+    let mut want = before.winget.packages.clone();
+    want.push(name.clone());
+    anyhow::ensure!(
+        after.winget.packages == want,
+        "the edit did not add exactly {name} to [winget] packages; refusing to write it"
+    );
+    Ok(())
+}
+
 /// Replace `pkg.toml`, keeping the file the user wrote as `pkg.toml.bak`.
 ///
 /// Temp-then-rename, the same discipline as `State::save` and `lock::save`.
@@ -312,5 +389,123 @@ python = { arch = "64bit" }   # force an architecture
             format!("{:#}", r.unwrap_err()).contains("changed something other than"),
             "must say what kind of disagreement it is"
         );
+    }
+
+    // -- add_winget_package -----------------------------------------------
+    //
+    // `add_scoop_package`'s mirror, one section over. Not a full re-run of
+    // every scoop-side test (the multiline/round-trip MECHANISM is shared
+    // and already proven above) -- these pin the properties that are
+    // genuinely different about the winget section: no `buckets`/`opts` to
+    // disturb, and the spelling written is the CALLER's, never a
+    // canonicalised one.
+
+    // The comment sits on the FIRST of two elements, not the last, matching
+    // `add_scoop_package`'s own `HAND_WRITTEN` fixture above -- deliberately,
+    // not incidentally. Measured while writing this test: an inline comment
+    // on the LAST element of a multiline array is attached to the array's
+    // own trailing decor, not to that element, and `packages.set_trailing
+    // ("\n")` (shared by both `add_scoop_package` and `add_winget_package`,
+    // a few lines up) unconditionally overwrites it -- so that comment is
+    // silently dropped on append. Pre-existing in `add_scoop_package` too
+    // (its own fixture never happened to put a comment on the last element,
+    // so nothing there ever exercised this path); recorded as a finding in
+    // this task's report rather than fixed here, since the mechanism is
+    // shared code this task did not otherwise touch.
+    const HAND_WRITTEN_WINGET: &str = r#"# what this machine should have
+[scoop]
+buckets  = ["main"]
+packages = ["fzf"]
+
+[winget]
+packages = [
+  "Git.Git",     # version control
+  "OpenAI.Codex",
+]
+"#;
+
+    #[test]
+    fn a_winget_package_is_added_and_every_comment_survives() {
+        let out = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("7zip.7zip")).unwrap();
+
+        assert!(out.contains("# what this machine should have"), "{out}");
+        assert!(out.contains("# version control"), "{out}");
+
+        let cfg = crate::config::parse(&out).unwrap();
+        assert!(cfg.winget.packages.contains(&Name::new("7zip.7zip")));
+        assert!(cfg.winget.packages.contains(&Name::new("Git.Git")));
+        // The [scoop] section -- a different backend entirely -- must be
+        // untouched.
+        assert!(cfg.scoop.packages.contains(&Name::new("fzf")));
+        assert_eq!(cfg.scoop.buckets.len(), 1);
+    }
+
+    #[test]
+    fn a_winget_package_is_written_exactly_as_the_caller_spelled_it() {
+        // `pkg.toml` is the user's file: `adopt`'s winget path writes the
+        // spelling the user typed on the command line, not the canonical id
+        // winget might echo back for a DIFFERENT purpose (the lock's key).
+        // This is the property that would silently break if `add_winget_
+        // package` were ever changed to write `name.key()` (folded) or some
+        // canonicalised spelling instead of `name.to_string()`.
+        let out =
+            add_winget_package("[winget]\npackages = []\n", &Name::new("openai.codex")).unwrap();
+        assert!(
+            out.contains("\"openai.codex\""),
+            "the exact spelling passed in must appear verbatim: {out}"
+        );
+        assert!(
+            !out.contains("\"OpenAI.Codex\""),
+            "nothing here may invent a different case: {out}"
+        );
+    }
+
+    #[test]
+    fn adding_a_winget_package_that_is_already_declared_is_refused_rather_than_duplicated() {
+        let err = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("git.git")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("git.git") || msg.contains("Git.Git"),
+            "name it: {msg}"
+        );
+        assert!(msg.contains("already"), "say why: {msg}");
+    }
+
+    #[test]
+    fn a_file_with_no_winget_section_grows_one() {
+        let out =
+            add_winget_package("[scoop]\npackages = [\"fzf\"]\n", &Name::new("Git.Git")).unwrap();
+        let cfg = crate::config::parse(&out).unwrap();
+        assert!(cfg.winget.packages.contains(&Name::new("Git.Git")));
+        assert!(cfg.scoop.packages.contains(&Name::new("fzf")));
+    }
+
+    #[test]
+    fn the_winget_round_trip_guard_rejects_a_result_that_changes_the_scoop_section() {
+        let before = crate::config::parse(HAND_WRITTEN_WINGET).unwrap();
+        // A hand-built "edit" that also touches [scoop] buckets -- the shape
+        // a future bug in `add_winget_package` could produce.
+        let out = HAND_WRITTEN_WINGET
+            .replacen(r#"buckets  = ["main"]"#, r#"buckets  = []"#, 1)
+            .replacen(r#""Git.Git","#, r#""Git.Git", "7zip.7zip","#, 1);
+
+        let r = verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &out);
+        assert!(
+            r.is_err(),
+            "a scoop-section disagreement must be refused: {r:?}"
+        );
+        assert!(
+            format!("{:#}", r.unwrap_err()).contains("changed something other than"),
+            "must say what kind of disagreement it is"
+        );
+    }
+
+    #[test]
+    fn the_winget_round_trip_guard_accepts_a_clean_addition() {
+        // The positive control for the test above: without it, a guard that
+        // always refuses would satisfy it for the wrong reason.
+        let before = crate::config::parse(HAND_WRITTEN_WINGET).unwrap();
+        let out = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("7zip.7zip")).unwrap();
+        verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &out).unwrap();
     }
 }

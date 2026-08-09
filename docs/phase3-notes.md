@@ -67,11 +67,17 @@ after a Windows run that predates the changes would have been the same mistake
 in a new place, so the suite was rebuilt and rerun on a14 against the final
 tree.
 
-**Result: 363 passed, 0 failed** (macOS: 365; the same two `#[cfg(unix)]`
-tests account for the difference). `tests/cli.rs` goes 17 → 23 on Windows, so
-all six new CLI tests — including `adopt --state some/relative/path.json`,
-which is a path-shaped refusal, and the `bucket_only` fixture that removes a
-`pkg.lock` after creating a git bucket — pass natively.
+**Result: 364 passed, 0 failed** (macOS: 366; the same two `#[cfg(unix)]`
+tests account for the entire difference, again confirmed target by target).
+`tests/cli.rs` goes 17 → 23 on Windows, so all six new CLI tests — including
+`adopt --state some/relative/path.json`, which is a path-shaped refusal, and
+the `bucket_only` fixture that removes a `pkg.lock` after creating a git
+bucket — pass natively. `tests/update.rs` goes 6 → 7, so the new
+`[winget]`-section test passes there too.
+
+Three Windows runs were needed in the end, not one: the tree changed twice
+after the first. Every one of them was green, and **nothing was ever changed to
+make Windows pass** — no fixture edits, no `#[cfg]` gates added.
 
 **Rule this makes explicit for the next phase: the Windows run belongs at the
 end of the change as well as before the dogfood.** "Run Windows first" is not

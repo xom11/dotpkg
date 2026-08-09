@@ -702,6 +702,158 @@ the third" when the third write is last and it cannot discriminate that;
 in `config_edit`; `blobs`'s untested off-by-one; the four `unwrap_err()`-first
 tests outside `lock.rs`.
 
+**Closed by the final whole-branch review (the fix wave before merge):**
+
+- **A declared bucket that is not on disk was skipped in silence, and both
+  `update` and `adopt` then printed a false reason.** Three places, all in the
+  new code. `update::run`'s fetch loop did a bare `continue`; `choose_bucket`'s
+  search loop did the same and then returned `NotFound { searched:
+  declared_names }` — the *full declared list*, including buckets it never
+  opened; and `choose_bucket`'s `stated` branch (a bucket named by the lock or
+  by `[scoop.opts]`) had no `.git` check at all, so an absent bucket was opened
+  as though it were there, `tip()` fell to its `_` arm, every `git_show`
+  failed, `resolve_latest` returned `Ok(None)`, and `update` rendered that as
+  `bucket <name> has no manifest for it`. Measured before the fix: with
+  `buckets = ["main", "extras"]` and only `main` on disk, `update` printed
+  `no declared bucket has it (searched: main, extras)` and exited 1 — for
+  every declared package on a fresh machine, with nothing anywhere saying an
+  uncloned bucket was the cause. `apply` already knew how to say it
+  (`src/backend/scoop.rs`: `bucket {bucket:?} is not present at {path}`).
+
+  Closed: `BucketChoice::NotFound` now carries `searched` **and** `missing` as
+  separate lists, and a new `BucketChoice::NotCloned { name, dir }` covers the
+  `stated` branch — a distinct variant rather than a `NotFound` with an empty
+  `searched`, because "a search happened and found nothing" and "no search was
+  possible" are different facts and only one of them is about the bucket's
+  contents. `bucket::not_found_why` and `bucket::not_cloned_why` are shared by
+  `update` and `adopt`, because the version of these messages that was written
+  twice is how the false line got printed twice. The fetch loop warns by name
+  and path and points at `dotpkg apply --clone-missing-buckets`; the presence
+  check was also lifted out of the `!offline` branch, since whether a bucket is
+  on this machine is a fact about the machine and not about the network.
+
+  Tests: `tests/bucket.rs`'s `a_declared_bucket_that_is_not_on_disk_is_
+  reported_as_missing_not_as_searched` and `a_bucket_named_by_the_lock_or_by_
+  an_opt_that_is_not_on_disk_is_reported_as_absent` (which carries its own
+  counterweight: the same stated bucket, present, must still be `Chosen`);
+  `tests/update.rs`'s `a_declared_bucket_that_is_not_on_this_machine_is_
+  warned_about_by_name_and_path`, `the_refusal_names_only_the_buckets_
+  actually_searched_and_says_which_were_missing` and `a_locked_bucket_that_is_
+  not_on_this_machine_is_not_reported_as_a_missing_manifest`;
+  `tests/adopt.rs`'s `a_declared_bucket_that_is_not_on_this_machine_is_named_
+  as_absent_rather_than_as_manifestless`. Note that `tests/bucket.rs`'s
+  pre-existing `a_package_no_declared_bucket_has_names_what_was_searched`
+  declares `main` and creates `main`, which is why no test in the branch could
+  see any of this.
+
+  Negative controls fired, with the assertion each one hit:
+
+  - Revert the search loop to `searched: declared_names` →
+    `tests/bucket.rs:550` (`assert_eq!(searched, vec![main])`, got `[main,
+    extras]`) and `tests/update.rs:188` (`!why.contains("searched: main,
+    extras")`, reproducing the reviewer's measured line verbatim). The
+    `not searched: extras` assertion sits after the one that fired and was not
+    reached.
+  - Remove the `.git` check from the `stated` branch → `tests/bucket.rs:586`
+    (the `NotCloned` match arm, got `Chosen { name: extras, ... }`),
+    `tests/update.rs:235` (`!why.contains("no manifest")`, got `bucket extras
+    has no manifest for it`) and `tests/adopt.rs:475` (`why.contains("not
+    present at")`, got `no commit in bucket extras carries aichat 0.30.0`).
+  - Revert the fetch loop to a bare `continue` → `tests/update.rs:131`
+    (`assert_eq!(absent.len(), 1)`, got 0: the only warning was the offline one).
+
+  This also closes two items the ledger filed as coverage gaps — Task 6 item 2
+  and Task 9's no-`.git` guard. Neither was a missing test; both were this
+  defect.
+
+- **A carried-forward pin could block the whole write, and the advice was the
+  command that had just failed.** `lock::save` runs `lock_coherence_guard` over
+  the entire new lock, and `resolve_into_lock` inserts pins `update` never
+  produced: a package outside a named scope keeps its old pin, a failed
+  re-resolve keeps its old pin, and a named run re-inserts every no-longer-
+  declared entry. So one malformed entry anywhere made `lock::save` return
+  `Err`, `main.rs`'s `?` aborted, and every other package's resolution in the
+  run was discarded — under the message `refusing to write a pkg.lock that
+  dotpkg apply would reject: pkg.lock is not usable. Run \`dotpkg update\` to
+  rewrite it.`, printed by `dotpkg update`. For `dotpkg update <pkg>` it was
+  also unconditionally unhelpful: because of the carry-forward, a targeted run
+  cannot repair a bad entry elsewhere.
+
+  **The guard's placement is correct and stayed.** What changed is the message.
+  `apply::lock_coherence_guard` was split so the per-entry rules live in
+  `entry_coherence` with **no advice attached**, and `apply::incoherent_entries`
+  returns every rejected entry rather than stopping at the first — a guard's
+  product is "refuse or don't", but `update`'s failure message's product is
+  "which entries do I repair", and stopping at the first turns one repair into
+  N runs. `main.rs`'s `Update` arm now says outright that pkg.lock was **not**
+  written (the diff `render_update` already printed reads as an accomplished
+  fact), names the blocking entries, and gives advice that is not the command
+  the user is already running: delete the `[scoop.<name>]` block, or
+  `dotpkg update <name>` for it. A refusal exits 2 (nothing was touched); a
+  plain I/O failure from `lock::save` still exits 1, and the two are told apart
+  by whether `incoherent_entries` is empty.
+
+  Test: `tests/cli.rs`'s `a_carried_forward_entry_that_blocks_the_write_is_
+  named_and_the_advice_is_not_the_command_that_just_ran`, paired with the
+  existing `update_resolves_a_declared_package_and_exits_zero` — without that
+  positive sibling, an `update` that always refused to write would satisfy
+  every assertion. Negative control: revert to `dotpkg::lock::save(&u.lock,
+  &lock)?` → `tests/cli.rs:1167` (the exit-code assertion; exit 1 instead of 2,
+  with the circular `Run \`dotpkg update\` to rewrite it.` on stderr).
+
+- **`adopt`'s mid-run write failure said nothing about what it had written.**
+  It propagated with `?`, which skipped `render_adopt` entirely: the user saw
+  `cannot create ...\state.json.tmpNNN` and no line anywhere saying `pkg.lock`
+  and `pkg.toml` had already been rewritten. Closed: `write_in_order` returns
+  the prefix that really landed, `Outcome::partial_write` carries it out, and
+  `render_adopt` prints both lists — what changed on disk and what did not,
+  computed as a complement rather than phrased as "and the rest". `main.rs`
+  exits 1 (not 2: files changed, so "refused, and nothing was touched" would be
+  a lie). `run`'s doc comment, which said "across packages a refusal is
+  reported and the rest proceed", now distinguishes a refusal from a write
+  failure — the latter is not a refusal and does stop the rest.
+
+  Tests: `tests/adopt.rs`'s `a_failed_last_write_leaves_a_prefix_that_plan_
+  does_nothing_about` (extended: it used to assert only `result.is_err()`),
+  `src/render.rs`'s `a_partial_write_names_the_files_that_changed_and_the_
+  files_that_did_not` with an absence counterweight, and the two
+  `write_in_order` seam tests, which now assert the prefix as well as the
+  order. Negative controls: propagate with `?` again →
+  `tests/adopt.rs:613` (the `expect("a partial write is reported through the
+  outcome, not through \`?\`")`); delete the `partial_write` block from
+  `render_adopt` → `src/render.rs:1261` (`text.contains("changed on disk:
+  pkg.lock, pkg.toml")`) and `tests/adopt.rs:635` (`the report must name what
+  really changed on disk`).
+
+- **`adopt` turned an unreadable installed manifest into an empty one.**
+  `std::fs::read(...).unwrap_or_default()` meant the content loop could not
+  match, the version loop answered, and the user was told `matched by version
+  only -- the installed manifest differs` — false, because the manifest was
+  never compared. Now a per-package `Err` naming the path. **No test**: the
+  only way in is a TOCTOU window between `scan`'s read and `adopt_one`'s read
+  of the same file, and it cannot be opened deterministically from outside
+  `adopt::run`. Recorded rather than papered over.
+
+- **The lock recorded a bucket's display spelling while `choose_bucket` opened
+  its folded key.** `Scoop::stage` opens what the lock says verbatim, so
+  `buckets = ["Extras"]` resolved during `update` and failed at `apply` on any
+  case-sensitive filesystem. Windows is case-insensitive so the real target was
+  unaffected. Both `update` and `adopt` now record `bucket_name.key()`.
+  **Chosen over folding inside `stage`** because the lock should record the
+  directory that was actually opened and read — the display spelling names
+  nothing that was verified — and because folding in `stage` would make it
+  accept a bucket spelling that never existed on disk, in a committed file
+  whose diff people read.
+
+- Three comment/assertion repairs: `src/render.rs`'s pointer at
+  `an_ambiguous_bucket_keeps_the_old_pin_and_names_both_candidates`, renamed on
+  this branch (fixed to the current name); `ensure_plain_component`'s doc,
+  which said "composes three of them" while listing four components (now says
+  four, and names `ensure_commit_hash` as what covers `<commit>`); and
+  `tests/cli.rs`'s `lock.contains("0.74.1") || lock.contains("1.0.0")`, whose
+  first disjunct could never fire because the fixture only ever commits
+  `1.0.0` (dropped).
+
 **Already closed during the build, recorded here so nobody re-opens them:**
 `Change::Kept`'s doc comment now describes both shapes (Task 9's fix changed
 `version` to `Option<String>` and documented why an empty-string sentinel was
@@ -737,21 +889,22 @@ Accepted, with reasons:
   real scoop or winget package identifiers.
 - **No committed test for `render()`'s no-panic on a `Pin` of the wrong variant
   in the wrong map.** Guaranteed only by the let-else pattern.
-- **The three Task 6 coverage gaps that remain**: a lock or opt naming a bucket
-  `pkg.toml` does not declare (`NotFound { searched: [stated] }`) has no test; a
-  declared bucket without `.git` being skipped has no test; and — the one that
-  matters most — **no test proves the lock beats a PRESENT, CONFLICTING opt**.
-  Every lock test runs with no `[scoop.opts]` at all, so it proves the lock works
-  *alone*, not that it *wins*. That is the precedence claim's core and it is
-  still inspection-only. `choose_bucket`'s mutants all died, so nothing here is
-  currently wrong — but the claim in the doc comment is stronger than the
-  evidence. **Recommended for Phase 4**, since winget will add a second consumer
-  of the same precedence rule.
+- **One of the three Task 6 coverage gaps remains**: **no test proves the lock
+  beats a PRESENT, CONFLICTING opt**. Every lock test runs with no
+  `[scoop.opts]` at all, so it proves the lock works *alone*, not that it
+  *wins*. That is the precedence claim's core and it is still inspection-only.
+  `choose_bucket`'s mutants all died, so nothing here is currently wrong — but
+  the claim in the doc comment is stronger than the evidence. **Recommended for
+  Phase 4**, since winget will add a second consumer of the same precedence
+  rule.
+
+  The other two items filed here — a lock or opt naming a bucket `pkg.toml`
+  does not declare, and a declared bucket without `.git` being skipped — were
+  not coverage gaps at all. See the closed entry below: the second of them was
+  a defect, and the first is now tested alongside its fix.
 - **The no-`.git` fetch-loop guard (`src/update.rs:238-240`) has no direct
-  test.** Its mutant did not survive, so it is covered in effect; the
-  closely-related `clone_missing_buckets` `.git` guard in `backend::scoop` did
-  survive and is listed above. **The winget warning is now closed** — its mutant
-  did survive, which is what found it.
+  test.** Also not a coverage gap: the guard was silent, and that was the
+  defect. See the closed entry below.
 
 ## What the dogfood added
 
@@ -814,7 +967,20 @@ history**, so `adopt`'s refusal had to be constructed.
 7. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.
 8. **`State::names` has no callers.** Give it one or delete it.
-9. **`--state` relocates `state.json` but not the staging root**, so
+9. **`src/adopt.rs:63`: on a `Content` match whose blob has no parseable
+   `version`, `Found.version` falls back to the caller's string.** If the blob
+   has no version, `Found` cannot honestly claim one — the value it reports
+   would then describe the *installed* manifest rather than the commit it just
+   pinned, and `stage_text` (which compares the lock's version against the blob
+   at that commit) would reject the resulting pin at `apply` time. Unreachable
+   through `adopt::run`: a manifest with no `version` never enters
+   `scan.installed` (`Scoop::scan` warns and skips it), so the caller's string
+   is always a version that came from a manifest that had one. A seam-level
+   wart rather than a live bug — `resolve_installed` is public and the fallback
+   is reachable by calling it directly. Left as found, by the final review's
+   own instruction, and recorded so the shape is visible if Phase 4 gives
+   `resolve_installed` a second caller.
+10. **`--state` relocates `state.json` but not the staging root**, so
    `apply --prepare --state <elsewhere>` still writes
    `%LOCALAPPDATA%\dotpkg\manifests`. Deliberate — `default_staging_root`'s
    doc comment gives the reason — but "point `--state` somewhere else and
@@ -826,7 +992,8 @@ which was unprotected on Windows and is now a compile error. Recorded here
 because the previous draft of this file listed it as the highest-value open
 item, and it should be visible that it moved rather than vanished.
 
-**Also closed, so not carried:** the item formerly numbered 9 here — `update`
+**Also closed, so not carried:** an item an earlier draft of this list carried
+at number 9, before the final review's fix wave renumbered it away — `update`
 printing `pkg.lock is already current -- not rewritten.` when there was no
 `pkg.lock` at all and the only declared package could not be resolved.
 Measured by the dogfood on a14. `render_update` now prints that line only when

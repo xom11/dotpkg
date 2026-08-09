@@ -434,7 +434,9 @@ impl Scoop {
                 &bucket_dir,
                 &["cat-file", "-e", &format!("{commit}^{{commit}}")]
             ),
-            "{app}: commit {commit} is not in bucket {bucket:?}"
+            "{app}: commit {commit} is not in bucket {bucket:?}. \
+             Run `git -C {} fetch` if the commit was made on another machine.",
+            bucket_dir.display()
         );
 
         // git object paths are case-sensitive; Name is not. Try what the user

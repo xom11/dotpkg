@@ -131,6 +131,38 @@ fn a_commit_the_bucket_does_not_have_fails_and_stages_nothing() {
 }
 
 #[test]
+fn a_commit_the_bucket_does_not_have_names_the_fetch_that_would_get_it() {
+    // A lock committed on another machine names a commit this clone has never
+    // fetched. Naming a cause without the command that fixes it is half a
+    // message -- the same rule `tests/adopt.rs` already applies to a shallow
+    // clone (`a_refusal_names_shallowness_when_that_is_the_likely_cause`).
+    //
+    // The brief for this test named helpers `a_bucket_without_the_pinned_commit`
+    // and `stage_one_pinned_at` as "existing". Neither exists in this file --
+    // checked with `grep -n` before writing this test. Built from the same
+    // `bucket_repo` / `pin` / `Scoop::new` fixture every other test in this
+    // file uses instead.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
+    let bucket_dir = root.path().join("buckets").join("main");
+
+    let r = Scoop::new(root.path().to_path_buf()).stage(
+        stage_dir.path(),
+        &Name::new("tool"),
+        &pin("main", &"0".repeat(40), "1.0.0"),
+    );
+    assert!(r.is_err(), "an absent commit must refuse");
+    let msg = format!("{:#}", r.unwrap_err());
+    assert!(msg.contains("git -C"), "must name the command: {msg}");
+    assert!(
+        msg.contains(&bucket_dir.display().to_string()),
+        "and the directory: {msg}"
+    );
+    assert!(msg.contains("fetch"), "and what to run: {msg}");
+}
+
+#[test]
 fn a_lock_naming_a_branch_instead_of_a_hash_is_refused_and_stages_nothing() {
     // Measured against real git: `cat-file -e main^{commit}` accepts `main`,
     // `HEAD`, `@` and `refs/heads/main` -- it resolves any revision, not only

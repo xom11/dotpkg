@@ -1273,7 +1273,12 @@ fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutat
     let fake = Fake::honest(&t);
     let mut state = State::default();
 
-    let err = execute(
+    // `is_err` first, so the two counterweights below are reachable under the
+    // mutation they exist for: with `.unwrap_err()` here, deleting the
+    // `root_looks_like_scoop` gate made this go red at the unwrap and neither
+    // "the mutator was never called" nor "nothing was claimed" was ever
+    // checked -- which is precisely what this test is for.
+    let r = execute(
         t.root(),
         vec![Step::Install {
             app: Name::new("fzf"),
@@ -1284,16 +1289,20 @@ fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutat
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
-    )
-    .unwrap_err();
+    );
 
-    assert!(err.contains("apps directory"), "{err}");
+    assert!(
+        r.is_err(),
+        "a root that does not look like scoop must be refused: {r:?}"
+    );
     assert_eq!(
         fake.calls(),
         Vec::<String>::new(),
         "the mutator must never be called against a root that does not look like scoop"
     );
     assert_eq!(state.owned_count(SCOOP), 0);
+    let err = r.unwrap_err();
+    assert!(err.contains("apps directory"), "{err}");
 }
 
 // -- Important 6: a recovery-write failure is recorded, not just printed ---

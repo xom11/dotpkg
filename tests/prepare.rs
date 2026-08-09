@@ -446,18 +446,15 @@ fn a_version_that_climbs_out_of_the_staging_root_fails_and_stages_nothing() {
     let outside = home.path().join("escape");
     let shas = bucket_repo(root.path(), "main", "tool.json", &["../../escape"]);
 
-    let err = Scoop::new(root.path().to_path_buf())
-        .stage(
-            &staging_root,
-            &Name::new("tool"),
-            &pin("main", &shas[0], "../../escape"),
-        )
-        .unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("path component"),
-        "refuse it as a path, not incidentally as something else: {msg}"
+    // `is_err` first: with `.unwrap_err()` here, a guard deletion made this
+    // test go red at the unwrap rather than at either assertion below, so the
+    // "nothing was written" counterweight was never actually reached.
+    let r = Scoop::new(root.path().to_path_buf()).stage(
+        &staging_root,
+        &Name::new("tool"),
+        &pin("main", &shas[0], "../../escape"),
     );
+    assert!(r.is_err(), "an escaping version must be refused: {r:?}");
     assert_eq!(
         fs::read_dir(&staging_root).unwrap().count(),
         0,
@@ -467,6 +464,11 @@ fn a_version_that_climbs_out_of_the_staging_root_fails_and_stages_nothing() {
         !outside.exists(),
         "the write escaped the staging root: {}",
         outside.display()
+    );
+    let msg = format!("{:#}", r.unwrap_err());
+    assert!(
+        msg.contains("path component"),
+        "refuse it as a path, not incidentally as something else: {msg}"
     );
 }
 
@@ -483,14 +485,12 @@ fn an_absolute_version_cannot_redirect_the_write_off_the_staging_root() {
     let version = absolute.to_string_lossy().to_string();
     let shas = bucket_repo(root.path(), "main", "tool.json", &[&version]);
 
-    let err = Scoop::new(root.path().to_path_buf())
-        .stage(
-            stage_dir.path(),
-            &Name::new("tool"),
-            &pin("main", &shas[0], &version),
-        )
-        .unwrap_err();
-    assert!(format!("{err:#}").contains("path component"), "got {err:#}");
+    let r = Scoop::new(root.path().to_path_buf()).stage(
+        stage_dir.path(),
+        &Name::new("tool"),
+        &pin("main", &shas[0], &version),
+    );
+    assert!(r.is_err(), "an absolute version must be refused: {r:?}");
     assert_eq!(
         fs::read_dir(stage_dir.path()).unwrap().count(),
         0,
@@ -501,6 +501,8 @@ fn an_absolute_version_cannot_redirect_the_write_off_the_staging_root() {
         "the manifest was written outside the staging root: {}",
         absolute.display()
     );
+    let err = r.unwrap_err();
+    assert!(format!("{err:#}").contains("path component"), "got {err:#}");
 }
 
 #[test]
@@ -520,19 +522,21 @@ fn a_bucket_name_that_is_a_path_cannot_point_git_at_another_repository() {
         .to_string_lossy()
         .to_string();
 
-    let err = Scoop::new(root.path().to_path_buf())
-        .stage(
-            stage_dir.path(),
-            &Name::new("tool"),
-            &pin(&absolute_bucket, &shas[0], "1.0.0"),
-        )
-        .unwrap_err();
-    let msg = format!("{err:#}");
+    let r = Scoop::new(root.path().to_path_buf()).stage(
+        stage_dir.path(),
+        &Name::new("tool"),
+        &pin(&absolute_bucket, &shas[0], "1.0.0"),
+    );
+    assert!(
+        r.is_err(),
+        "an absolute bucket must be refused, not staged from: {r:?}"
+    );
+    assert_eq!(fs::read_dir(stage_dir.path()).unwrap().count(), 0);
+    let msg = format!("{:#}", r.unwrap_err());
     assert!(
         msg.contains("path component"),
         "an absolute bucket must be refused as a path, got: {msg}"
     );
-    assert_eq!(fs::read_dir(stage_dir.path()).unwrap().count(), 0);
 }
 
 #[test]

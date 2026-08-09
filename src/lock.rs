@@ -358,6 +358,68 @@ version = "0.26.1"
     }
 
     #[test]
+    fn a_lock_that_exists_but_cannot_be_read_is_an_error_not_an_empty_lock() {
+        // The counterweight to the test above, and the reason the guard names
+        // `NotFound` specifically rather than swallowing every read error.
+        // Reading as empty would make `update` re-resolve and rewrite every
+        // pin, and make `apply` call every declared package NotLocked -- on a
+        // machine whose real pins are sitting right there, merely unreadable.
+        // Same rule `State::load_or_empty` follows, and for the same reason.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pkg.lock");
+        std::fs::create_dir(&path).unwrap();
+
+        let r = load_or_empty(&path);
+        assert!(
+            r.is_err(),
+            "an unreadable pkg.lock must not be reported as an empty one: {r:?}"
+        );
+        assert!(
+            format!("{:#}", r.unwrap_err()).contains("pkg.lock"),
+            "name the file that could not be read"
+        );
+    }
+
+    #[test]
+    fn a_save_creates_the_directory_the_lock_was_asked_to_live_in() {
+        // `--lock` may name a path whose parent does not exist yet. Without
+        // the create_dir_all, `File::create` fails and `update` loses a run's
+        // worth of resolution for a directory it could have made.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deeper").join("pkg.lock");
+
+        save(&Lock::default(), &path).unwrap();
+
+        assert!(path.exists(), "the parent directory must have been created");
+        assert_eq!(load_or_empty(&path).unwrap(), Lock::default());
+    }
+
+    #[test]
+    fn a_name_with_a_hyphen_or_an_underscore_is_still_rendered_as_a_bare_key() {
+        // `oh-my-posh` and `win32-openssh` are real scoop packages. A quoted
+        // key parses too, so nothing would break -- but the committed file's
+        // documented shape is the bare key, and this is the only thing that
+        // holds the `-` and `_` half of that predicate. `Git.Git` covers the
+        // other half (it MUST be quoted) in the round-trip test above.
+        let mut lock = Lock::default();
+        for n in ["oh-my-posh", "some_tool"] {
+            lock.scoop.insert(
+                Name::new(n),
+                Pin::ScoopCommit {
+                    bucket: "main".into(),
+                    commit: "a".repeat(40),
+                    version: "1.0.0".into(),
+                },
+            );
+        }
+
+        let text = render(&lock);
+        assert!(text.contains("[scoop.oh-my-posh]"), "{text}");
+        assert!(text.contains("[scoop.some_tool]"), "{text}");
+        assert_eq!(parse(&text).unwrap(), lock, "and it still round-trips");
+    }
+
+    #[test]
     fn a_written_lock_reads_back_as_the_same_lock() {
         let mut lock = Lock::default();
         lock.scoop.insert(
@@ -401,12 +463,23 @@ version = "0.26.1"
             },
         );
 
-        let err = save(&lock, &path).unwrap_err();
-        assert!(format!("{err:#}").contains("hex"), "got {err:#}");
+        // Sequenced so that BOTH named assertions below are reachable under
+        // the mutation they exist for. Written as `save(..).unwrap_err()`,
+        // deleting the guard call from `save` made this test go red at
+        // "called `Result::unwrap_err()` on an `Ok` value" -- before either
+        // assertion ran -- so a reader was told the wrong thing about what
+        // protects this property.
+        let r = save(&lock, &path);
+        assert!(
+            r.is_err(),
+            "a lock the reader's guard rejects must not be written: {r:?}"
+        );
         assert!(
             !path.exists(),
             "nothing may be written for a lock that fails the guard"
         );
+        let err = r.unwrap_err();
+        assert!(format!("{err:#}").contains("hex"), "got {err:#}");
     }
 
     #[test]

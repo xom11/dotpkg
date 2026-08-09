@@ -191,6 +191,80 @@ fn a_real_commit_hash_is_still_accepted() {
 }
 
 #[test]
+fn two_commits_of_one_version_stage_to_different_paths() {
+    // install.json records the staged path verbatim -- measured 2026-08-08,
+    // `{"architecture":"arm64","url":"<the staging path>"}`. Keyed on app and
+    // version alone, re-pinning the same version to a different commit
+    // overwrites the file an installed app is still pointing at, and the app
+    // silently starts describing a manifest it was not installed from.
+    //
+    // Phase 3 makes that re-pin routine: a bucket amending a url or hash
+    // without bumping the version is exactly what `update`'s `=` line reports.
+    let root = tempfile::tempdir().unwrap();
+    let stage_dir = tempfile::tempdir().unwrap();
+    let dir = root.path().join("buckets").join("main");
+    fs::create_dir_all(dir.join("bucket")).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["config", "user.email", "t@example.invalid"]);
+    git(&dir, &["config", "user.name", "t"]);
+
+    let mut shas = Vec::new();
+    for url in ["good", "amended"] {
+        fs::write(
+            dir.join("bucket").join("tool.json"),
+            format!(r#"{{"version":"1.0.0","url":"https://example.invalid/{url}.zip"}}"#),
+        )
+        .unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", url]);
+        shas.push(git(&dir, &["rev-parse", "HEAD"]).trim().to_string());
+    }
+
+    let scoop = Scoop::new(root.path().to_path_buf());
+    let first = scoop
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &shas[0], "1.0.0"),
+        )
+        .unwrap();
+    let second = scoop
+        .stage(
+            stage_dir.path(),
+            &Name::new("tool"),
+            &pin("main", &shas[1], "1.0.0"),
+        )
+        .unwrap();
+
+    // Ordered so the CONTENT assertion is the one that fires when the fix is
+    // reverted, not the path-inequality assertion below it. With the commit
+    // dropped from the path, `first` and `second` are the same PathBuf before
+    // either `stage()` call returns, so `assert_ne!` would trip first and the
+    // test would never reach the assertion that names the actual defect: the
+    // second staging silently overwriting the file the first one wrote. Both
+    // `first.exists()` and `assert_ne!` stay true even under the reverted
+    // code (the shared path still exists; the two PathBuf values are compared
+    // only here, further down), so they cannot mask this one.
+    assert!(
+        first.exists(),
+        "the first staged manifest must survive the second staging"
+    );
+    assert!(
+        fs::read_to_string(&first).unwrap().contains("good"),
+        "the first path must still hold the FIRST commit's manifest"
+    );
+    assert!(fs::read_to_string(&second).unwrap().contains("amended"));
+    assert_ne!(
+        first, second,
+        "one version at two commits must not share a path"
+    );
+
+    // The filename is still what scoop takes the app name from.
+    assert_eq!(first.file_name().unwrap(), "tool.json");
+    assert_eq!(second.file_name().unwrap(), "tool.json");
+}
+
+#[test]
 fn a_manifest_absent_at_the_pinned_commit_does_not_fall_back_to_the_working_tree() {
     // The commit here IS real -- `cat-file -e` passes -- but the app's
     // manifest was not added until a LATER commit than the one the lock

@@ -308,7 +308,7 @@ impl Backend for Scoop {
 /// Refuse a string that is about to become one path component.
 ///
 /// `stage()` composes three of them into filesystem paths: `$SCOOP/buckets/
-/// <bucket>` and `<staging_root>/<app>/<version>`. All three arrive from
+/// <bucket>` and `<staging_root>/<app>/<version>/<commit>`. All three arrive from
 /// `pkg.lock`, and Phase 3's `update` fills that file in verbatim from a scoop
 /// bucket — an arbitrary third-party git repository. So these are hostile
 /// input in the ordinary case, not only under a hand-edited lock.
@@ -467,7 +467,12 @@ fn stage_text(
         got == version,
         "{app}: the lock says {version:?} but {in_repo} at {commit} is {got:?}"
     );
-    let dir = staging_root.join(app.key()).join(version);
+    // Keyed on the commit as well as the app and version. `install.json`
+    // records this path verbatim, so two commits carrying one version sharing
+    // a directory means the second staging silently rewrites the manifest the
+    // first install still points at. `ensure_commit_hash` has already run, so
+    // this component is 40 or 64 lowercase hex and needs no further check.
+    let dir = staging_root.join(app.key()).join(version).join(commit);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let out = dir.join(filename);
     std::fs::write(&out, text).with_context(|| format!("cannot write {}", out.display()))?;

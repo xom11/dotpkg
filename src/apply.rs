@@ -1085,7 +1085,7 @@ mod tests {
             Name::new("tool"),
             Pin::ScoopCommit {
                 bucket: "main".into(),
-                commit,
+                commit: commit.clone(),
                 version: "1.0.0".into(),
             },
         );
@@ -1121,6 +1121,7 @@ mod tests {
             .path()
             .join("tool")
             .join("1.0.0")
+            .join(&commit)
             .join("tool.json");
         assert!(
             staged.exists(),

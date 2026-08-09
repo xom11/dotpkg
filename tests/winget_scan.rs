@@ -1,10 +1,5 @@
-// `WingetRow` isn't named directly below (every test binds through
-// `parse_list`'s inferred return type) but is imported per the brief's
-// verbatim interface -- it documents which type these rows are, and Task 10
-// names it directly. Silenced rather than dropped so the import still says
-// that, and the global "warnings are findings" rule still holds.
-#[allow(unused_imports)]
-use dotpkg::backend::winget::{parse_list, WingetRow};
+use dotpkg::backend::winget::{parse_list, rows_to_scan, WingetRow};
+use dotpkg::model::Name;
 
 fn fixture(name: &str) -> String {
     // Rust does no newline translation, so this keeps the CRLF the fixture was
@@ -90,4 +85,96 @@ fn a_header_that_is_not_the_shape_this_parser_measured_is_refused() {
     // machine is what mass_prune_guard exists to catch far too late.
     let r = parse_list("Nom  Identifiant  Version\r\n----\r\nx  y  z\r\n");
     assert!(r.is_err(), "an unrecognised header must refuse, not guess");
+}
+
+// -- rows_to_scan ---------------------------------------------------------
+
+/// An ordinary, source-backed, single row for one id at one version.
+/// `rows_to_scan`'s duplicate/disagreement tests build their own multi-row
+/// cases on top of this; the sourceless and `"> "`-prefixed cases are
+/// exercised through real fixtures instead, because both of those are about
+/// what a real winget row looks like, not about grouping logic.
+fn row(id: &str, version: &str) -> WingetRow {
+    WingetRow {
+        name: id.to_string(),
+        id: id.to_string(),
+        version: version.to_string(),
+        available: None,
+        source: Some("winget".to_string()),
+    }
+}
+
+#[test]
+fn the_whole_captured_machine_splits_into_exactly_these_counts() {
+    // Computed from tests/fixtures/winget/list-full.txt, not estimated.
+    // 141 rows -> 126 distinct ids -> 89 opaque + 37 installed.
+    //
+    //   84  ids with no Source        -- installed, comparable against nothing
+    //    2  ids whose version is "> " -- Microsoft.VisualStudio.2022.BuildTools,
+    //                                    Microsoft.WindowsAppRuntime.1.8
+    //    3  ids whose duplicate rows disagree on a version --
+    //                                    7zip.7zip, Microsoft.UI.Xaml.2.8,
+    //                                    Microsoft.WindowsAppRuntime.2
+    //   ---
+    //   89  opaque        37 installed, 4 of them collapsed from duplicate rows
+    //
+    // 89 + 37 = 126 is the cross-check. If these numbers disagree with the
+    // fixture, THE FIXTURE IS RIGHT and this comment is wrong: recompute,
+    // fix the numbers, and say so in the report.
+    let scan = rows_to_scan(parse_list(&fixture("list-full.txt")).unwrap());
+    assert_eq!(scan.opaque.len(), 89);
+    assert_eq!(scan.installed.len(), 37);
+    assert_eq!(scan.opaque.len() + scan.installed.len(), 126, "every id is one or the other");
+    assert!(scan.installed.iter().all(|i| i.backend == dotpkg::model::WINGET));
+    assert!(
+        !scan.installed.iter().any(|i| i.name.key().starts_with("msix\\")
+                                    || i.name.key().starts_with("arp\\")),
+        "no MSIX or ARP row may reach `installed`"
+    );
+}
+
+#[test]
+fn duplicate_ids_that_agree_on_a_version_collapse_to_one_entry_and_warn() {
+    let rows = vec![row("WindowsAppRuntime.1.7", "1.7.9"), row("WindowsAppRuntime.1.7", "1.7.9")];
+    let scan = rows_to_scan(rows);
+    assert_eq!(scan.installed.len(), 1, "one package is one entry");
+    assert_eq!(scan.installed[0].version, "1.7.9");
+    assert_eq!(scan.warnings.len(), 1, "winget's export collapses these silently; dotpkg may not");
+    assert!(scan.warnings[0].contains("WindowsAppRuntime.1.7"));
+}
+
+#[test]
+fn duplicate_ids_that_disagree_on_a_version_are_opaque_rather_than_guessed() {
+    // 7zip.7zip is installed twice, at 26.01.00.0 and 26.02. Two versions of
+    // one package is a state dotpkg has no vocabulary for; picking one would
+    // be inventing a fact. winget's own export picks 26.02 and says nothing.
+    let scan = rows_to_scan(vec![row("7zip.7zip", "26.01.00.0"), row("7zip.7zip", "26.02")]);
+    assert!(scan.installed.is_empty(), "got {:?}", scan.installed);
+    assert_eq!(scan.opaque, vec![Name::new("7zip.7zip")]);
+    assert!(scan.warnings[0].contains("26.01.00.0") && scan.warnings[0].contains("26.02"),
+            "both versions must be named: {:?}", scan.warnings);
+}
+
+#[test]
+fn a_greater_than_version_is_opaque_because_it_is_not_a_version() {
+    // Left in `installed`, `cur.version == want` is false forever and
+    // is_older() picks Downgrade, so status prints a false down-arrow on
+    // every run and apply --yes acts on it.
+    let scan = rows_to_scan(parse_list(&fixture("list-greater-prefix.txt")).unwrap());
+    assert!(scan.installed.is_empty());
+    assert_eq!(scan.opaque, vec![Name::new("Microsoft.VisualStudio.2022.BuildTools")]);
+}
+
+#[test]
+fn an_ordinary_single_row_becomes_an_ordinary_installed_entry() {
+    // The positive sibling. Without it, a rows_to_scan that marked EVERYTHING
+    // opaque would satisfy all four assertions above.
+    let scan = rows_to_scan(parse_list(&fixture("list-single.txt")).unwrap());
+    assert!(scan.opaque.is_empty());
+    assert_eq!(scan.installed.len(), 1);
+    assert_eq!(scan.installed[0].name, Name::new("ajeetdsouza.zoxide"));
+    assert_eq!(scan.installed[0].version, "0.10.0");
+    assert_eq!(scan.installed[0].arch, None, "winget does not expose an architecture");
+    assert_eq!(scan.installed[0].bucket, None);
+    assert!(scan.installed[0].bins.is_empty(), "and names no executables");
 }

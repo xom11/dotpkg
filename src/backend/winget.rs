@@ -1,4 +1,7 @@
+use super::Scan;
+use crate::model::{Installed, Name, WINGET};
 use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 
 /// One row of `winget list`'s fixed-width text table.
 ///
@@ -169,4 +172,113 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
     }
 
     Ok(rows)
+}
+
+/// Turn `parse_list`'s rows into a `Scan`: one fact per id, or an admission
+/// that no fact could be established.
+///
+/// Every row reaching this function already has a non-empty `Name`, `Id` and
+/// `Version` -- `parse_list` stops the table the moment one of those three
+/// goes missing (see its own doc comment). That is correct against all 15
+/// captured fixtures, but it means a genuine row with an empty `Id` or
+/// `Version` would already be gone by the time it could get here, silently
+/// truncating the rest of the table rather than surfacing as one bad row.
+/// Nothing below this line can detect that; it is `parse_list`'s assumption,
+/// recorded here because this is where the consequence would show up.
+///
+/// Rows are grouped by `Name` first, because one id can appear more than
+/// once -- measured on `list-full.txt`, two, three or even four times for
+/// one id. A group becomes `opaque` instead of an `Installed` for any of
+/// three reasons, checked in this order:
+///
+///   1. **any row has no `Source`** -- measured 84 of 141 rows on a14, every
+///      `MSIX\...` and `ARP\...` entry. Installed, but comparable against
+///      nothing: there is no index to check it against.
+///   2. **any row's version starts with `"> "`** -- measured on two ids
+///      (`Microsoft.VisualStudio.2022.BuildTools`,
+///      `Microsoft.WindowsAppRuntime.1.8`). This is winget saying *at
+///      least*, for an install whose exact version it could not determine --
+///      not "several versions installed": `list -e --id` returns exactly one
+///      row for each. Left in `installed`, `cur.version == want` would be
+///      `"> 17.14.37" == "17.14.37"`, false forever, and `plan::is_older`
+///      splits on non-digits so both sides reduce to the same digit sequence
+///      and the remaining arm is `Downgrade` -- a false `↓` on every `status`
+///      run, and something `apply --yes` would act on.
+///   3. **the group's rows disagree on version** -- measured on three ids
+///      (`7zip.7zip`, `Microsoft.UI.Xaml.2.8`, `Microsoft.WindowsAppRuntime.2`).
+///      Two genuinely different installed versions of one id is a state this
+///      crate has no vocabulary for; picking one would be inventing a fact.
+///      `winget export` does exactly that -- silently keeping the greatest --
+///      and `PROVENANCE.md` is where that was measured and rejected as this
+///      crate's own behaviour.
+///
+/// A group that clears all three becomes one `Installed`. If it had more
+/// than one row -- measured on four ids, all agreeing on version -- a
+/// warning records the collapse, because staying silent about it (as
+/// `winget export` does for every duplicate, agreeing or not) is the exact
+/// behaviour reason 3 above declines to copy.
+///
+/// `arch` and `bucket` are always `None`: winget exposes neither. `bins` is
+/// always empty -- there is no winget-side manifest to read executable names
+/// from -- and that has a consequence: `Running::covers` (`src/model.rs`)
+/// checks three signals (package directory, process name, declared
+/// executables), and with `bins` empty only the first two can ever fire. The
+/// running-process guard is therefore weaker for a winget package than for a
+/// scoop one. Nothing depends on that today because `plan()` does not yet
+/// act on winget packages; recorded here for whoever adds that.
+pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
+    let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
+    for row in rows {
+        let name = Name::new(row.id.clone());
+        groups.entry(name).or_default().push(row);
+    }
+
+    let mut scan = Scan::default();
+    for (name, group) in groups {
+        if group
+            .iter()
+            .any(|r| r.source.is_none() || r.version.starts_with("> "))
+        {
+            scan.opaque.push(name);
+            continue;
+        }
+
+        let mut versions: Vec<&str> = Vec::new();
+        for r in &group {
+            if !versions.contains(&r.version.as_str()) {
+                versions.push(r.version.as_str());
+            }
+        }
+
+        if versions.len() > 1 {
+            scan.warnings.push(format!(
+                "{name}: installed at {} disagreeing versions ({}) -- refusing to guess which \
+                 one is current",
+                versions.len(),
+                versions.join(", ")
+            ));
+            scan.opaque.push(name);
+            continue;
+        }
+
+        if group.len() > 1 {
+            scan.warnings.push(format!(
+                "{name}: {} rows from `winget list` all named version {} -- collapsed to one \
+                 entry (winget's own export does this silently; dotpkg records it instead)",
+                group.len(),
+                versions[0]
+            ));
+        }
+
+        scan.installed.push(Installed {
+            backend: WINGET.to_string(),
+            name,
+            version: versions[0].to_string(),
+            arch: None,
+            bucket: None,
+            bins: Vec::new(),
+        });
+    }
+
+    scan
 }

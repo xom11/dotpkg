@@ -9,4 +9,5 @@ pub mod plan;
 pub mod render;
 pub mod state;
 pub mod sys;
+pub mod update;
 pub mod verify;

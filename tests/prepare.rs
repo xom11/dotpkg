@@ -603,5 +603,20 @@ fn the_scoop_entry_point_is_the_cmd_shim() {
     let root = tempfile::tempdir().unwrap();
     let exe = Scoop::new(root.path().to_path_buf()).scoop_exe();
     assert_eq!(exe.file_name().unwrap(), "scoop.cmd");
-    assert!(exe.starts_with(std::fs::canonicalize(root.path()).unwrap()));
+    assert_eq!(exe.parent().unwrap().file_name().unwrap(), "shims");
+
+    // Both sides are canonicalised before comparing, and the comparison is on
+    // the resolved directory rather than on a path prefix. `Scoop::new`
+    // deliberately strips Windows' `\\?\` extended-length prefix -- that is
+    // what `strip_extended_prefix` exists for -- so the stored root is NOT
+    // what `fs::canonicalize` returns on Windows. The old
+    // `exe.starts_with(canonicalize(root))` therefore passed on macOS and
+    // Linux and failed on Windows, the one platform this tool runs on. Found
+    // by building the branch on the dogfood machine.
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(exe.parent().unwrap().parent().unwrap()).unwrap(),
+        std::fs::canonicalize(root.path()).unwrap(),
+        "the shim must sit directly under the scoop root"
+    );
 }

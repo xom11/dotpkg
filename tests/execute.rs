@@ -717,6 +717,12 @@ fn exit_code_is_0_for_clean_1_for_every_failure_shape_and_2_for_refused() {
     );
 }
 
+// `debug_assert!` is compiled out with `debug_assertions`, so under
+// `cargo test --release` this test can never panic and `should_panic` fails
+// it. CI runs a debug profile and stayed green; building the branch on the
+// dogfood machine with `--release` is what surfaced it. Gated rather than
+// rewritten, because the assertion it covers is itself debug-only.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "cannot also have changed something")]
 fn exit_code_asserts_a_refused_run_changed_nothing() {

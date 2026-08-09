@@ -303,7 +303,7 @@ fn a_nonzero_code_is_never_lowered_or_raised() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test --bin dotpkg floor_exit_code`
+Run: `cargo test --no-fail-fast --bin dotpkg`
 Expected: FAIL, `cannot find function 'floor_exit_code'`.
 
 - [ ] **Step 3: Extract the function verbatim from the call site**
@@ -339,7 +339,7 @@ is the positive sibling proving the extraction changed no behaviour.
 - [ ] **Step 5: Negative control**
 
 Hand-apply `&&` → `||` in `floor_exit_code`, run
-`cargo test --bin dotpkg floor_exit_code`, and **record which assertion fired**
+`cargo test --no-fail-fast --bin dotpkg`, and **record which assertion fired**
 (expect `a_successful_run_with_nothing_outstanding_keeps_its_own_exit_code`,
 `left: 1, right: 0`). Restore.
 
@@ -702,8 +702,11 @@ fn a_config_that_declares_packages_for_every_owned_backend_is_allowed() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test --lib mass_prune`
+Run: `cargo test --no-fail-fast --lib`
 Expected: the first two FAIL (`Ok` where `Err` was required), the third passes.
+**Unfiltered on purpose** — no substring is common to all three test names, and
+a filter that matches none prints `ok. 0 passed`, which reads as success.
+Confirm all three names appear in the output.
 
 - [ ] **Step 3: Replace the `return` with a `continue`**
 

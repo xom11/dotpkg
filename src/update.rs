@@ -300,6 +300,9 @@ pub fn run(
             } => Resolution::Failed {
                 why: bucket::not_cloned_why("it", &bucket_name, &dir),
             },
+            BucketChoice::Undeclared { name: bucket_name } => Resolution::Failed {
+                why: bucket::not_declared_why("it", &bucket_name),
+            },
             BucketChoice::NotFound { searched, missing } => Resolution::Failed {
                 why: bucket::not_found_why("it", &searched, &missing),
             },

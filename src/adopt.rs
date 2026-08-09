@@ -336,6 +336,9 @@ fn adopt_one(
         bucket::BucketChoice::NotCloned { name: b, dir } => {
             return Err(bucket::not_cloned_why(&name.to_string(), &b, &dir));
         }
+        bucket::BucketChoice::Undeclared { name: b } => {
+            return Err(bucket::not_declared_why(&name.to_string(), &b));
+        }
         bucket::BucketChoice::NotFound { searched, missing } => {
             return Err(bucket::not_found_why(
                 &name.to_string(),

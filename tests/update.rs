@@ -252,6 +252,59 @@ fn a_locked_bucket_that_is_not_on_this_machine_is_not_reported_as_a_missing_mani
 }
 
 #[test]
+fn a_locked_bucket_that_pkg_toml_does_not_declare_is_named_and_told_to_declare_it() {
+    // `update`'s arm of the `Undeclared` branch, end to end. `extras` is
+    // cloned on disk and really does carry `tool` -- but `pkg.toml` only
+    // declares `main`. Before the fix this printed `no declared bucket has it
+    // (searched: extras)`, false twice over: `extras` was neither declared
+    // nor searched.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "other.json", "1.0.0", "v100");
+    let extras = f.bucket("extras");
+    f.commit(&extras, "tool.json", "1.0.0", "v100");
+
+    let mut old = Lock::default();
+    old.scoop.insert(
+        Name::new("tool"),
+        Pin::ScoopCommit {
+            bucket: "extras".into(),
+            commit: "a".repeat(40),
+            version: "0.9.0".into(),
+        },
+    );
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
+        &old,
+        &Scope::WholeRun,
+        true,
+    );
+    match &u.changes[0] {
+        Change::Kept { why, .. } => {
+            assert!(
+                !why.contains("searched"),
+                "an undeclared bucket was never searched, so nothing may claim it \
+                 was: {why}"
+            );
+            assert!(why.contains("extras"), "name the bucket: {why}");
+            assert!(
+                why.contains("does not declare"),
+                "say that it is not declared, not that it is absent from disk: {why}"
+            );
+            assert!(
+                why.contains("[scoop] buckets"),
+                "point at the fix, which is declaring it -- not \
+                 --clone-missing-buckets, which is for a bucket already \
+                 declared: {why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_bucket_with_no_upstream_warns_that_latest_is_only_as_current_as_the_clone() {
     // A locally-created bucket cannot be fetched. Resolving is still possible;
     // calling the answer "latest" without saying so is not.

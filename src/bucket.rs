@@ -427,6 +427,20 @@ pub enum BucketChoice {
     /// `NotFound` it read as `bucket <name> has no manifest for it` -- a flat
     /// lie about a bucket that has the manifest and simply is not cloned.
     NotCloned { name: Name, dir: std::path::PathBuf },
+    /// The bucket the lock or `[scoop.opts]` names is not declared in
+    /// `pkg.toml` **at all**.
+    ///
+    /// A third fact, distinct from both neighbours: `NotFound` means a search
+    /// over the declared buckets happened and came back empty; `NotCloned`
+    /// means a declared bucket is not on disk; this means the name was never
+    /// declared, so there was nothing to search and nothing to clone.
+    /// Reporting it as `NotFound { searched: vec![name] }` -- what this used
+    /// to do -- claims a search that never happened and calls an undeclared
+    /// bucket "searched", the same shape of false line `NotCloned` exists to
+    /// stop. `apply` already knows this state and says it correctly
+    /// (`src/apply.rs`'s `bucket_is_declared` check): "not declared in
+    /// pkg.toml -- add it to [scoop] buckets".
+    Undeclared { name: Name },
     /// The search ran and found nothing.
     ///
     /// `searched` is the buckets that were really opened and looked in;
@@ -497,6 +511,23 @@ pub fn not_cloned_why(subject: &str, name: &Name, dir: &Path) -> String {
     )
 }
 
+/// Why a bucket that was named rather than searched for could not be
+/// searched at all: it is not declared in `pkg.toml`, so there was no
+/// `buckets` entry to open in the first place.
+///
+/// Deliberately does not say *what* named it, for the same reason as
+/// `not_cloned_why`. Points at `[scoop] buckets`, not at
+/// `--clone-missing-buckets`: that flag clones a bucket `pkg.toml` already
+/// declares and that is merely absent from disk, which is a different fact
+/// from this one and the wrong fix for it. Shared by `update` and `adopt` for
+/// the same reason as `not_found_why` and `not_cloned_why`.
+pub fn not_declared_why(subject: &str, name: &Name) -> String {
+    format!(
+        "{subject} resolves to bucket {name}, which pkg.toml does not declare \
+         -- add it to [scoop] buckets."
+    )
+}
+
 /// Decide which declared bucket a package comes from.
 ///
 /// Precedence, strongest first: the existing lock entry (so `update`
@@ -538,10 +569,7 @@ pub fn choose_bucket(
     .next()
     {
         if !declared_names.contains(&stated) {
-            return BucketChoice::NotFound {
-                searched: vec![stated],
-                missing: Vec::new(),
-            };
+            return BucketChoice::Undeclared { name: stated };
         }
         // The same `.git` check the search loop below makes, which this branch
         // did not have. Without it an absent bucket is opened as if it were

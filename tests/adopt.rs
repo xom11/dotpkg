@@ -489,6 +489,59 @@ fn a_declared_bucket_that_is_not_on_this_machine_is_named_as_absent_rather_than_
 }
 
 #[test]
+fn install_json_naming_a_bucket_pkg_toml_does_not_declare_is_named_and_told_to_declare_it() {
+    // `adopt`'s arm of the `Undeclared` branch. `install.json`'s `bucket`
+    // hint names `extras`, which is cloned on disk but which pkg.toml does
+    // not declare. Before the fix this was `NotFound { searched:
+    // vec![extras] }`, rendered as "no declared bucket has aichat (searched:
+    // extras)" -- naming a bucket that was neither declared nor searched.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "other.json", "1.0.0", "v100");
+    let extras = f.bucket("extras");
+    f.commit(&extras, "aichat.json", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    std::fs::write(
+        &config_path,
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+    )
+    .unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(cur.join("manifest.json"), r#"{"version":"0.30.0"}"#).unwrap();
+    std::fs::write(cur.join("install.json"), r#"{"bucket":"extras"}"#).unwrap();
+
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
+    let out = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 0, "{out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
+    let (_, why) = &out.refused[0];
+    assert!(why.contains("extras"), "name the bucket: {why}");
+    assert!(
+        why.contains("does not declare"),
+        "say it is not declared, not that it is absent from disk or that a \
+         search found nothing: {why}"
+    );
+    assert!(
+        !why.contains("searched"),
+        "nothing was searched -- the bucket was never even declared: {why}"
+    );
+    assert!(why.contains("[scoop] buckets"), "point at the fix: {why}");
+    assert!(!lock_path.exists(), "no lock written");
+    assert!(!state_path.exists(), "no state written");
+}
+
+#[test]
 fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
     let f = Fixture::new();
     f.bucket("main");

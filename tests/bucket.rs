@@ -613,3 +613,51 @@ fn a_bucket_named_by_the_lock_or_by_an_opt_that_is_not_on_disk_is_reported_as_ab
         other => panic!("a bucket that IS on this machine must still be opened: {other:?}"),
     }
 }
+
+#[test]
+fn a_bucket_named_by_the_lock_or_by_an_opt_that_pkg_toml_does_not_declare_is_reported_as_undeclared(
+) {
+    // The fourth exit of `choose_bucket`, and the one the previous fix wave
+    // routed through `NotFound` without addressing: `extras` here is not
+    // merely absent from disk (that is `NotCloned`, above) -- it is not in
+    // `[scoop] buckets` at all. Before this fix the `stated` branch returned
+    // `NotFound { searched: vec![extras], missing: [] }`, which
+    // `not_found_why`'s `(false, true)` arm rendered as `no declared bucket
+    // has <pkg> (searched: extras)` -- naming a bucket that was neither
+    // declared nor searched. `apply` already tells this state apart
+    // (`src/apply.rs`'s `bucket_is_declared` check, "bucket \"extras\" is not
+    // declared in pkg.toml -- add it to [scoop] buckets"); `choose_bucket`
+    // did not.
+    //
+    // `extras` is cloned on disk here -- proving the branch fires on
+    // declaration, not presence. If it were also absent from disk, a test
+    // could not tell `Undeclared` apart from `NotCloned`.
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "tool.json", "1.0.0", "v100");
+    let extras = f.bucket("extras");
+    f.commit(&extras, "tool.json", "2.0.0", "v200");
+    let config = cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n");
+
+    // Named by the lock.
+    match bucket::choose_bucket(&f.scoop_root(), &config, &Name::new("tool"), Some("extras")) {
+        BucketChoice::Undeclared { name } => assert_eq!(name, Name::new("extras")),
+        other => panic!(
+            "a bucket pkg.toml does not declare must not be reported as searched or \
+             not-cloned: {other:?}"
+        ),
+    }
+
+    // Named by `[scoop.opts]`, the other route into the same branch. Without
+    // this the fix could be made on the lock path alone.
+    match bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n\
+              [scoop.opts]\ntool = { bucket = \"extras\" }\n"),
+        &Name::new("tool"),
+        None,
+    ) {
+        BucketChoice::Undeclared { name } => assert_eq!(name, Name::new("extras")),
+        other => panic!("{other:?}"),
+    }
+}

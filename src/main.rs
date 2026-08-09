@@ -115,6 +115,22 @@ fn refuse(err: anyhow::Error) -> ! {
     std::process::exit(2);
 }
 
+/// The `apply` exit-code floor, lifted out of `main` so it can be observed.
+///
+/// A package that failed to PREPARE never becomes a `Step`, so `Execution`
+/// cannot see it; a package skipped because its own process was running is
+/// outstanding work the user asked for and did not get. Either one means 0
+/// would tell a scheduled task the machine is fine when it is not.
+///
+/// A floor, not an override: a non-zero code passes through untouched.
+fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> i32 {
+    if code == 0 && (!preparation_ok || has_running_skips) {
+        1
+    } else {
+        code
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -408,11 +424,7 @@ fn main() -> Result<()> {
             // fact about the plan, not about what `execute` happened to see,
             // and 0 would tell a scheduled task the machine is fine for as
             // long as the editor stays open.
-            let code = if code == 0 && (!preparation.is_ok() || !running_skips.is_empty()) {
-                1
-            } else {
-                code
-            };
+            let code = floor_exit_code(code, preparation.is_ok(), !running_skips.is_empty());
             if code != 0 {
                 std::process::exit(code);
             }
@@ -547,4 +559,42 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_successful_run_with_nothing_outstanding_keeps_its_own_exit_code() {
+        // The case tests/cli.rs cannot construct: no fixture may provide a fake
+        // scoop binary, so a fully successful non-empty apply is unreachable there.
+        // This is the only case that distinguishes `&&` from `||` and `!` from ``.
+        assert_eq!(floor_exit_code(0, true, false), 0);
+    }
+
+    #[test]
+    fn outstanding_work_floors_a_zero_to_one() {
+        assert_eq!(
+            floor_exit_code(0, false, false),
+            1,
+            "a package that failed to prepare"
+        );
+        assert_eq!(
+            floor_exit_code(0, true, true),
+            1,
+            "a package skipped because it is running"
+        );
+        assert_eq!(floor_exit_code(0, false, true), 1, "both");
+    }
+
+    #[test]
+    fn a_nonzero_code_is_never_lowered_or_raised() {
+        assert_eq!(floor_exit_code(2, true, false), 2);
+        assert_eq!(
+            floor_exit_code(2, false, true),
+            2,
+            "the floor is a floor, not an override"
+        );
+    }
 }

@@ -150,11 +150,64 @@ correctness concern, and nothing survives there. `src/apply.rs` and
 `src/execute.rs` likewise.
 
 The remaining five files plus `src/backend/scoop.rs` (which run 1 never reached)
-were re-measured in **run 2**: `-j 3`, `--timeout 120`, nothing else running.
-Those results are reported in their own sections below. Note that run 2 ran
-against the *fixed* tree, so for `src/render.rs` it measures this task's own
-tests; the other five files were untouched by this task and their run-2 numbers
-are directly comparable to a run-1 baseline.
+were re-measured cleanly: `-j 3`, `--timeout 120`, nothing else running. Those
+runs produced **zero** timeouts, which is the confirmation that the 55 in run 1
+were contention and not code — `src/state.rs` alone went from 6 timeouts to 0
+with no change to the file.
+
+### The whole branch, totalled
+
+**509 mutants, 55 survivors.** Every one is accounted for below.
+
+| file | mutants | survivors | disposition |
+|---|---|---|---|
+| `src/adopt.rs` | 14 | **0** | — |
+| `src/apply.rs` | 52 | **0** | — |
+| `src/config.rs` | 7 | **0** | — |
+| `src/execute.rs` | 31 | **0** | — |
+| `src/update.rs` | 21 | 1 | closed |
+| `src/sys.rs` | 6 | 1 | closed |
+| `src/config_edit.rs` | 10 | 6 | closed |
+| `src/plan.rs` | 27 | 5 | closed |
+| `src/lock.rs` | 19 | 3 | closed |
+| `src/model.rs` | 29 | 3 | closed |
+| `src/main.rs` | 32 | 8 | 6 closed, 2 accepted |
+| `src/bucket.rs` | 67 | 8 | 5 closed, 3 accepted (2 = the predicted KNOWN) |
+| `src/render.rs` | 43 | 3 | 2 closed, 1 accepted |
+| `src/state.rs` | 24 | 1 | accepted (dead code) |
+| `src/verify.rs` | 30 | 1 | accepted |
+| `src/backend/scoop.rs` | 97 | **15** | **out of scope — see below** |
+| **total** | **509** | **55** | **32 closed, 8 accepted, 15 deferred** |
+
+After this task the same files re-measure at: `main.rs` 2 missed (was 8),
+`bucket.rs` 3 (was 8), `config_edit.rs` 0 (was 6), `update.rs` 0 (was 1),
+`sys.rs` 0 (was 1), `render.rs` 1 (was 3).
+
+### The 15 survivors in `src/backend/scoop.rs`, left for Phase 4
+
+This is Phase 2b code, untouched by this branch's diff, and fixing it here would
+have meant a Phase 3 review task rewriting a Phase 2b module's test suite. Listed
+rather than silently skipped, because 15 is the largest concentration on the
+branch and nobody has looked at it:
+
+- `:219` ×2 — `<impl Backend for Scoop>::name -> ""` / `"xyzzy"`. **The backend's
+  own name is asserted by nothing.** Everything keys on it.
+- `:124` ×3 — `resolve_root`'s `b.len() == s.len()`.
+- `:533` ×2 and `:525` — `clone_missing_buckets`' `.git` existence guard and its
+  whole return value. Directly related to the untested no-`.git` guard in
+  `update::run`, so these two are one item.
+- `:699`, `:712` — `download_verdict`'s `&&`.
+- `:731` ×2 — `tail`'s `skip > 0`.
+- `:654` — `strip_ansi`'s `&&`.
+- `:227` — `scan`'s `NotFound` guard (same family as the `lock.rs:99` gap this
+  task closed, and as `verify.rs:146` below).
+- `:67` — the `Value::Array` arm of `declared_executables::walk`.
+
+The `NotFound`-guard family is worth calling out as a pattern in its own right:
+`lock.rs:99`, `verify.rs:146` and `scoop.rs:227` are the same mutation of the
+same idiom, and all three survived. Whenever this codebase writes
+`Err(e) if e.kind() == NotFound => <benign default>`, the benign default is
+tested and the *other* error kinds are not.
 
 Where a verdict below is "gap", a test was added and the kill was verified by
 re-running `cargo mutants -f <file>` against the changed tree; those re-runs are
@@ -609,10 +662,11 @@ Accepted, with reasons:
   currently wrong — but the claim in the doc comment is stronger than the
   evidence. **Recommended for Phase 4**, since winget will add a second consumer
   of the same precedence rule.
-- **The no-`.git` fetch-loop guard (`src/update.rs:238-240`) and the winget
-  warning (`src/update.rs:314-320`) have no direct tests.** The winget warning is
-  now partly covered indirectly; both are cheap and were left because their
-  mutants did not survive.
+- **The no-`.git` fetch-loop guard (`src/update.rs:238-240`) has no direct
+  test.** Its mutant did not survive, so it is covered in effect; the
+  closely-related `clone_missing_buckets` `.git` guard in `backend::scoop` did
+  survive and is listed above. **The winget warning is now closed** — its mutant
+  did survive, which is what found it.
 
 ## Still open
 
@@ -628,3 +682,11 @@ Accepted, with reasons:
 5. **The lock-beats-a-conflicting-opt precedence claim is inspection-only.**
 6. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.
+7. **15 surviving mutants in `src/backend/scoop.rs`**, listed above. Phase 2b
+   code, deliberately out of scope for a Phase 3 review, and the largest single
+   concentration on the branch. `Backend::name` being asserted by nothing is the
+   one to do first.
+8. **`State::names` has no callers.** Give it one or delete it.
+9. **The `Err(e) if e.kind() == NotFound => <benign default>` idiom is tested
+   only on its benign path**, in three separate places. `lock.rs:99` was closed
+   here; `verify.rs:146` and `backend/scoop.rs:227` were not.

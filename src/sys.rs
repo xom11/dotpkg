@@ -62,6 +62,15 @@ mod tests {
         assert_eq!(normalize("tool.com"), "tool");
         assert_eq!(normalize("Kanata.exe"), "kanata");
         assert_eq!(normalize("no-extension"), "no-extension");
+        // A dot that is NOT an executable suffix must survive. `no-extension`
+        // above does not cover this: it has no dot at all, so it never reaches
+        // the suffix test. Without this line the whole
+        // `EXECUTABLE_SUFFIXES.contains(&ext)` guard could be `true` and the
+        // suite stayed green -- measured, a surviving mutant in the Task 14
+        // run. The consequence is a live `python3.11` normalising to
+        // `python3` and matching a package it is not, which is a running-skip
+        // decided by a version number.
+        assert_eq!(normalize("python3.11"), "python3.11");
     }
 
     #[test]

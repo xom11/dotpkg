@@ -3804,6 +3804,85 @@ fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
 }
 ```
 
+- [ ] **Step 1b: Write the test that makes the write ORDER observable**
+
+The order's value is what an interrupted run leaves behind, and an interrupted run *can* be induced: make the last write fail. `State::save` renames its temp file onto `state_path`, and a rename onto an existing directory fails on every platform this runs on.
+
+Append to `tests/adopt.rs`:
+
+```rust
+#[test]
+fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
+    // The write order is lock -> pkg.toml -> state.json, and the claim is that
+    // every PREFIX of it is inert. That claim is testable, not merely
+    // arguable: force the last write to fail and look at what survives.
+    //
+    // Under this order the survivor is lock + pkg.toml: declared, locked, and
+    // installed at the locked version, so plan() emits nothing at all.
+    //
+    // Under the state-first order the survivor would be state.json + pkg.lock
+    // -- owned and undeclared -- which src/plan.rs turns into a Prune. That is
+    // the negative control, and it is why the order is what it is.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "aichat", "0.30.0", "v030");
+
+    let config_path = f.home.path().join("pkg.toml");
+    let lock_path = f.home.path().join("pkg.lock");
+    // A DIRECTORY where state.json should be: State::save's final rename
+    // cannot replace it, so the third write fails and the first two stand.
+    let state_path = f.home.path().join("state.json");
+    std::fs::create_dir_all(state_path.join("occupied")).unwrap();
+
+    std::fs::write(&config_path, "[scoop]\nbuckets = [\"main\"]\npackages = []\n").unwrap();
+    let cur = f.scoop_root().join("apps").join("aichat").join("current");
+    std::fs::create_dir_all(&cur).unwrap();
+    std::fs::write(cur.join("manifest.json"), f.blob(&dir, "HEAD", "aichat")).unwrap();
+
+    let result = dotpkg::adopt::run(
+        &f.scoop_root(),
+        &[Name::new("aichat")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    );
+    assert!(result.is_err(), "the state write must genuinely have failed");
+
+    // The first two writes stand.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert!(lock.scoop.contains_key(&Name::new("aichat")), "the lock was written first");
+    let declared = dotpkg::config::load(&config_path).unwrap();
+    assert!(declared.scoop.packages.contains(&Name::new("aichat")), "pkg.toml was written second");
+    assert!(
+        State::load_or_empty(&state_path).is_err() || !state_path.is_file(),
+        "state.json must NOT have been written"
+    );
+
+    // And what survives is inert.
+    let scoop = dotpkg::backend::scoop::Scoop::new(f.scoop_root());
+    let scan = dotpkg::backend::Backend::scan(&scoop).unwrap();
+    let plan = dotpkg::plan::plan(
+        &declared,
+        &lock,
+        &scan.installed,
+        &State::default(),
+        &dotpkg::model::Running::default(),
+    );
+    for a in &plan.actions {
+        if let dotpkg::plan::Action::Prune { name, .. } = a {
+            panic!(
+                "an interrupted adopt left a PRUNE candidate -- the write order is wrong: {name}"
+            );
+        }
+    }
+    assert!(
+        plan.actions.is_empty(),
+        "a declared, locked, correctly-installed package needs no action: {:?}",
+        plan.actions
+    );
+}
+```
+
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `cargo test --no-fail-fast --test adopt 2>&1 | tail -20`
@@ -4064,7 +4143,7 @@ Expected: all `ok`.
 
 - [ ] **Step 6: Run the negative controls**
 
-1. Reorder the writes so `state.save` runs first. Confirm nothing goes red — then **add the test that makes it go red**: assert in `a_package_whose_version_is_not_in_the_bucket_writes_nothing_at_all` that `state_path` does not exist. If it already does, note that the ordering itself is not directly observable from outside and record that honestly: the order's value is what a *crash* between writes leaves behind, which no test in this suite can induce. Say so in the commit message rather than claiming coverage.
+1. Reorder the writes so `state.save` runs first, then `lock`, then `pkg.toml`. Confirm `a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about` (Step 1b below) goes red on its **Prune** assertion. Under the wrong order the surviving prefix is `state.json` + `pkg.lock` — owned, undeclared — which `src/plan.rs` turns into a prune candidate.
 2. Delete the `state.owns` early return. Confirm a new test — adopt the same package twice — reports the second as refused. Add it if it does not exist.
 3. Delete the shallow branch. Confirm `a_refusal_names_shallowness_when_that_is_the_likely_cause` goes red.
 4. Skip the `config_edit::add_scoop_package` call (write the original text back). Confirm `an_adopted_package_is_not_a_prune_candidate_and_not_notlocked` goes red on the **Prune** panic — which is the whole reason `adopt` writes `pkg.toml`.
@@ -4083,12 +4162,14 @@ apply refuse the whole run at exit 2 and, under --keep-going, hold every prune
 in the plan. All three, or the machine is left in a state dotpkg itself will
 not act on. A test asserts both of those through plan() directly.
 
-Write order is lock, pkg.toml, state.json. Lock only is an entry plan() never
-reads. Lock plus pkg.toml is a declared, locked, correctly-installed package
-that plan() says nothing about. state.json first is the prune shape and is
-forbidden. Honest limit: no test here can induce a crash between two writes, so
-the ORDER is argued rather than covered -- what is covered is that a refusal
-writes none of the three.
+Write order is lock, pkg.toml, state.json, and every prefix of it is inert --
+covered, not merely argued. An interrupted run IS inducible: point state.json
+at a directory, so State::save's final rename cannot land, and look at what
+survives. Under this order that is lock + pkg.toml, a declared and locked
+package installed at the locked version, which plan() says nothing about at
+all. Under the state-first order the survivor is state.json + pkg.lock -- owned
+and undeclared -- which plan() turns into a Prune, and that is the negative
+control.
 
 adopt is the first writer of Ownership::Adopted, which has been readable since
 2b-2 and never written. The 2b-2 test that an upgrade does not silently rewrite
@@ -4305,7 +4386,9 @@ Every refusal assertion in this phase must be paired with either a count of file
 
 Carrying forward, in the shape the previous three phases established: what was found by review, by mutation, or by running; which predictions were falsified; what is still open. It must state at minimum:
 
-- Whether the write-order argument in `adopt` is covered or only argued.
+- Whether the write-order test in `adopt` really discriminates the orders, or
+  passes for an unrelated reason on some platform (the induced failure is a
+  rename onto a directory, whose error differs between Unix and Windows).
 - Which mutants survived and why each is acceptable.
 - That `mass_prune_guard` still reads scoop only.
 - Whatever the Windows run found.

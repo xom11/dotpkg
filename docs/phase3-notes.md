@@ -753,6 +753,46 @@ Accepted, with reasons:
   survive and is listed above. **The winget warning is now closed** — its mutant
   did survive, which is what found it.
 
+## What the dogfood added
+
+`docs/dogfood-phase3-2026-08-09.md`. It found one defect, and the defect is the
+THIRD PATTERN below repeating in the one place nobody had looked.
+
+**`adopt` was the only command that discarded `scan.warnings`.** `status`
+(`main.rs:145`), `apply` (`:189`) and `update` (`:450`) have printed them since
+Phase 2a; `adopt::run` called `Backend::scan` and never read the field. The
+visible consequence on a14 was `dotpkg adopt antigravity` printing
+`antigravity is not installed` about a package that **is** installed — the
+scan could not traverse its junction, and the one line that would have
+explained that was thrown away. Closed: `adopt::Outcome` now carries
+`warnings`, `main.rs` prints them above the outcome, and `tests/cli.rs` holds
+it with a paired assertion (`adopt_prints_what_the_scan_could_not_read_…` plus
+an absence counterweight). Recorded here because the *class* is what matters —
+every command that scans must print what the scan could not read, and Phase 4
+adds a second backend that will scan.
+
+Three things the dogfood measured that were previously assumed:
+
+- **`update` fetches and never pulls, on real hardware.**
+  `refs/remotes/origin/master` moved forward in `main` and `extras`;
+  `refs/heads/master` did not move in any bucket and every working tree stayed
+  clean.
+- **The fetch really does change the answer.** Rewinding
+  `refs/remotes/origin/master` by one commit moved exactly one pin back
+  (`tree-sitter 0.26.12 -> 0.26.11`) and left twenty-four alone; the next
+  fetching run moved it forward and restored the ref.
+- **Real-bucket timings**, replacing the synthetic 153×:
+  `update` over 25 packages against a 78,473-commit `main` is 31.5 s with a
+  fetch, 23.9 s offline, 16.4 s converged; `adopt`'s full history walk that
+  finds nothing is 6.5 s for one package.
+
+Two things it could not exercise on this machine and said so rather than
+implying coverage: **no declared package is ambiguous** (only `flux` is, in the
+whole union of the three buckets, and it is neither declared nor installed —
+the refusal and `[scoop.opts] bucket` were fired deliberately in a throwaway
+root), and **no installed package has a version missing from its bucket's
+history**, so `adopt`'s refusal had to be constructed.
+
 ## Still open
 
 1. **`mass_prune_guard` reads scoop only.** Top of this file. Must grow a backend
@@ -774,6 +814,18 @@ Accepted, with reasons:
 7. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.
 8. **`State::names` has no callers.** Give it one or delete it.
+9. **`update` prints `pkg.lock is already current -- not rewritten.` when there
+   is no `pkg.lock` at all** and the only declared package could not be
+   resolved. Measured by the dogfood. It follows correctly from
+   `wrote_anything()` being false and nothing acts on it, but in a tool whose
+   spine is that every printed line is true, it is a false one. One extra
+   condition in `render_update`.
+10. **`--state` relocates `state.json` but not the staging root**, so
+    `apply --prepare --state <elsewhere>` still writes
+    `%LOCALAPPDATA%\dotpkg\manifests`. Deliberate — `default_staging_root`'s
+    doc comment gives the reason — but "point `--state` somewhere else and
+    dotpkg writes nowhere else" is a reasonable belief and is false. Decide
+    whether to document it in `--state`'s own help text.
 
 **Closed by this review, so not carried:** `adopt::run`'s call-site write order,
 which was unprotected on Windows and is now a compile error. Recorded here

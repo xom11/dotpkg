@@ -1219,6 +1219,72 @@ fn adopt_exits_one_when_a_package_is_refused() {
 }
 
 #[test]
+fn adopt_prints_what_the_scan_could_not_read_before_calling_a_package_uninstalled() {
+    // Found by the Phase 3 dogfood on a14, not by review: `dotpkg adopt
+    // antigravity` printed "antigravity is not installed" about a package
+    // that was installed. The scan could not traverse its junction, so it was
+    // absent from the scan, and `adopt` was the one command that dropped
+    // `scan.warnings` -- `status`, `apply` and `update` have each printed
+    // them since Phase 2a. The refusal line is not wrong given what dotpkg
+    // could see; it is unactionable without the warning that says why.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+
+    // `ghost` is installed -- `Fixture::new` created it -- but its
+    // manifest.json is not JSON, so `scan` cannot see it. That is the
+    // portable stand-in for the junction the dogfood actually hit.
+    let out = f.run(&["adopt", "ghost"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "still a refusal: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("is not installed"),
+        "the refusal itself is unchanged: {stdout}"
+    );
+    assert!(
+        stderr.contains("warning: scoop: ghost: manifest.json is not usable"),
+        "the refusal above is false on its own -- naming what could not be \
+         read is what makes it actionable: stderr: {stderr}"
+    );
+}
+
+#[test]
+fn adopt_prints_no_warning_when_the_scan_read_everything() {
+    // The counterweight to the test above. Without it, an implementation
+    // that printed a warning on every run would satisfy that `contains` and
+    // teach the user to ignore the line.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    fs::remove_dir_all(f.scoop.path().join("apps").join("ghost")).unwrap();
+    bucket_only(&f, "fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+
+    let out = f.run(&["adopt", "fzf"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("warning:"),
+        "a run that read everything has nothing to warn about: {stderr}"
+    );
+}
+
+#[test]
 fn adopt_refuses_a_relative_state_path_before_anything_runs() {
     // The same rule `apply` has, on the other command that writes state.json.
     // Verified as a refusal (exit 2), not a `?` propagation (exit 1).

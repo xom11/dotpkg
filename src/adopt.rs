@@ -92,6 +92,15 @@ use crate::state::{Ownership, State};
 pub struct Outcome {
     pub adopted: Vec<(Name, Matched)>,
     pub refused: Vec<(Name, String)>,
+    /// What `scan` could not read, carried out so the caller can print it.
+    ///
+    /// A package whose `manifest.json` cannot be read is absent from `scan`,
+    /// so `adopt` refuses it with "<name> is not installed" -- which is false,
+    /// and, without this, printed with no diagnostic at all. `status`, `apply`
+    /// and `update` have each printed these warnings since Phase 2a; `adopt`
+    /// was the one command that dropped them on the floor, and the Phase 3
+    /// dogfood found it by adopting a package a junction made unreadable.
+    pub warnings: Vec<String>,
 }
 
 /// Adopt every named package. Per package it is all or nothing; across
@@ -119,7 +128,10 @@ pub fn run(
 ) -> Result<Outcome> {
     let scoop = crate::backend::scoop::Scoop::new(scoop_root.to_path_buf());
     let scan = Backend::scan(&scoop)?;
-    let mut out = Outcome::default();
+    let mut out = Outcome {
+        warnings: scan.warnings.clone(),
+        ..Outcome::default()
+    };
 
     for name in names {
         // Re-read all three every iteration: each package's write must land

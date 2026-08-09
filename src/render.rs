@@ -1132,6 +1132,7 @@ mod tests {
                 (Name::new("legacy-tool"), Matched::Version),
             ],
             refused: vec![],
+            warnings: vec![],
         };
         let text = render_adopt(&out);
         assert!(
@@ -1157,6 +1158,7 @@ mod tests {
                     "no commit in bucket main carries aichat 9.9.9".to_string(),
                 ),
             ],
+            warnings: vec![],
         };
         let text = render_adopt(&out);
         assert!(text.contains("nothere is not installed"), "{text}");
@@ -1174,6 +1176,7 @@ mod tests {
         let out = AdoptOutcome {
             adopted: vec![(Name::new("aichat"), Matched::Content)],
             refused: vec![(Name::new("nothere"), "nothere is not installed".to_string())],
+            warnings: vec![],
         };
         let text = render_adopt(&out);
         assert!(

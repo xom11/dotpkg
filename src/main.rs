@@ -491,6 +491,12 @@ fn main() -> Result<()> {
                 dotpkg::model::fold_names(packages, "the packages named on the command line")?;
             let scoop = Scoop::discover();
             let out = dotpkg::adopt::run(scoop.root(), &names, &config, &lock, &state_path)?;
+            // Before the outcome, not after, and for the same reason `status`
+            // and `apply` print theirs first: a package dotpkg could not read
+            // is refused as "not installed", and that line is false on its own.
+            for w in &out.warnings {
+                eprintln!("warning: scoop: {w}");
+            }
             print!("{}", dotpkg::render::render_adopt(&out));
             std::io::stdout().flush().ok();
             if !out.refused.is_empty() {

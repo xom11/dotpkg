@@ -1,7 +1,7 @@
 use dotpkg::config;
 use dotpkg::lock;
 use dotpkg::model::{Installed, Name, Running, SCOOP, WINGET};
-use dotpkg::plan::{plan, Action, SkipReason};
+use dotpkg::plan::{plan, Action, Divergence, SkipReason};
 use dotpkg::state::{Ownership, State};
 use std::collections::BTreeSet;
 
@@ -12,6 +12,20 @@ fn installed(name: &str, version: &str) -> Installed {
         version: version.into(),
         arch: Some("arm64".into()),
         bucket: Some("main".into()),
+        bins: Vec::new(),
+    }
+}
+
+/// An installed winget package: no `arch`, no `bucket` -- winget exposes
+/// neither (see `Installed`'s own doc comment) -- and no `bins`, since there
+/// is no winget-side manifest to read executable names from.
+fn installed_winget(id: &str, version: &str) -> Installed {
+    Installed {
+        backend: WINGET.into(),
+        name: Name::new(id),
+        version: version.into(),
+        arch: None,
+        bucket: None,
         bins: Vec::new(),
     }
 }
@@ -201,11 +215,15 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
 }
 
 #[test]
-fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
-    // The winget backend is Phase 4 and stays deferred. Reporting it is not:
-    // the spec's example pkg.toml declares `[winget]`, and a user who copies
-    // it must not be told `nothing to do`. Silence is the one answer that is
-    // indistinguishable from "dotpkg never read your file".
+fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped() {
+    // Winget has had a real `BackendView` since Task 14, so a declared
+    // package with no lock entry is `NotLocked` -- the same reason a scoop
+    // package in the same shape gets -- not a permanent "phase 4"
+    // placeholder. Reporting
+    // it at all is still the point: the spec's example pkg.toml declares
+    // `[winget]`, and a user who copies it must not be told `nothing to do`.
+    // Silence is the one answer that is indistinguishable from "dotpkg never
+    // read your file".
     let p = plan(
         &config::parse("[winget]\npackages = [\"Git.Git\", \"Brave.Brave\"]\n").unwrap(),
         &lock::Lock::default(),
@@ -220,12 +238,12 @@ fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::BackendNotImplemented,
+                reason: SkipReason::NotLocked,
             },
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Brave.Brave".into(),
-                reason: SkipReason::BackendNotImplemented,
+                reason: SkipReason::NotLocked,
             },
         ]
     );
@@ -255,11 +273,165 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::BackendNotImplemented,
+                reason: SkipReason::NotLocked,
             },
         ]
     );
     assert_eq!(p.change_count(), 1);
+}
+
+#[test]
+fn a_declared_locked_winget_package_with_nothing_installed_is_reported_as_a_would_be_install() {
+    // The `None` arm of the same match `a_declared_locked_package_that_is_
+    // absent_is_an_install` exercises for scoop -- but winget's view has
+    // `Capability::ReportsOnly`, so what would have been an Install becomes
+    // a Skip carrying the version it would have installed.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Git.Git\"]\n").unwrap(),
+        &lock::parse("[winget.\"Git.Git\"]\nversion = \"2.55.0\"\npin = \"version-only\"\n")
+            .unwrap(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Git.Git".into(),
+            reason: SkipReason::ReportedOnly(Divergence::Install {
+                version: "2.55.0".into(),
+            }),
+        }]
+    );
+    assert_eq!(
+        p.change_count(),
+        0,
+        "an install dotpkg cannot perform yet must not count as a change"
+    );
+}
+
+#[test]
+fn a_winget_package_that_differs_from_the_lock_is_reported_with_its_diff() {
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[installed_winget("Brave.Brave", "151.1.93.132")],
+        &[],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::ReportedOnly(Divergence::Change {
+                from: "151.1.93.132".into(),
+                to: "151.1.93.134".into(),
+            }),
+        }]
+    );
+}
+
+#[test]
+fn a_reported_only_package_is_not_counted_as_a_change() {
+    // change_count() prints "N changes, M skipped. Continue?" -- the one line
+    // the user reads before saying yes. Counting a change that will never
+    // happen puts a false number in it, which is the defect class Phase 3
+    // fixed twice in render.rs.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[installed_winget("Brave.Brave", "151.1.93.132")],
+        &[],
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(p.change_count(), 0, "nothing in this plan will be done");
+    assert_eq!(p.skip_count(), 1);
+}
+
+#[test]
+fn a_winget_package_already_at_the_locked_version_produces_no_action_either() {
+    // The positive control for the two tests above: a `ReportsOnly` backend
+    // must still recognise convergence and say nothing, exactly like scoop's
+    // `a_package_already_at_the_locked_version_produces_no_action`.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[installed_winget("Brave.Brave", "151.1.93.134")],
+        &[],
+        &State::default(),
+        &Running::default(),
+    );
+    assert!(p.actions.is_empty(), "got {:?}", p.actions);
+}
+
+#[test]
+fn a_running_winget_package_that_differs_from_the_lock_is_skipped_as_running_not_reported() {
+    // Running outranks ReportedOnly, the same way it outranks Upgrade/
+    // Downgrade for scoop: a live process is the more urgent fact regardless
+    // of whether this build could act on the package at all.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[installed_winget("Brave.Brave", "151.1.93.132")],
+        &[],
+        &State::default(),
+        &Running::new(
+            BTreeSet::from(["brave.brave".to_string()]),
+            Default::default(),
+        ),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::Running,
+        }],
+        "a running winget package must never turn into a ReportedOnly line"
+    );
+}
+
+#[test]
+fn an_owned_undeclared_winget_package_is_reported_not_pruned() {
+    let mut state = State::default();
+    state.set(WINGET, &Name::new("OpenAI.Codex"), Ownership::Adopted);
+    let p = plan(
+        &config::parse("[winget]\npackages = []\n[scoop]\npackages = [\"fzf\"]\n").unwrap(),
+        &lock::parse("").unwrap(),
+        &[installed_winget("OpenAI.Codex", "0.145.0")],
+        &[],
+        &state,
+        &Running::default(),
+    );
+    assert!(
+        !p.actions.iter().any(|a| matches!(a, Action::Prune { .. })),
+        "dotpkg cannot uninstall a winget package in this phase: {:?}",
+        p.actions
+    );
+    assert!(p.actions.iter().any(|a| matches!(
+        a,
+        Action::Skip {
+            reason: SkipReason::ReportedOnly(Divergence::Prune { .. }),
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -923,26 +1095,27 @@ fn a_backend_returning_two_installed_entries_for_one_name_panics_loudly_in_a_deb
 }
 
 #[test]
-fn a_running_owned_undeclared_scoop_package_now_prints_before_the_winget_stub_not_after() {
+fn a_running_owned_undeclared_scoop_package_still_prints_before_the_winget_view() {
     // Task 5 folded scoop's declared and undeclared loops into one
-    // per-backend pass (`plan_backend`), which moved the winget stub loop
-    // from between them to after both. Verified against the pre-Task-5
-    // source: the order used to be scoop-declared -> winget-stub ->
-    // scoop-undeclared; it is now scoop-declared -> scoop-undeclared ->
-    // winget-stub.
+    // per-backend pass (`plan_backend`); Task 14 then deleted the winget stub
+    // loop entirely, giving winget the same real `BackendView` scoop already
+    // had -- both now run through the identical `for view in &backends`
+    // loop in `plan()`, scoop first. The mechanism this test originally
+    // pinned (a separate stub loop, positioned after both of scoop's) no
+    // longer exists at all, but the OBSERVED order it verified is unchanged:
+    // scoop's `Skip{Running}` is pushed straight into the shared `actions`
+    // during scoop's own `plan_backend` call, and winget's declared-loop
+    // skip is pushed straight into the same `actions` during winget's call,
+    // which still runs second because `backends` still lists scoop first.
     //
     // `render.rs` prints `plan.actions` in order with no sort, so this is a
-    // real, visible change: with a declared winget package *and* a running,
+    // real, visible fact: with a declared winget package *and* a running,
     // owned, undeclared scoop package (the only combination that can tell
-    // the two orderings apart), the scoop `Skip{Running}` line now prints
-    // before the winget stub's line instead of after. Display order only --
-    // the property that actually matters, install-before-uninstall, is
-    // untouched (prunes and reports are still appended last, unconditionally)
-    // and is pinned separately by
-    // `actions_are_ordered_installs_then_prunes_then_reports`. This test
-    // exists so that whichever order is current, it is pinned by something,
-    // and a future change to the backend-view grouping is a deliberate
-    // decision rather than a silent flip of a user-visible line order.
+    // orderings apart), the scoop line still prints before the winget line.
+    // Display order only -- the property that actually matters,
+    // install-before-uninstall, is untouched (prunes and reports are still
+    // appended last, unconditionally) and is pinned separately by
+    // `actions_are_ordered_installs_then_prunes_then_reports`.
     let mut state = State::default();
     state.set(SCOOP, &Name::new("kanata"), Ownership::Installed);
 
@@ -965,7 +1138,9 @@ fn a_running_owned_undeclared_scoop_package_now_prints_before_the_winget_stub_no
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::BackendNotImplemented,
+                // No lock at all, so this is NotLocked, not ReportedOnly --
+                // there is nothing to diff against.
+                reason: SkipReason::NotLocked,
             },
         ],
         "got {:?}",

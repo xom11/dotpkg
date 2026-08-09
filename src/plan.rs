@@ -12,23 +12,73 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Update it if scoop gains a new extraction helper.
 pub const SCOOP_HELPERS: &[&str] = &["dark", "innounp", "7zip", "lessmsi"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     /// The package's process is alive. Changing it now risks the running app.
     Running,
     /// Declared in pkg.toml with no pkg.lock entry. `apply` must refuse rather
     /// than resolve a version itself.
     NotLocked,
-    /// Declared for a backend this build cannot act on yet. Reported rather
-    /// than dropped: the spec's rule is "never degrade silently", and the whole
-    /// product of `status` is the printed plan. A user who follows the spec's
-    /// own example pkg.toml and gets `nothing to do` has been lied to.
-    BackendNotImplemented,
+    /// What a `Capability::ReportsOnly` backend's package would have become,
+    /// had dotpkg been able to act on it -- winget scans and plans in Phase
+    /// 4, but nothing installs or uninstalls a winget package yet. Reported
+    /// rather than dropped, and reported with the diff, not just the fact of
+    /// one: the spec's rule is "never degrade silently", `Plan::change_count`
+    /// is the one line a user reads before saying yes, and hiding that Brave
+    /// is `151.1 -> 151.2` throws away the whole product of `status` for the
+    /// sake of a number that would otherwise count a change that will never
+    /// happen.
+    ReportedOnly(Divergence),
     /// Installed, but the scan could not establish its state (see
     /// `Scan::opaque`). Must not be read as "not installed" -- that reading is
     /// what turned two working, pinned-at-version packages into an
     /// uninstall-then-reinstall under `--yes` on a14.
     Opaque,
+}
+
+/// What a `Capability::ReportsOnly` package's declared/installed state would
+/// have turned into, had its backend been one Phase 4 can act on. Carried by
+/// `SkipReason::ReportedOnly` so the diff a user needs -- both versions, not
+/// merely "differs" -- survives all the way to `render` and to
+/// `apply::classify`'s `Outcome::Skipped` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Divergence {
+    /// Declared and locked, but nothing is installed: the version dotpkg
+    /// would have installed.
+    Install { version: String },
+    /// Installed at a version other than the one the lock pins, in either
+    /// direction. One shape for both: `plan_backend`'s Upgrade/Downgrade
+    /// split is cosmetic display order only (see `is_older`'s own doc
+    /// comment), and a backend that cannot act on either has no reason to
+    /// carry a distinction that exists purely to pick an arrow.
+    Change { from: String, to: String },
+    /// Installed, undeclared, and owned by dotpkg: the version that would
+    /// have been pruned.
+    Prune { version: String },
+}
+
+impl Divergence {
+    /// The one line a user reads for why dotpkg is not acting on this
+    /// package, with the diff embedded. Shared by `render::render` (the
+    /// plan) and `apply::classify` (`Outcome::Skipped`'s `why`), so the
+    /// explanation reads identically whether it came from `status` or from
+    /// `apply`'s preparation table.
+    pub fn describe(&self) -> String {
+        match self {
+            Divergence::Install { version } => format!(
+                "would install {version} -- reported only, dotpkg cannot install or \
+                 remove winget packages yet"
+            ),
+            Divergence::Change { from, to } => format!(
+                "{from} -> {to} -- reported only, dotpkg cannot install or remove \
+                 winget packages yet"
+            ),
+            Divergence::Prune { version } => format!(
+                "would remove {version} -- reported only, dotpkg cannot install or \
+                 remove winget packages yet"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +136,14 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// How many actions this run will actually perform. Printed in the one
+    /// line a user reads before saying yes to `apply` -- so a
+    /// `SkipReason::ReportedOnly` (a winget package that differs from the
+    /// lock, but that dotpkg cannot act on) is deliberately excluded by
+    /// construction: it is `Action::Skip`, never `Install`/`Upgrade`/
+    /// `Downgrade`/`Prune`, and counting a change that will never happen
+    /// would put a false number in that line -- the defect class Phase 3
+    /// fixed twice in `render.rs`. See `skip_count`, which does count it.
     pub fn change_count(&self) -> usize {
         self.actions
             .iter()
@@ -116,25 +174,38 @@ impl Plan {
     }
 }
 
+/// What a backend's declared-package pass may turn a version difference
+/// into. Added by Task 14, when winget got a real view: scoop's is `Acts`
+/// (an `Install`/`Upgrade`/`Downgrade`/`Prune` really happens), winget's is
+/// `ReportsOnly` (Phase 4 stops at scan/plan/lock/report -- nothing installs
+/// or uninstalls a winget package), and `plan_backend` reads this to decide
+/// which of the two a difference becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    Acts,
+    ReportsOnly,
+}
+
 /// One backend's slice of the inputs. `plan()` runs the same pass over each
-/// backend it has a view for.
-///
-/// Only scoop has one today: `declared`, `lock` and `opts` all read from
-/// `declared.scoop` / `lock.scoop`. Winget's declared packages still go
-/// through the separate stub loop in `plan()`, unconditionally emitting
-/// `SkipReason::BackendNotImplemented` -- Task 6 gives winget a real view
-/// once there is real installed/lock data for this pass to read, and Task 14
-/// deletes the stub loop once that view replaces it.
+/// backend it has a view for -- both scoop and winget, since Task 14: winget's
+/// `capability` is `ReportsOnly`, so the same declared/undeclared logic that
+/// would install, upgrade, downgrade or prune for scoop instead reports the
+/// diff via `SkipReason::ReportedOnly` for winget, and never touches the
+/// machine.
 struct BackendView<'a> {
     backend: &'static str,
     declared: &'a [Name],
     lock: &'a BTreeMap<Name, Pin>,
-    /// `[scoop.opts]`. Empty for backends that have no per-package options.
+    /// `[scoop.opts]`. Empty for backends that have no per-package options --
+    /// winget's `WingetSection` declares none.
     opts: &'a BTreeMap<Name, PkgOpts>,
     /// Names this backend installs for itself and does not record. Empty for
     /// winget, whose equivalent is not a fixed list but the sourceless rows,
     /// which never reach `installed` at all.
     helpers: &'static [&'static str],
+    /// Whether a version difference for this backend becomes a real change
+    /// or a `SkipReason::ReportedOnly`. See `Capability`'s own doc comment.
+    capability: Capability,
 }
 
 /// Keeps at most one `Installed` per name for `backend`, first one wins.
@@ -269,38 +340,70 @@ fn plan_backend(
         };
 
         match current {
-            None => actions.push(Action::Install {
-                backend: view.backend.into(),
-                name: name.clone(),
-                version: want.to_string(),
-                arch: arch.clone(),
-            }),
+            None => match view.capability {
+                Capability::Acts => actions.push(Action::Install {
+                    backend: view.backend.into(),
+                    name: name.clone(),
+                    version: want.to_string(),
+                    arch: arch.clone(),
+                }),
+                // `arch` is dropped here: `Divergence` carries no
+                // architecture, matching winget having none to carry --
+                // `Installed::arch` is always `None` for it (see
+                // `backend::winget::rows_to_scan`'s own doc comment) and
+                // `ReportsOnly` never reaches an executor that would need it.
+                Capability::ReportsOnly => actions.push(Action::Skip {
+                    backend: view.backend.into(),
+                    name: name.clone(),
+                    reason: SkipReason::ReportedOnly(Divergence::Install {
+                        version: want.to_string(),
+                    }),
+                }),
+            },
             Some(cur) if cur.version == want => {}
             Some(cur) => {
                 // Checked only once a change is actually called for, so a
-                // healthy running package produces no line at all.
+                // healthy running package produces no line at all. Applies
+                // regardless of `capability`: whether or not dotpkg could
+                // act on it, a running process is still the more urgent fact
+                // -- `Running`'s own doc comment is about the live app, not
+                // about who may change it.
                 if running.covers(cur) {
                     actions.push(Action::Skip {
                         backend: view.backend.into(),
                         name: name.clone(),
                         reason: SkipReason::Running,
                     });
-                } else if is_older(&cur.version, want) {
-                    actions.push(Action::Upgrade {
-                        backend: view.backend.into(),
-                        name: name.clone(),
-                        from: cur.version.clone(),
-                        to: want.to_string(),
-                        arch: arch.clone(),
-                    });
                 } else {
-                    actions.push(Action::Downgrade {
-                        backend: view.backend.into(),
-                        name: name.clone(),
-                        from: cur.version.clone(),
-                        to: want.to_string(),
-                        arch: arch.clone(),
-                    });
+                    match view.capability {
+                        Capability::Acts => {
+                            if is_older(&cur.version, want) {
+                                actions.push(Action::Upgrade {
+                                    backend: view.backend.into(),
+                                    name: name.clone(),
+                                    from: cur.version.clone(),
+                                    to: want.to_string(),
+                                    arch: arch.clone(),
+                                });
+                            } else {
+                                actions.push(Action::Downgrade {
+                                    backend: view.backend.into(),
+                                    name: name.clone(),
+                                    from: cur.version.clone(),
+                                    to: want.to_string(),
+                                    arch: arch.clone(),
+                                });
+                            }
+                        }
+                        Capability::ReportsOnly => actions.push(Action::Skip {
+                            backend: view.backend.into(),
+                            name: name.clone(),
+                            reason: SkipReason::ReportedOnly(Divergence::Change {
+                                from: cur.version.clone(),
+                                to: want.to_string(),
+                            }),
+                        }),
+                    }
                 }
             }
         }
@@ -328,11 +431,25 @@ fn plan_backend(
                     reason: SkipReason::Running,
                 });
             } else {
-                prunes.push(Action::Prune {
-                    backend: view.backend.into(),
-                    name: inst.name.clone(),
-                    version: inst.version.clone(),
-                });
+                match view.capability {
+                    Capability::Acts => prunes.push(Action::Prune {
+                        backend: view.backend.into(),
+                        name: inst.name.clone(),
+                        version: inst.version.clone(),
+                    }),
+                    // Pushed straight into `actions`, not `prunes`: this is a
+                    // report, not a removal dotpkg is about to perform, so it
+                    // does not belong in the bucket that install-before-
+                    // uninstall ordering exists for. Every other `Skip` this
+                    // function emits is pushed the same direct way.
+                    Capability::ReportsOnly => actions.push(Action::Skip {
+                        backend: view.backend.into(),
+                        name: inst.name.clone(),
+                        reason: SkipReason::ReportedOnly(Divergence::Prune {
+                            version: inst.version.clone(),
+                        }),
+                    }),
+                }
             }
         } else if !view.helpers.contains(&inst.name.key()) {
             reports.push(Action::Unmanaged {
@@ -358,14 +475,31 @@ pub fn plan(
     let mut prunes = Vec::new();
     let mut reports = Vec::new();
 
-    // One pass per backend. Only scoop has a view today; Task 6 adds winget's.
-    let backends = [BackendView {
-        backend: SCOOP,
-        declared: declared.scoop.packages.as_slice(),
-        lock: &lock.scoop,
-        opts: &declared.scoop.opts,
-        helpers: SCOOP_HELPERS,
-    }];
+    // One pass per backend, both real since Task 14: scoop `Acts`, winget
+    // `ReportsOnly` -- Phase 4 stops at scan/plan/lock/report, so nothing
+    // here installs or uninstalls a winget package, but a difference from the
+    // lock is still reported, with its diff, via `SkipReason::ReportedOnly`.
+    // `[winget.opts]` does not exist, so `empty_opts` stands in for it --
+    // `BackendView::opts` still needs *a* `BTreeMap` to borrow, not `None`.
+    let empty_opts: BTreeMap<Name, PkgOpts> = BTreeMap::new();
+    let backends = [
+        BackendView {
+            backend: SCOOP,
+            declared: declared.scoop.packages.as_slice(),
+            lock: &lock.scoop,
+            opts: &declared.scoop.opts,
+            helpers: SCOOP_HELPERS,
+            capability: Capability::Acts,
+        },
+        BackendView {
+            backend: WINGET,
+            declared: declared.winget.packages.as_slice(),
+            lock: &lock.winget,
+            opts: &empty_opts,
+            helpers: &[],
+            capability: Capability::ReportsOnly,
+        },
+    ];
     for view in &backends {
         plan_backend(
             view,
@@ -377,18 +511,6 @@ pub fn plan(
             &mut prunes,
             &mut reports,
         );
-    }
-
-    // Declared winget packages. There is no winget scan in Phase 1 and none is
-    // wanted here — the backend lands in Phase 4. What must not happen in the
-    // meantime is silence: dropping these would print `nothing to do` to a user
-    // whose pkg.toml declares seventeen of them.
-    for name in &declared.winget.packages {
-        actions.push(Action::Skip {
-            backend: WINGET.into(),
-            name: name.clone(),
-            reason: SkipReason::BackendNotImplemented,
-        });
     }
 
     // Install before uninstall: a run that dies partway should leave an extra

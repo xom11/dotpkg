@@ -6,6 +6,13 @@ use crate::lock::Lock;
 use crate::lock::Pin;
 use crate::model::{Name, SCOOP, WINGET};
 use crate::plan::{Action, Plan, SkipReason};
+// Only this file's own tests name `Divergence` directly (`classify` matches
+// `SkipReason::ReportedOnly(divergence)` and calls `divergence.describe()`
+// without needing the type in scope), so the import is `cfg(test)`-gated --
+// otherwise it is unused in a normal build and the crate would no longer be
+// warning-free.
+#[cfg(test)]
+use crate::plan::Divergence;
 use crate::state::State;
 use anyhow::Result;
 use std::io::{BufRead, Write};
@@ -153,14 +160,14 @@ pub fn classify(action: &Action) -> Intent {
             Intent::NeedsArtifact
         }
         Action::Prune { .. } => Intent::NoArtifactNeeded,
-        Action::Skip {
-            backend, reason, ..
-        } => match reason {
+        Action::Skip { reason, .. } => match reason {
             SkipReason::NotLocked => Intent::NotLocked,
             SkipReason::Running => Intent::Skip("running -- stop it first".to_string()),
-            SkipReason::BackendNotImplemented => {
-                Intent::Skip(format!("{backend} backend not implemented until phase 4"))
-            }
+            // Unlike the old `BackendNotImplemented` arm this replaced,
+            // `Divergence::describe()` names no backend of its own -- the
+            // preparation table's own `backend` column, printed to the left
+            // by `render::prepared_line`, already says which one.
+            SkipReason::ReportedOnly(divergence) => Intent::Skip(divergence.describe()),
             // Same shape as Running: dotpkg cannot act on a state it could not
             // establish, and installing over it is exactly the mistake this
             // variant exists to prevent. The user fixes the read (usually by
@@ -286,12 +293,21 @@ impl Preparation {
     /// and did not get, and `main.rs` needs a way to say so both in the
     /// closing table and in the exit code.
     ///
-    /// Deliberately narrower than `skipped_count()`, which also counts a
-    /// declared winget package (`SkipReason::BackendNotImplemented`). That
-    /// skip is permanent and structural until Phase 4 ships -- every single
-    /// run reports it identically, forever -- and must never floor an
-    /// otherwise-clean exit code the way these do. See `is_outstanding` for
-    /// the rule itself.
+    /// Still filtered through `is_outstanding` rather than counting every
+    /// `Outcome::Skipped` outright, even though today the two queries agree:
+    /// `NotLocked` -- the one `SkipReason` `is_outstanding` returns `false`
+    /// for -- never reaches `Outcome::Skipped` at all (`classify` sends it to
+    /// `Intent::NotLocked`, which becomes `Outcome::NotLocked`, and that
+    /// already fails `is_ok()` on its own). `SkipReason::BackendNotImplemented`
+    /// used to be the reason these two counts differed -- permanent and
+    /// structural, reported identically on every run, and the one variant
+    /// that was `Skipped` yet not outstanding -- and it was deleted along
+    /// with the stub loop it existed for once Task 14 gave winget a real
+    /// `Capability::ReportsOnly` view. Nothing has taken its place. The match
+    /// in `is_outstanding` stays exhaustive with no wildcard for exactly this
+    /// reason: the day a `Skipped`-but-not-outstanding `SkipReason` exists
+    /// again, this narrows correctly without anyone having to remember to
+    /// widen it back.
     ///
     /// Named for what the query answers, not for the first variant it
     /// recognised (`running_skips`, before review caught that `Opaque` had
@@ -326,8 +342,14 @@ impl Preparation {
 /// through.
 fn is_outstanding(reason: &SkipReason) -> bool {
     match reason {
-        SkipReason::Running | SkipReason::Opaque => true,
-        SkipReason::NotLocked | SkipReason::BackendNotImplemented => false,
+        // A winget package that differs from the lock is outstanding work
+        // the user asked for and did not get, exactly like a running process
+        // or an unreadable state: dotpkg reports it and, next run, might not
+        // have to -- the package could converge, or the lock could change.
+        // Unlike its predecessor `BackendNotImplemented`, this is not
+        // permanent: it depends on the machine, not on what phase dotpkg is.
+        SkipReason::Running | SkipReason::Opaque | SkipReason::ReportedOnly(_) => true,
+        SkipReason::NotLocked => false,
     }
 }
 
@@ -577,6 +599,16 @@ pub struct Driver {
     pub state: State,
     pub scoop: Scoop,
     pub scan: crate::backend::Scan,
+    /// Winget's half of the same fact `scan` holds for scoop. Kept as its
+    /// own field rather than merged into `scan`: `main.rs` prints each
+    /// scan's `warnings` attributed to its own backend ("warning: scoop: …"
+    /// / "warning: winget: …"), and a plain `Vec<String>` cannot be told
+    /// apart by backend once merged -- merging first would silently mislabel
+    /// every winget warning as scoop's. `main.rs` concatenates `installed`
+    /// and `opaque` from both fields itself, right before calling `plan()`,
+    /// which is backend-agnostic for exactly those two (see `Scan`'s own doc
+    /// comment).
+    pub winget_scan: crate::backend::Scan,
     pub running: crate::model::Running,
 }
 
@@ -586,6 +618,8 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
     let state = State::load_or_empty(state_path)?;
     let scoop = Scoop::discover();
     let scan = scoop.scan()?;
+    let winget = crate::backend::winget::Winget::new(crate::backend::winget::RealWinget);
+    let winget_scan = winget.scan()?;
     let procs = crate::sys::running_processes();
     let running = scoop.running_set(&procs);
     Ok(Driver {
@@ -594,6 +628,7 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
         state,
         scoop,
         scan,
+        winget_scan,
         running,
     })
 }
@@ -697,15 +732,18 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_winget_package_does_not_fail_a_scoop_run() {
-        // Failing the run because Phase 4 has not happened would make apply
-        // unusable for anyone whose pkg.toml has a [winget] section, and the
-        // plan already prints a `!` line for it every single run.
+    fn a_reported_only_winget_package_does_not_fail_a_scoop_run() {
+        // Failing the run because dotpkg cannot act on winget yet would make
+        // apply unusable for anyone whose pkg.toml has a [winget] section,
+        // and the plan already prints a `!` line for it every single run.
         assert!(matches!(
             classify(&Action::Skip {
                 backend: WINGET.into(),
-                name: Name::new("Git.Git"),
-                reason: SkipReason::BackendNotImplemented
+                name: Name::new("Brave.Brave"),
+                reason: SkipReason::ReportedOnly(Divergence::Change {
+                    from: "151.1.93.132".into(),
+                    to: "151.1.93.134".into(),
+                }),
             }),
             Intent::Skip(_)
         ));
@@ -1115,10 +1153,11 @@ mod tests {
 
     #[test]
     fn prepare_refuses_to_stage_a_non_scoop_backend_defensively() {
-        // The planner never actually produces this today -- winget always
-        // comes through as Skip{BackendNotImplemented} -- but stage_and_fetch
-        // must not guess if that ever changes without prepare() being
-        // updated in lockstep.
+        // The planner never actually produces this today -- winget's view has
+        // `Capability::ReportsOnly`, so a version difference always comes
+        // through as Skip{ReportedOnly(..)}, never an Install -- but
+        // stage_and_fetch must not guess if that ever changes without
+        // prepare() being updated in lockstep.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -1289,11 +1328,43 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_skips_finds_the_running_package_but_not_the_backend_not_implemented_one() {
-        // Both are `Outcome::Skipped` and `skipped_count()` counts both --
-        // this is the narrower query `main.rs` needs, which must find only
-        // the shapes that are outstanding work rather than a permanent,
-        // every-run-forever fact about an unimplemented backend.
+    fn is_outstanding_floors_running_opaque_and_reported_only_but_not_not_locked() {
+        // `is_outstanding` is private, so this calls it directly rather than
+        // routing through `prepare()` -- deliberately, for `NotLocked`: that
+        // is the one `SkipReason` left in the `false` arm, and it can no
+        // longer be exercised through `outstanding_skips()` at all, because
+        // `classify` never turns it into `Outcome::Skipped` in the first
+        // place (it becomes `Intent::NotLocked` -> `Outcome::NotLocked`,
+        // which fails `is_ok()` on its own). Until Task 14 deleted
+        // `BackendNotImplemented`, that variant played this same "Skipped but
+        // not outstanding" role and could be shown failing to float through
+        // `prepare()`'s real pipeline; nothing has taken its place, so this
+        // is now the only way to pin the `false` arm at all. The `true` arm
+        // is still also proven end-to-end, below, by
+        // `outstanding_skips_finds_running_opaque_and_reported_only_skips_together`.
+        assert!(is_outstanding(&SkipReason::Running));
+        assert!(is_outstanding(&SkipReason::Opaque));
+        assert!(is_outstanding(&SkipReason::ReportedOnly(
+            Divergence::Change {
+                from: "1".into(),
+                to: "2".into(),
+            }
+        )));
+        assert!(
+            !is_outstanding(&SkipReason::NotLocked),
+            "permanent and structural for THIS run: apply cannot resolve a \
+             version itself, and the run already fails on it via NotLocked, \
+             not via a float"
+        );
+    }
+
+    #[test]
+    fn outstanding_skips_finds_running_opaque_and_reported_only_skips_together() {
+        // The end-to-end proof that all three outstanding `SkipReason`s
+        // really do carry through the whole pipeline -- `prepare()` ->
+        // `classify()` -> `Outcome::Skipped` -> `outstanding_skips()` -- not
+        // just that `is_outstanding` says so in isolation (see the direct
+        // unit test above).
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -1307,51 +1378,17 @@ mod tests {
                     reason: SkipReason::Running,
                 },
                 Action::Skip {
-                    backend: WINGET.into(),
-                    name: Name::new("Git.Git"),
-                    reason: SkipReason::BackendNotImplemented,
-                },
-            ],
-        };
-
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
-        assert_eq!(
-            prep.skipped_count(),
-            2,
-            "the positive control: both really are Skipped outcomes"
-        );
-
-        let outstanding = prep.outstanding_skips();
-        assert_eq!(
-            outstanding,
-            vec![(Name::new("kanata"), "running -- stop it first".to_string())]
-        );
-    }
-
-    #[test]
-    fn outstanding_skips_finds_the_opaque_package_but_not_the_backend_not_implemented_one() {
-        // The Opaque half of the same discrimination, added after review
-        // caught that a query recognising only `Running` by name silently
-        // dropped `Opaque` -- a state dotpkg could not establish is exactly
-        // as much outstanding work as a running process is, and both must
-        // be told apart from the permanent, every-run-forever
-        // `BackendNotImplemented` skip the same way.
-        let root = tempfile::tempdir().unwrap();
-        let stage_dir = tempfile::tempdir().unwrap();
-        let scoop = Scoop::new(root.path().to_path_buf());
-        let lock = Lock::default();
-        let declared = Config::default();
-        let plan = Plan {
-            actions: vec![
-                Action::Skip {
                     backend: SCOOP.into(),
                     name: Name::new("zellij"),
                     reason: SkipReason::Opaque,
                 },
                 Action::Skip {
                     backend: WINGET.into(),
-                    name: Name::new("Git.Git"),
-                    reason: SkipReason::BackendNotImplemented,
+                    name: Name::new("Brave.Brave"),
+                    reason: SkipReason::ReportedOnly(Divergence::Change {
+                        from: "151.1.93.132".into(),
+                        to: "151.1.93.134".into(),
+                    }),
                 },
             ],
         };
@@ -1359,17 +1396,28 @@ mod tests {
         let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(
             prep.skipped_count(),
-            2,
-            "the positive control: both really are Skipped outcomes"
+            3,
+            "the positive control: all three really are Skipped outcomes"
         );
 
         let outstanding = prep.outstanding_skips();
         assert_eq!(
             outstanding,
-            vec![(
-                Name::new("zellij"),
-                "installed, but its state could not be read -- see the warnings above".to_string()
-            )]
+            vec![
+                (Name::new("kanata"), "running -- stop it first".to_string()),
+                (
+                    Name::new("zellij"),
+                    "installed, but its state could not be read -- see the warnings above"
+                        .to_string()
+                ),
+                (
+                    Name::new("Brave.Brave"),
+                    "151.1.93.132 -> 151.1.93.134 -- reported only, dotpkg cannot install \
+                     or remove winget packages yet"
+                        .to_string()
+                ),
+            ],
+            "all three must float -- none of them is permanent and structural"
         );
     }
 

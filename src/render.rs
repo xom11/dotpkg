@@ -2,6 +2,12 @@ use crate::apply::{Outcome, Preparation, Prepared};
 use crate::execute::{Execution, ItemResult};
 use crate::model::Name;
 use crate::plan::{Action, Plan, SkipReason};
+// Only this file's own tests name `Divergence` directly (`render`'s match
+// arm binds `divergence` and calls `.describe()` without needing the type in
+// scope), so the import is `cfg(test)`-gated -- otherwise it is unused in a
+// normal build and the crate would no longer be warning-free.
+#[cfg(test)]
+use crate::plan::Divergence;
 
 /// The plan is the product here: `status` is this and nothing else, and in
 /// Phase 2 `apply` prints exactly this before asking for confirmation.
@@ -61,9 +67,7 @@ pub fn render(plan: &Plan) -> String {
                 let why = match reason {
                     SkipReason::Running => "running -- stop it first".to_string(),
                     SkipReason::NotLocked => "no lock entry -- run `dotpkg update`".to_string(),
-                    SkipReason::BackendNotImplemented => {
-                        format!("{backend} backend not implemented until phase 4")
-                    }
+                    SkipReason::ReportedOnly(divergence) => divergence.describe(),
                     SkipReason::Opaque => {
                         "installed, but its state could not be read -- see the warnings above"
                             .to_string()
@@ -717,7 +721,9 @@ mod tests {
                 Action::Skip {
                     backend: WINGET.into(),
                     name: "Git.Git".into(),
-                    reason: SkipReason::BackendNotImplemented,
+                    reason: SkipReason::ReportedOnly(Divergence::Install {
+                        version: "2.55.0".into(),
+                    }),
                 },
                 Action::Unmanaged {
                     backend: SCOOP.into(),
@@ -867,21 +873,48 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_winget_package_says_why_it_is_not_acted_on() {
+    fn a_winget_package_that_differs_from_the_lock_prints_both_versions_and_says_reported_only() {
         // The user must be able to tell "dotpkg saw this and cannot act yet"
-        // apart from "dotpkg never saw it". A blank line does neither.
+        // apart from "dotpkg never saw it" -- and must be able to see the
+        // diff itself (both versions), not just the fact that one exists:
+        // hiding that Brave is `151.1 -> 151.2` throws away the whole product
+        // of `status`.
         let plan = Plan {
             actions: vec![Action::Skip {
                 backend: WINGET.into(),
                 name: "Brave.Brave".into(),
-                reason: SkipReason::BackendNotImplemented,
+                reason: SkipReason::ReportedOnly(Divergence::Change {
+                    from: "151.1.93.132".into(),
+                    to: "151.1.93.134".into(),
+                }),
             }],
         };
         let out = render(&plan);
         assert!(out.contains("Brave.Brave"), "got: {out}");
         assert!(
-            out.contains("winget backend not implemented until phase 4"),
-            "got: {out}"
+            out.contains("151.1.93.132") && out.contains("151.1.93.134"),
+            "both versions must be visible, not just \"differs\": {out}"
+        );
+        assert!(out.contains("reported only"), "got: {out}");
+    }
+
+    #[test]
+    fn a_plan_with_no_winget_divergence_never_prints_reported_only() {
+        // The counterweight to the assertion above: without it, an
+        // unconditional "reported only" line would satisfy it on every plan,
+        // winget or not.
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: SCOOP.into(),
+                name: "ripgrep".into(),
+                version: "14.1.1".into(),
+                arch: None,
+            }],
+        };
+        let out = render(&plan);
+        assert!(
+            !out.contains("reported only"),
+            "no winget divergence in this plan: {out}"
         );
     }
 

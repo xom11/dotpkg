@@ -1140,6 +1140,89 @@ fn status_says_so_when_the_lock_is_one_apply_would_refuse() {
     );
 }
 
+// -- Phase 4 task 14: winget wired into the binary --------------------------
+//
+// Before this task nothing outside `src/backend/winget.rs` ever constructed a
+// winget backend, so `dotpkg status`/`apply` were blind to it no matter what
+// was on the machine. These pin the wiring end to end through the real
+// compiled binary rather than through `plan()`/`Winget` directly.
+//
+// This dev machine has no `winget` binary on `PATH` -- winget is a Windows
+// tool -- so `Winget::scan()` deterministically takes its "cannot be run"
+// branch on every run here: an empty `Scan` plus exactly one warning,
+// mirroring `Scoop::scan`'s own missing-root behaviour. That determinism is
+// exactly what makes "no test depends on a real machine's winget packages"
+// true by construction here: there are none to depend on. It also means these
+// two tests cannot exercise the "winget IS installed" branch -- only a real
+// Windows machine with winget on `PATH` can -- so they assert the one thing
+// that holds on both: no crash, and no second message on top of the one
+// `Winget::scan` already prints.
+
+#[test]
+fn status_stays_quiet_about_winget_beyond_one_warning_when_the_binary_is_absent() {
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        "{}",
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+
+    let out = f.run(&["status"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status stays read-only and must not fail over an absent winget: \
+         stdout: {stdout} stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("warning: winget:").count(),
+        1,
+        "exactly one warning about winget, not a second on top of it: {stderr}"
+    );
+    // The scoop plan must still be printed and true, proving the wiring did
+    // not break the path that already worked: fzf is declared, locked and
+    // installed at the pinned version, so a converged machine has nothing to
+    // do -- unless the merge silently added a stray winget report.
+    assert!(
+        stdout.contains("nothing to do"),
+        "a converged scoop machine plus an absent winget is still nothing to do: {stdout}"
+    );
+}
+
+#[test]
+fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
+    // `status` and `apply` wire winget through two different code paths --
+    // `main.rs`'s own inline sequence, and `apply::load_everything`'s driver
+    // -- and each must independently avoid a second message when winget is
+    // absent.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"fzf":"installed"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--prepare"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("warning: winget:").count(),
+        1,
+        "exactly one warning about winget, not a second on top of it: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
 // -- Task 14: `update` and `adopt` end to end -----------------------------
 //
 // Added by the whole-branch review, and found by MUTATION rather than by

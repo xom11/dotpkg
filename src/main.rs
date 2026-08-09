@@ -1,7 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dotpkg::backend::{scoop::Scoop, Backend};
+use dotpkg::backend::{
+    scoop::Scoop,
+    winget::{RealWinget, Winget},
+    Backend, Scan,
+};
 use dotpkg::execute::Step;
+use dotpkg::model::{Installed, Name};
 use dotpkg::state::State;
 use std::io::Write;
 use std::path::PathBuf;
@@ -119,17 +124,63 @@ fn refuse(err: anyhow::Error) -> ! {
 ///
 /// A package that failed to PREPARE never becomes a `Step`, so `Execution`
 /// cannot see it; a package skipped for a reason that could differ on the
-/// next run (`Preparation::outstanding_skips` -- running, or opaque) is
-/// outstanding work the user asked for and did not get. Either one means 0
-/// would tell a scheduled task the machine is fine when it is not.
+/// next run (`Preparation::outstanding_skips` -- running, opaque, or
+/// reported-only) is outstanding work the user asked for and did not get.
+/// Any of those means 0 would tell a scheduled task the machine is fine when
+/// it is not.
+///
+/// `has_reported_only` is Task 14's addition and is deliberately its own
+/// parameter rather than folded into `has_running_skips`: `apply::
+/// is_outstanding` already floors a `SkipReason::ReportedOnly` the same way
+/// it floors `Running`/`Opaque`, so at `apply`'s own call site the two
+/// arguments agree by construction today. Kept separate anyway so this
+/// function's own tests can pin the winget rule directly, the same way they
+/// already pin the running/opaque one, rather than trusting that the two
+/// callers' inputs happen to overlap.
 ///
 /// A floor, not an override: a non-zero code passes through untouched.
-fn floor_exit_code(code: i32, preparation_ok: bool, has_outstanding_skips: bool) -> i32 {
-    if code == 0 && (!preparation_ok || has_outstanding_skips) {
+fn floor_exit_code(
+    code: i32,
+    preparation_ok: bool,
+    has_running_skips: bool,
+    has_reported_only: bool,
+) -> i32 {
+    if code == 0 && (!preparation_ok || has_running_skips || has_reported_only) {
         1
     } else {
         code
     }
+}
+
+/// Prints what each scan could not read, attributed to its own backend, then
+/// hands back what `plan()` needs from both: `installed` and `opaque`
+/// concatenate -- `plan()` already filters `installed` by backend, and
+/// `Scan::opaque` is backend-agnostic by construction (see its own doc
+/// comment). `warnings` deliberately does NOT concatenate into one untagged
+/// list; each scan's warnings are printed here, separately, so a winget
+/// warning is never mislabelled "scoop:" or vice versa.
+///
+/// Called before the plan is built, for the same reason `status`'s scoop
+/// warning always was, and now doubled for a second backend:
+/// `docs/phase3-notes.md` records `adopt` discarding `scan.warnings` and
+/// calling a package dotpkg simply could not read "not installed" -- every
+/// command that scans must print what it could not read, or that mistake
+/// happens again, once per backend.
+fn print_scan_warnings_and_merge(
+    scoop_scan: &Scan,
+    winget_scan: &Scan,
+) -> (Vec<Installed>, Vec<Name>) {
+    for w in &scoop_scan.warnings {
+        eprintln!("warning: scoop: {w}");
+    }
+    for w in &winget_scan.warnings {
+        eprintln!("warning: winget: {w}");
+    }
+    let mut installed = scoop_scan.installed.clone();
+    installed.extend(winget_scan.installed.iter().cloned());
+    let mut opaque = scoop_scan.opaque.clone();
+    opaque.extend(winget_scan.opaque.iter().cloned());
+    (installed, opaque)
 }
 
 fn main() -> Result<()> {
@@ -153,24 +204,18 @@ fn main() -> Result<()> {
             let state = State::load_or_empty(&State::default_path())?;
             let scoop = Scoop::discover();
             let scan = scoop.scan()?;
+            let winget = Winget::new(RealWinget);
+            let winget_scan = winget.scan()?;
             let procs = dotpkg::sys::running_processes();
             let running = scoop.running_set(&procs);
 
             // Before the plan, not after: a package missing from the plan
             // because dotpkg could not read it is the one thing the plan
             // itself cannot say.
-            for w in &scan.warnings {
-                eprintln!("warning: scoop: {w}");
-            }
+            let (installed, opaque) = print_scan_warnings_and_merge(&scan, &winget_scan);
 
-            let plan = dotpkg::plan::plan(
-                &declared,
-                &locked,
-                &scan.installed,
-                &scan.opaque,
-                &state,
-                &running,
-            );
+            let plan =
+                dotpkg::plan::plan(&declared, &locked, &installed, &opaque, &state, &running);
             print!("{}", dotpkg::render::render(&plan));
         }
         Command::Apply {
@@ -210,19 +255,30 @@ fn main() -> Result<()> {
             }
 
             let mut d = dotpkg::apply::load_everything(&config, &lock, &state_path)?;
-            for w in &d.scan.warnings {
-                eprintln!("warning: scoop: {w}");
-            }
+            let (installed, opaque) = print_scan_warnings_and_merge(&d.scan, &d.winget_scan);
 
             let plan = dotpkg::plan::plan(
                 &d.declared,
                 &d.locked,
-                &d.scan.installed,
-                &d.scan.opaque,
+                &installed,
+                &opaque,
                 &d.state,
                 &d.running,
             );
             print!("{}", dotpkg::render::render(&plan));
+            // Whether this plan carries any package dotpkg has scanned,
+            // planned and decided differs from the lock but cannot act on --
+            // outstanding work the user asked for and did not get, same as a
+            // running or opaque skip, and floored the same way below.
+            let has_reported_only = plan.actions.iter().any(|a| {
+                matches!(
+                    a,
+                    dotpkg::plan::Action::Skip {
+                        reason: dotpkg::plan::SkipReason::ReportedOnly(_),
+                        ..
+                    }
+                )
+            });
 
             if clone_missing_buckets {
                 for (name, why) in d.scoop.clone_missing_buckets(&d.declared, &d.scoop) {
@@ -256,10 +312,12 @@ fn main() -> Result<()> {
                 println!("  Nothing has been changed.");
                 std::io::stdout().flush().ok();
                 // A package skipped for a reason that could differ on the
-                // next run (running, or opaque) does not fail `is_ok()` --
-                // deliberately, see `Preparation::outstanding_skips`'s doc
-                // comment -- but it is still outstanding work the user asked
-                // for and did not get. The same fact, the same reasoning,
+                // next run (running, opaque, or a winget package that
+                // differs from the lock -- `SkipReason::ReportedOnly`) does
+                // not fail `is_ok()` -- deliberately, see `Preparation::
+                // outstanding_skips`'s doc comment -- but it is still
+                // outstanding work the user asked for and did not get. The
+                // same fact, the same reasoning,
                 // and the same "Exit codes" promise apply here as to the
                 // floor the full `apply` path below applies after `execute`
                 // returns: 2 would be wrong regardless, since `--prepare`
@@ -426,17 +484,31 @@ fn main() -> Result<()> {
             //
             // A package SKIPPED at prepare time for a reason that could
             // differ on the next run (`Preparation::outstanding_skips` --
-            // running, or opaque) floors the same way, and for the same
-            // reason: it is outstanding work the user asked for and did not
-            // get. It is pushed into `ex` above as `Held`, which already
-            // makes `exit_code` return 1 -- but this checks `preparation`
-            // directly, rather than trusting that push alone, for the same
-            // reason the line above does not trust `ex` alone: a skipped
-            // package is a fact about the plan, not about what `execute`
-            // happened to see, and 0 would tell a scheduled task the machine
-            // is fine for as long as the editor stays open, or for as long
-            // as a package's state could not be read.
-            let code = floor_exit_code(code, preparation.is_ok(), !outstanding_skips.is_empty());
+            // running, opaque, or a winget package that differs from the
+            // lock) floors the same way, and for the same reason: it is
+            // outstanding work the user asked for and did not get. It is
+            // pushed into `ex` above as `Held`, which already makes
+            // `exit_code` return 1 -- but this checks `preparation` directly,
+            // rather than trusting that push alone, for the same reason the
+            // line above does not trust `ex` alone: a skipped package is a
+            // fact about the plan, not about what `execute` happened to see,
+            // and 0 would tell a scheduled task the machine is fine for as
+            // long as the editor stays open, for as long as a package's
+            // state could not be read, or for as long as a winget package
+            // keeps drifting from its pin.
+            //
+            // `has_reported_only` is computed straight from `plan` (above),
+            // not from `outstanding_skips`: `is_outstanding` already floors a
+            // `ReportedOnly` skip the same way, so the two agree here by
+            // construction, but `floor_exit_code`'s own tests need to be able
+            // to pin the winget rule independently of that agreement holding
+            // -- see its doc comment.
+            let code = floor_exit_code(
+                code,
+                preparation.is_ok(),
+                !outstanding_skips.is_empty(),
+                has_reported_only,
+            );
             if code != 0 {
                 std::process::exit(code);
             }
@@ -582,31 +654,48 @@ mod tests {
         // The case tests/cli.rs cannot construct: no fixture may provide a fake
         // scoop binary, so a fully successful non-empty apply is unreachable there.
         // This is the only case that distinguishes `&&` from `||` and `!` from ``.
-        assert_eq!(floor_exit_code(0, true, false), 0);
+        assert_eq!(floor_exit_code(0, true, false, false), 0);
     }
 
     #[test]
     fn outstanding_work_floors_a_zero_to_one() {
         assert_eq!(
-            floor_exit_code(0, false, false),
+            floor_exit_code(0, false, false, false),
             1,
             "a package that failed to prepare"
         );
         assert_eq!(
-            floor_exit_code(0, true, true),
+            floor_exit_code(0, true, true, false),
             1,
             "a package skipped because it is running"
         );
-        assert_eq!(floor_exit_code(0, false, true), 1, "both");
+        assert_eq!(floor_exit_code(0, false, true, false), 1, "both");
+    }
+
+    #[test]
+    fn outstanding_reported_only_work_floors_the_exit_code_to_one() {
+        // Same rule already applied to running skips: work the user asked for
+        // and did not get must not report success to a scheduled task.
+        assert_eq!(floor_exit_code(0, true, false, true), 1);
+        assert_eq!(
+            floor_exit_code(0, true, false, false),
+            0,
+            "the positive sibling"
+        );
     }
 
     #[test]
     fn a_nonzero_code_is_never_lowered_or_raised() {
-        assert_eq!(floor_exit_code(2, true, false), 2);
+        assert_eq!(floor_exit_code(2, true, false, false), 2);
         assert_eq!(
-            floor_exit_code(2, false, true),
+            floor_exit_code(2, false, true, false),
             2,
             "the floor is a floor, not an override"
+        );
+        assert_eq!(
+            floor_exit_code(2, true, false, true),
+            2,
+            "a reported-only skip does not override a nonzero code either"
         );
     }
 
@@ -640,7 +729,7 @@ mod tests {
             "an opaque skip is outstanding work"
         );
         assert_eq!(
-            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty()),
+            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty(), false),
             1,
             "an otherwise-clean run with only an opaque package must not report success"
         );
@@ -652,9 +741,66 @@ mod tests {
         let clean = dotpkg::apply::Preparation::default();
         assert!(clean.outstanding_skips().is_empty());
         assert_eq!(
-            floor_exit_code(0, clean.is_ok(), !clean.outstanding_skips().is_empty()),
+            floor_exit_code(
+                0,
+                clean.is_ok(),
+                !clean.outstanding_skips().is_empty(),
+                false
+            ),
             0,
             "a preparation with nothing outstanding must keep its own exit code"
         );
+    }
+
+    // -- print_scan_warnings_and_merge --------------------------------------
+
+    fn installed(backend: &str, name: &str) -> Installed {
+        Installed {
+            backend: backend.to_string(),
+            name: Name::new(name),
+            version: "1".to_string(),
+            arch: None,
+            bucket: None,
+            bins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn print_scan_warnings_and_merge_concatenates_installed_and_opaque_from_both_backends() {
+        let scoop_scan = Scan {
+            installed: vec![installed(dotpkg::model::SCOOP, "fzf")],
+            opaque: vec![Name::new("zellij")],
+            warnings: vec!["zellij: manifest.json is not usable".to_string()],
+        };
+        let winget_scan = Scan {
+            installed: vec![installed(dotpkg::model::WINGET, "Git.Git")],
+            opaque: vec![Name::new("7zip.7zip")],
+            warnings: vec!["7zip.7zip: installed at 2 disagreeing versions".to_string()],
+        };
+        let (merged_installed, merged_opaque) =
+            print_scan_warnings_and_merge(&scoop_scan, &winget_scan);
+        assert_eq!(
+            merged_installed,
+            vec![
+                installed(dotpkg::model::SCOOP, "fzf"),
+                installed(dotpkg::model::WINGET, "Git.Git"),
+            ],
+            "both backends' installed packages must be present, scoop first"
+        );
+        assert_eq!(
+            merged_opaque,
+            vec![Name::new("zellij"), Name::new("7zip.7zip")],
+            "both backends' opaque names must be present, scoop first"
+        );
+    }
+
+    #[test]
+    fn print_scan_warnings_and_merge_of_two_empty_scans_merges_to_nothing() {
+        // The counterweight: without it, a version that always appended a
+        // hardcoded entry would still pass the test above.
+        let (merged_installed, merged_opaque) =
+            print_scan_warnings_and_merge(&Scan::default(), &Scan::default());
+        assert!(merged_installed.is_empty(), "got {merged_installed:?}");
+        assert!(merged_opaque.is_empty(), "got {merged_opaque:?}");
     }
 }

@@ -9,6 +9,7 @@
 //! is scoop's directory; dotpkg reads it and fetches into it, and that is all.
 
 use anyhow::{Context, Result};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -215,4 +216,178 @@ pub fn resolve_latest(dir: &Path, app: &Name, rev: &str) -> Result<Option<Latest
         path_in_repo,
         fell_back_to_tip,
     }))
+}
+
+/// Every commit touching `path_in_repo`, newest first.
+///
+/// **`--full-history`, deliberately.** Measured: default history
+/// simplification follows one TREESAME parent through a merge, so a version
+/// that reached the bucket only on a branch whose change was superseded is
+/// invisible -- and `adopt` would report "not in this bucket" about a commit
+/// that is a genuine ancestor of HEAD.
+///
+/// This is the opposite choice from `resolve_latest`, and both are right: see
+/// `docs/measurements-2026-08-09-git-resolution.md`, sections B and B'.
+pub fn history(dir: &Path, path_in_repo: &str, rev: &str) -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args([
+            "log",
+            "--full-history",
+            "--format=%H",
+            rev,
+            "--",
+            path_in_repo,
+        ])
+        .output()
+        .with_context(|| format!("cannot run git log in {}", dir.display()))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git log failed in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// `<commit>:<path_in_repo>` for every commit, in **one** process.
+///
+/// Measured on a 400-commit history with the match near the bottom: 2
+/// processes and 0.02 s against 395 processes and 3.16 s, identical answer.
+/// The ratio is from a synthetic repository; the process count is what
+/// transfers, and it transfers to Windows.
+///
+/// `git cat-file --batch` writes `<sha> <type> <size>\n<contents>\n` per
+/// request, in order -- except for a request it cannot resolve, which gets a
+/// single `<spec> missing\n` line and **no body**. Keying on the header shape
+/// rather than assuming one body per request is what stops a missing path from
+/// shifting every later answer onto the wrong commit.
+///
+/// **Writing and reading run concurrently, on purpose.** `git cat-file
+/// --batch` answers each request before reading the next, so its own unread
+/// stdout fills the OS pipe buffer once enough responses have queued up --
+/// at which point it blocks on its own write and stops reading stdin. Write
+/// every spec before ever reading stdout (what a single `wait_with_output()`
+/// after the writes would do) and the parent then blocks on *its* write once
+/// the stdin pipe also fills; neither side can move again. Measured directly
+/// against `git cat-file --batch`, bypassing this function, with ~1.4 KB
+/// bodies (this crate's realistic manifest size, matching the range recorded
+/// in the measurements doc): the naive write-then-read pattern completes at
+/// 2250 requests and hangs from 2300 on, confirmed hung up to 4000 with
+/// `timeout`. `history`'s `--full-history` walk can easily hand this more
+/// commits than that for a bucket with real traffic. A dedicated thread
+/// feeds stdin while stdout (and stderr) are read on other threads, so no
+/// pipe can back up while another is stalled.
+pub fn blobs(dir: &Path, commits: &[String], path_in_repo: &str) -> Result<Vec<Option<Vec<u8>>>> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = Command::new("git")
+        .current_dir(dir)
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("cannot run git cat-file in {}", dir.display()))?;
+    let stdin = child.stdin.take().expect("stdin was piped");
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+
+    let (data, stderr_bytes) = std::thread::scope(|scope| -> Result<(Vec<u8>, Vec<u8>)> {
+        let writer = scope.spawn(move || -> std::io::Result<()> {
+            let mut stdin = stdin;
+            for c in commits {
+                writeln!(stdin, "{c}:{path_in_repo}")?;
+            }
+            Ok(())
+        });
+        let stderr_reader = scope.spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut stderr = stderr;
+            let mut buf = Vec::new();
+            stderr.read_to_end(&mut buf)?;
+            Ok(buf)
+        });
+
+        let mut data = Vec::new();
+        stdout
+            .read_to_end(&mut data)
+            .with_context(|| format!("cannot read git cat-file in {}", dir.display()))?;
+
+        let stderr_bytes = stderr_reader
+            .join()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "git cat-file stderr reader thread panicked in {}",
+                    dir.display()
+                )
+            })?
+            .with_context(|| format!("cannot read git cat-file stderr in {}", dir.display()))?;
+
+        writer
+            .join()
+            .map_err(|_| {
+                anyhow::anyhow!("git cat-file writer thread panicked in {}", dir.display())
+            })?
+            .with_context(|| format!("cannot feed git cat-file in {}", dir.display()))?;
+
+        Ok((data, stderr_bytes))
+    })?;
+
+    // Unlike every other function in this file, `blobs` used to skip this
+    // check: `wait_with_output()` was called but `out.status` was never
+    // read. A git failure (not a repo, a corrupt repository, a broken git
+    // binary) then produced empty stdout with no diagnostic, and the parser
+    // below read that as "every commit is missing" -- the same silent
+    // mis-attribution the missing-object parsing exists to prevent,
+    // arriving by a different route.
+    let status = child
+        .wait()
+        .with_context(|| format!("cannot wait for git cat-file in {}", dir.display()))?;
+    anyhow::ensure!(
+        status.success(),
+        "git cat-file failed in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&stderr_bytes).trim()
+    );
+
+    let mut answers = Vec::with_capacity(commits.len());
+    let mut i = 0usize;
+    for _ in commits {
+        let Some(nl) = data[i..].iter().position(|b| *b == b'\n').map(|p| i + p) else {
+            answers.push(None);
+            continue;
+        };
+        let header = String::from_utf8_lossy(&data[i..nl]).into_owned();
+        let fields: Vec<&str> = header.split_whitespace().collect();
+        // "<spec> missing" -- two fields, no body. Anything that is not a
+        // three-field "<sha> <type> <size>" header is treated the same way:
+        // no body to consume, so the next answer starts on the next line.
+        let size = match fields.as_slice() {
+            [_, _, size] => size.parse::<usize>().ok(),
+            _ => None,
+        };
+        match size {
+            // `+ 1` beyond the body itself: every response, including the
+            // last, is followed by a bare newline git adds. Requiring it to
+            // be present too (rather than just the body) keeps `i` at or
+            // below `data.len()` in every case, so the next loop iteration's
+            // `data[i..]` is a valid (possibly empty) slice instead of a
+            // panic on a stream truncated by, say, the failure above.
+            Some(n) if nl + 1 + n < data.len() => {
+                answers.push(Some(data[nl + 1..nl + 1 + n].to_vec()));
+                i = nl + 1 + n + 1;
+            }
+            _ => {
+                answers.push(None);
+                i = nl + 1;
+            }
+        }
+    }
+    Ok(answers)
 }

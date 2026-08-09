@@ -147,3 +147,59 @@ pub fn case_renamed_bucket(f: &Fixture, name: &str) -> (String, String) {
     git(&dir, &["update-ref", "refs/heads/main", &c2]);
     (c1, c2)
 }
+
+/// `count` linear commits to `bucket/tool.json`, each carrying a body in the
+/// realistic 1-3 KB manifest range, built through `git fast-import` fed from a
+/// real file rather than a pipe -- so constructing the fixture itself cannot
+/// hit the deadlock the fixture exists to reproduce. `f.commit` would work
+/// too, but at two `git` subprocesses per commit it is far too slow at the
+/// sizes this shape needs; `fast-import` builds thousands of commits in one
+/// process.
+///
+/// Returns the bucket dir and the commits newest-first (as `git log` would
+/// give them), each carrying `"version": "1.0.<n>"` where `<n>` counts down
+/// from `count` at position 0.
+pub fn deep_history(f: &Fixture, name: &str, count: usize) -> (PathBuf, Vec<String>) {
+    let dir = f.bucket(name);
+    const PAD: usize = 1400; // pushes each body into the ~1.4 KB range measured.
+    let mut script: Vec<u8> = Vec::new();
+    for i in 1..=count {
+        let body = format!(
+            "{{\n    \"version\": \"1.0.{i}\",\n    \"notes\": \"{}\"\n}}\n",
+            "x".repeat(PAD)
+        );
+        let msg = format!("tool.json 1.0.{i}");
+        script.extend_from_slice(b"commit refs/heads/main\n");
+        script.extend_from_slice(format!("mark :{i}\n").as_bytes());
+        script.extend_from_slice(b"committer t <t@example.invalid> 0 +0000\n");
+        script.extend_from_slice(format!("data {}\n", msg.len()).as_bytes());
+        script.extend_from_slice(msg.as_bytes());
+        script.push(b'\n');
+        if i > 1 {
+            script.extend_from_slice(format!("from :{}\n", i - 1).as_bytes());
+        }
+        script.extend_from_slice(b"M 100644 inline bucket/tool.json\n");
+        script.extend_from_slice(format!("data {}\n", body.len()).as_bytes());
+        script.extend_from_slice(body.as_bytes());
+        script.push(b'\n');
+    }
+    let import_path = f.home.path().join("fast-import.txt");
+    std::fs::write(&import_path, &script).unwrap();
+    let file = std::fs::File::open(&import_path).unwrap();
+    let out = Command::new("git")
+        .current_dir(&dir)
+        .args(["fast-import", "--quiet"])
+        .stdin(std::process::Stdio::from(file))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "fast-import failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let commits: Vec<String> = git(&dir, &["log", "--format=%H"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    (dir, commits)
+}

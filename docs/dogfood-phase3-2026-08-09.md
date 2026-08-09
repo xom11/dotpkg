@@ -578,8 +578,14 @@ artificial rewind in Q3.
 `update`'s carry-through warning — the one `docs/phase3-notes.md` records as the
 only survivor in `src/update.rs`, closed by a test — never fired here.
 
-**A lock or opt naming an undeclared bucket** (`NotFound { searched: [stated] }`).
-Still untested, as `docs/phase3-notes.md` records.
+**A lock or opt naming an undeclared bucket.** This dogfood did not exercise
+it — every bucket the machine's lock and opts named was declared. It was
+untested at the time this dogfood ran, but was subsequently closed by the
+scoped re-review's `9e8092d`: that commit gave the case its own
+`BucketChoice::Undeclared` exit, distinct from `NotFound`, with three tests
+and a negative control (see `docs/phase3-notes.md`, "Closed by the scoped
+re-review of the final fix wave"). The `NotFound { searched: [stated] }`
+shape this entry originally named no longer exists for this case.
 
 **Medium integrity.** Everything ran over plain elevated `ssh`, which is why
 `actionlint`, `antigravity` and `zellij` are unreadable throughout. That quirk

@@ -1,0 +1,25 @@
+Found zoxide [ajeetdsouza.zoxide]
+Version: 0.9.0
+Publisher: Ajeet D'Souza
+Author: Ajeet D'Souza
+Description: zoxide is a smarter cd command, inspired by z and autojump. It remembers which directories you use most frequently, so you can "jump" to them in just a few keystrokes. zoxide works on all major shells.
+Homepage: https://github.com/ajeetdsouza/zoxide
+License: MIT
+License Url: https://github.com/ajeetdsouza/zoxide/blob/main/LICENSE
+Copyright: Copyright 2020 Ajeet D'Souza
+Copyright Url: https://github.com/ajeetdsouza/zoxide/blob/main/LICENSE
+Release Notes Url: https://github.com/ajeetdsouza/zoxide/releases/tag/v0.9.0
+Tags:
+  autojump
+  cli
+  fasd
+  fzf
+  jump
+  rust
+  z
+Installer:
+  Installer Type: portable (zip)
+  Installer Url: https://github.com/ajeetdsouza/zoxide/releases/download/v0.9.0/zoxide-0.9.0-aarch64-pc-windows-msvc.zip
+  Installer SHA256: 674b98ef20400d02d1ce5950c83a0fdfa96ea9d720b39d86d828a2111f54e4c5
+  Release Date: 2023-01-08
+  Offline Distribution Supported: true

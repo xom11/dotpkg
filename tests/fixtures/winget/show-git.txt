@@ -1,0 +1,31 @@
+Found Git [Git.Git]
+Version: 2.55.0.3
+Publisher: The Git Development Community
+Publisher Url: https://gitforwindows.org/
+Publisher Support Url: https://github.com/git-for-windows/git/issues
+Moniker: git
+Description:
+  Git is a free and open source distributed version control system designed to handle everything from small to very large projects with speed and efficiency.
+  Git for Windows focuses on offering a lightweight, native set of tools that bring the full feature set of the Git SCM to Windows while providing appropriate user interfaces for experienced Git users and novices alike.
+Homepage: https://gitforwindows.org/
+License: GPL-2.0
+License Url: https://github.com/git-for-windows/build-extra/blob/HEAD/LICENSE.txt
+Copyright: Copyright (C) 1989, 1991 Free Software Foundation, Inc.
+Release Notes:
+  Changes since Git for Windows v2.55.0(2) (July 2nd 2026)
+  New Features
+  - Comes with Git Credential Manager v2.9.0.
+  Bug Fixes
+  - Fixes heap overflows in the credential helper wincred, see GHSA-rxqw-wxqg-g7hw for full details.
+Release Notes Url: https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.3
+Documentation:
+  Wiki: https://github.com/git-for-windows/git/wiki
+Tags:
+  git
+  vcs
+Installer:
+  Installer Type: inno
+  Installer Url: https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/Git-2.55.0.3-arm64.exe
+  Installer SHA256: e3d7f5a2214f214f0a93cf0d8915dab236a0e91c7de6de70a7dbde9a61c794db
+  Release Date: 2026-07-14
+  Offline Distribution Supported: true

@@ -1,0 +1,4 @@
+Name                      Id        Version    Source
+------------------------------------------------------
+7-Zip 26.01 (x64 edition) 7zip.7zip 26.01.00.0 winget
+7-Zip 26.02 (x64)         7zip.7zip 26.02      winget

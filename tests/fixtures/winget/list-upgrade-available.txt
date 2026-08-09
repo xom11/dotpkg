@@ -1,0 +1,16 @@
+Name             Id                       Version                       Available                     Source
+------------------------------------------------------------------------------------------------------------
+Codex CLI        OpenAI.Codex             0.145.0                       0.146.1                       winget
+Google Chrome    Google.Chrome            150.0.7871.187                151.0.7922.109                winget
+Lark             ByteDance.Lark           7.72.9                        7.73.11                       winget
+Obsidian         Obsidian.Obsidian        1.12.7                        1.13.4                        winget
+Oh My Posh       JanDeDobbeleer.OhMyPosh  29.36.0.0                     30.6.3                        winget
+Tailscale        Tailscale.Tailscale      1.98.2                        1.102.2                       winget
+Telegram Desktop Telegram.TelegramDesktop 7.0.6                         7.0.9                         winget
+Warp             Warp.Warp                v0.2026.07.15.08.55.stable_01 v0.2026.07.29.09.05.stable_02 winget
+9 upgrades available.
+
+The following packages have an upgrade available, but require explicit targeting for upgrade:
+Name    Id              Version  Available Source
+-------------------------------------------------
+Discord Discord.Discord 1.0.9244 1.0.9251  winget

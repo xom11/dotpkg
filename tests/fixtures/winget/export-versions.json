@@ -1,0 +1,188 @@
+{
+	"$schema" : "https://aka.ms/winget-packages.schema.2.0.json",
+	"CreationDate" : "2026-08-09T20:56:04.103-00:00",
+	"Sources" : 
+	[
+		{
+			"Packages" : 
+			[
+				{
+					"PackageIdentifier" : "7zip.7zip",
+					"Version" : "26.02"
+				},
+				{
+					"PackageIdentifier" : "AutoHotkey.AutoHotkey",
+					"Version" : "2.0.26"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.Office",
+					"Version" : "16.0.20228.20158"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.OneDrive",
+					"Version" : "26.129.0706.0004"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.PowerShell",
+					"Version" : "7.6.4.0"
+				},
+				{
+					"PackageIdentifier" : "wez.wezterm",
+					"Version" : "20240203-110809-5046fc22"
+				},
+				{
+					"PackageIdentifier" : "gerardog.gsudo",
+					"Version" : "2.6.1"
+				},
+				{
+					"PackageIdentifier" : "Google.Chrome",
+					"Version" : "150.0.7871.187"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VisualStudio.2022.BuildTools",
+					"Version" : "> 17.14.37"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.Edge",
+					"Version" : "151.0.4129.72"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VCRedist.2015+.x64",
+					"Version" : "14.51.36247.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VCRedist.2015+.arm64",
+					"Version" : "14.51.36247.0"
+				},
+				{
+					"PackageIdentifier" : "DEVCOM.JetBrainsMonoNerdFont",
+					"Version" : "3.3.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VCRedist.2015+.x86",
+					"Version" : "14.51.36247.0"
+				},
+				{
+					"PackageIdentifier" : "Tailscale.Tailscale",
+					"Version" : "1.98.2"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsSDK.10.0.26100",
+					"Version" : "10.0.26100.7705"
+				},
+				{
+					"PackageIdentifier" : "Brave.Brave",
+					"Version" : "151.1.93.134"
+				},
+				{
+					"PackageIdentifier" : "BurntSushi.ripgrep.MSVC",
+					"Version" : "15.2.0"
+				},
+				{
+					"PackageIdentifier" : "Discord.Discord",
+					"Version" : "1.0.9244"
+				},
+				{
+					"PackageIdentifier" : "ByteDance.Lark",
+					"Version" : "7.72.9"
+				},
+				{
+					"PackageIdentifier" : "OpenAI.Codex",
+					"Version" : "0.145.0"
+				},
+				{
+					"PackageIdentifier" : "PhatMT97.VKey",
+					"Version" : "4.2.0"
+				},
+				{
+					"PackageIdentifier" : "Rustlang.Rustup",
+					"Version" : "1.29.0"
+				},
+				{
+					"PackageIdentifier" : "Vivaldi.Vivaldi",
+					"Version" : "8.1.4087.62"
+				},
+				{
+					"PackageIdentifier" : "ajeetdsouza.zoxide",
+					"Version" : "0.10.0"
+				},
+				{
+					"PackageIdentifier" : "Obsidian.Obsidian",
+					"Version" : "1.12.7"
+				},
+				{
+					"PackageIdentifier" : "Warp.Warp",
+					"Version" : "v0.2026.07.15.08.55.stable_01"
+				},
+				{
+					"PackageIdentifier" : "Telegram.TelegramDesktop",
+					"Version" : "7.0.6"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VisualStudioCode",
+					"Version" : "1.130.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.OpenCLGLVulkanCompatibilityPack",
+					"Version" : "1.2606.3.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.AppInstaller",
+					"Version" : "1.29.280.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.DotNet.Native.Runtime",
+					"Version" : "2.2.28604.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.UI.Xaml.2.8",
+					"Version" : "8.2511.26001.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VCLibs.Desktop.14",
+					"Version" : "14.0.33728.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.VCLibs.14",
+					"Version" : "14.0.33519.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsAppRuntime.1.6",
+					"Version" : "1.6.9"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsAppRuntime.1.7",
+					"Version" : "1.7.9"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsAppRuntime.1.8",
+					"Version" : "> 1.8.9"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsAppRuntime.2",
+					"Version" : "2.3.1.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WindowsTerminal",
+					"Version" : "1.24.11911.0"
+				},
+				{
+					"PackageIdentifier" : "Microsoft.WSL",
+					"Version" : "2.7.11.0"
+				},
+				{
+					"PackageIdentifier" : "JanDeDobbeleer.OhMyPosh",
+					"Version" : "29.36.0.0"
+				}
+			],
+			"SourceDetails" : 
+			{
+				"Argument" : "https://cdn.winget.microsoft.com/cache",
+				"Identifier" : "Microsoft.Winget.Source_8wekyb3d8bbwe",
+				"Name" : "winget",
+				"Type" : "Microsoft.PreIndexed.Package"
+			}
+		}
+	],
+	"WinGetVersion" : "1.29.280"
+}

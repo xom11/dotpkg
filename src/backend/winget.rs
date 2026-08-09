@@ -320,6 +320,161 @@ pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     scan
 }
 
+/// Strip winget's line ending from every line without disturbing anything
+/// else on it.
+///
+/// Sibling to the identical three lines in `parse_list` above: every fixture
+/// is CRLF (pinned by `.gitattributes`; see `PROVENANCE.md`), and a
+/// `trim`-based defence would only absorb the `\r` by accident -- Task 9's
+/// review found exactly that gap. `show` and `show --versions` get their own
+/// copy rather than sharing `parse_list`'s, so this task's scope stays
+/// confined to the two new functions.
+fn strip_cr(stdout: &str) -> Vec<&str> {
+    stdout
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect()
+}
+
+/// The id winget echoes back in `Found <name> [<Id>]` -- the text between the
+/// last `[` and the trailing `]` on the first line that starts `Found `.
+///
+/// Both `show` and `show --versions` open their stdout with this line, so
+/// both `parse_show` and `parse_versions` need it. `<name>` (`Git`, `RipGrep
+/// MSVC`) is the display/marketing name and is worthless as a `winget --id`
+/// argument; `<Id>` (`Git.Git`, `BurntSushi.ripgrep.MSVC`) is the canonical
+/// spelling -- see `docs/measurements-2026-08-09-winget.md` §3 and this
+/// module's `parse_show` doc comment for why recording it, rather than the
+/// spelling the caller asked with, is the whole point of this call.
+fn found_id(lines: &[&str]) -> Option<String> {
+    let line = lines.iter().find(|l| l.starts_with("Found "))?;
+    let open = line.rfind('[')?;
+    let close = line.rfind(']')?;
+    if close <= open {
+        return None;
+    }
+    Some(line[open + 1..close].to_string())
+}
+
+/// One package `winget show` resolved to: the canonical id it echoed back,
+/// and the version it printed.
+///
+/// `id` is never the spelling the caller asked `show` with -- see
+/// `parse_show`'s doc comment below and `src/model.rs`'s `Name` doc comment,
+/// which this measurement corrected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub id: String,
+    pub version: String,
+}
+
+/// Parse `winget show`'s stdout into the canonical id and the version it
+/// reports.
+///
+/// Written against a call made WITHOUT `-e`/`--exact`. Measured
+/// (`docs/measurements-2026-08-09-winget.md` §3): `--exact` is what makes
+/// `--id` case-sensitive --
+///
+/// | argv | exit | stdout |
+/// |---|---|---|
+/// | `show -e --id Git.Git` | `0` | `Found Git [Git.Git]` |
+/// | `show -e --id git.git` | `0x8A150014` | `No package found matching input criteria.` |
+/// | `show --id git.git` (no `-e`) | `0` | `Found Git [Git.Git]` |
+///
+/// -- so a caller that put `Name::key()` (the folded form dotpkg's own
+/// comparisons use) into `--exact --id` would get "not found" for a package
+/// that exists. Dropping `--exact` both folds case on the way in AND hands
+/// back the canonical spelling on the way out, in the same `Found <name>
+/// [<Id>]` line: one self-verifying call. `<Id>` -- the brackets, never
+/// `<name>` -- is what this function returns as `id`; `<name>` is a
+/// display/marketing name (`Found RipGrep MSVC [BurntSushi.ripgrep.MSVC]`)
+/// and is worthless as a `winget --id` argument.
+///
+/// Refuses -- naming the first 120 characters of stdout, matching
+/// `parse_list`'s style -- if either the `Found` line or the `Version:` line
+/// is missing, rather than returning a `Found` with an empty field: an empty
+/// `Found` would silently be a package named `""` at version `""`, and
+/// Task 13's `resolve_installed`/`resolve_latest` would go on to compare that
+/// against real data.
+pub fn parse_show(stdout: &str) -> Result<Found> {
+    let lines = strip_cr(stdout);
+
+    let id = found_id(&lines).ok_or_else(|| {
+        let head: String = stdout.chars().take(120).collect();
+        anyhow::anyhow!("winget show produced no \"Found <name> [<id>]\" line: {head:?}")
+    })?;
+
+    let version = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Version:"))
+        .map(|rest| rest.trim().to_string())
+        .ok_or_else(|| {
+            let head: String = stdout.chars().take(120).collect();
+            anyhow::anyhow!("winget show produced no \"Version:\" line: {head:?}")
+        })?;
+
+    Ok(Found { id, version })
+}
+
+/// Parse `winget show --versions`' stdout into the canonical id (the same
+/// `Found <name> [<Id>]` line `parse_show` reads) and every version the index
+/// still holds for it, in the order winget printed them.
+///
+/// Retention is a publisher policy, not a winget guarantee -- measured from
+/// 8 (`BurntSushi.ripgrep.MSVC`) to 828 (`JanDeDobbeleer.OhMyPosh`) -- so
+/// `vs.len()` is itself information: Task 13 uses it to say how deep the
+/// index goes when a pin has fallen off the end ("this publisher keeps eight
+/// releases" is more help than "the manifest is gone").
+///
+/// After the `Found` line: skip the `Version` header and the `---` rule
+/// directly under it, then take every remaining non-blank line, trimmed, in
+/// order. Nothing here re-sorts the list -- newest-first is winget's own
+/// ordering (measured: `show`'s `Version:` line agreed with row 0 of
+/// `--versions` on 6 of 6 packages tried, `docs/measurements-2026-08-09-winget.md`
+/// §6), and re-sorting it would silently launder a winget ordering change
+/// into a dotpkg bug instead of surfacing it.
+pub fn parse_versions(stdout: &str) -> Result<(String, Vec<String>)> {
+    let lines = strip_cr(stdout);
+
+    let id = found_id(&lines).ok_or_else(|| {
+        let head: String = stdout.chars().take(120).collect();
+        anyhow::anyhow!(
+            "winget show --versions produced no \"Found <name> [<id>]\" line: {head:?}"
+        )
+    })?;
+
+    let header_idx = lines
+        .iter()
+        .position(|line| line.trim() == "Version")
+        .ok_or_else(|| {
+            let head: String = stdout.chars().take(120).collect();
+            anyhow::anyhow!("winget show --versions produced no \"Version\" header: {head:?}")
+        })?;
+
+    let mut idx = header_idx + 1;
+    if lines
+        .get(idx)
+        .map(|l| !l.is_empty() && l.chars().all(|c| c == '-'))
+        .unwrap_or(false)
+    {
+        idx += 1;
+    }
+
+    let versions: Vec<String> = lines[idx..]
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if versions.is_empty() {
+        let head: String = stdout.chars().take(120).collect();
+        bail!("winget show --versions listed no versions after its header: {head:?}");
+    }
+
+    Ok((id, versions))
+}
+
 /// One `winget` invocation's outcome: the exit code and stdout, verbatim.
 ///
 /// `code` is a plain `i32`, not the `Option<i32>` `execute::CommandReport`

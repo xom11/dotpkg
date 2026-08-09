@@ -1,4 +1,5 @@
 pub mod scoop;
+pub mod winget;
 
 use crate::model::{Installed, Name};
 use anyhow::Result;

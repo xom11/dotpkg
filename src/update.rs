@@ -11,11 +11,10 @@ use std::collections::BTreeMap;
 /// What a bucket said about one package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    Resolved {
-        bucket: String,
-        commit: String,
-        version: String,
-    },
+    /// The pin this backend resolved. `Pin` is deliberately asymmetric, so a
+    /// winget resolution carrying a commit is a compile error rather than a
+    /// bug a test has to catch.
+    Resolved { pin: Pin },
     /// Per package, never fatal to the run.
     Failed { why: String },
 }
@@ -135,16 +134,9 @@ pub fn resolve_into_lock(
             continue;
         }
         match resolutions.get(name) {
-            Some(Resolution::Resolved {
-                bucket,
-                commit,
-                version,
-            }) => {
-                let fresh = Pin::ScoopCommit {
-                    bucket: bucket.clone(),
-                    commit: commit.clone(),
-                    version: version.clone(),
-                };
+            Some(Resolution::Resolved { pin }) => {
+                let fresh = pin.clone();
+                let version = fresh.version().to_string();
                 changes.push(match previous {
                     None => Change::Added {
                         name: name.clone(),
@@ -318,22 +310,29 @@ pub fn run(
                              content, so the bucket tip was pinned instead."
                         ));
                     }
+                    // Worth noting: winget is the opposite case (Task 13/14
+                    // handles it). Measured this phase, `winget --exact --id`
+                    // is case-SENSITIVE, so the folded key is exactly what
+                    // does not work there -- the canonical spelling is the
+                    // only one that resolves. Nothing to change here for it.
                     Resolution::Resolved {
-                        // `key()`, not the display spelling. `choose_bucket`
-                        // folds the directory it opens to `key()` and
-                        // `Scoop::stage` opens what the lock says verbatim, so
-                        // recording `Extras` for a directory that is really
-                        // `extras` resolves here and fails at `apply` on any
-                        // case-sensitive filesystem. Recording the folded key
-                        // records the directory that was actually opened and
-                        // read -- the display spelling names nothing that was
-                        // verified. (Folding inside `stage` instead would also
-                        // close the gap, but it would make `stage` accept a
-                        // bucket spelling that never existed on disk, and
-                        // pkg.lock is a committed file whose diff people read.)
-                        bucket: bucket_name.key().to_string(),
-                        commit: latest.commit,
-                        version: latest.version,
+                        pin: Pin::ScoopCommit {
+                            // `key()`, not the display spelling. `choose_bucket`
+                            // folds the directory it opens to `key()` and
+                            // `Scoop::stage` opens what the lock says verbatim, so
+                            // recording `Extras` for a directory that is really
+                            // `extras` resolves here and fails at `apply` on any
+                            // case-sensitive filesystem. Recording the folded key
+                            // records the directory that was actually opened and
+                            // read -- the display spelling names nothing that was
+                            // verified. (Folding inside `stage` instead would also
+                            // close the gap, but it would make `stage` accept a
+                            // bucket spelling that never existed on disk, and
+                            // pkg.lock is a committed file whose diff people read.)
+                            bucket: bucket_name.key().to_string(),
+                            commit: latest.commit,
+                            version: latest.version,
+                        },
                     }
                 }
                 Ok(None) => Resolution::Failed {
@@ -378,9 +377,7 @@ mod tests {
     }
     fn resolved(bucket: &str, commit: char, version: &str) -> Resolution {
         Resolution::Resolved {
-            bucket: bucket.into(),
-            commit: sha(commit),
-            version: version.into(),
+            pin: locked(bucket, commit, version),
         }
     }
     fn lock_of(entries: &[(&str, Pin)]) -> Lock {

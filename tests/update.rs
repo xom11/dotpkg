@@ -3,10 +3,28 @@ mod common;
 use common::*;
 use dotpkg::lock::{Lock, Pin};
 use dotpkg::model::Name;
-use dotpkg::update::{self, Change, Scope};
+use dotpkg::update::{self, Change, Resolution, Scope};
 
 fn cfg(text: &str) -> dotpkg::config::Config {
     dotpkg::config::parse(text).unwrap()
+}
+
+#[test]
+fn a_winget_resolution_cannot_carry_a_commit() {
+    // A type-level fix, in the spirit of WriteLock/WritePkgToml/WriteState:
+    // the wrong program stops being a bug to be caught and becomes one that
+    // cannot be written. This test documents the shape; the compiler enforces
+    // it. `Resolution::Resolved { bucket, commit, version }` allowed a winget
+    // pin to be built with a bucket and a commit; `Pin` does not.
+    let r = Resolution::Resolved {
+        pin: Pin::WingetVersion {
+            version: "2.55.0".into(),
+        },
+    };
+    let Resolution::Resolved { pin } = r else {
+        panic!("built above")
+    };
+    assert_eq!(pin.version(), "2.55.0");
 }
 
 #[test]

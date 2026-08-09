@@ -108,14 +108,6 @@ impl State {
         self.0.get(backend).and_then(|m| m.get(name)).copied()
     }
 
-    /// Every package dotpkg owns for one backend.
-    pub fn names(&self, backend: &str) -> Vec<Name> {
-        self.0
-            .get(backend)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
     /// Drop entries naming a package that is not installed, returning them.
     ///
     /// Returns nothing if `present` is empty while the state has entries for this

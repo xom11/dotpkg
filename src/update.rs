@@ -196,8 +196,11 @@ pub fn resolve_into_lock(
     Update { lock, changes }
 }
 
-use crate::bucket::{self, BucketChoice};
+use crate::backend::scoop::Scoop;
+use crate::backend::{Backend, ResolveCtx};
+use crate::bucket;
 use crate::config::Config;
+use std::cell::RefCell;
 use std::path::Path;
 
 /// Resolve every declared scoop package against the buckets on disk.
@@ -265,95 +268,38 @@ pub fn run(
         }
     }
 
+    // The seam Phase 4 exists to prove: this module used to name two
+    // `crate::bucket` free functions directly (choosing a bucket, then
+    // resolving latest against it), which made "a new backend slots in
+    // without touching the planner" a promise the code did not keep.
+    // `Scoop`'s own `resolve_latest` (`src/backend/scoop.rs`) holds the exact
+    // same logic now -- same precedence, same `--full-history`-free git call,
+    // same fallback-to-tip warning, just reached through `Backend` instead of
+    // named here. `scoop_root` is passed through `ctx` rather than read off
+    // `scoop` itself, so this call resolves against precisely the path this
+    // function was given, unaffected by `Scoop::new`'s own
+    // root-canonicalisation.
+    let scoop = Scoop::new(scoop_root.to_path_buf());
+    let fallback_warnings: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let ctx = ResolveCtx {
+        offline,
+        declared,
+        scoop_root,
+        old,
+        warnings: &fallback_warnings,
+    };
+
     let mut resolutions = BTreeMap::new();
     for name in &declared.scoop.packages {
         if !scope.covers(name) {
             continue;
         }
-        let already = old.scoop.get(name).and_then(|p| match p {
-            Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
-            Pin::WingetVersion { .. } => None,
-        });
-        let resolution = match bucket::choose_bucket(scoop_root, declared, name, already) {
-            BucketChoice::Ambiguous { candidates } => {
-                let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
-                Resolution::Failed {
-                    why: format!(
-                        "{} declared buckets carry it ({}). Say which with \
-                         `[scoop.opts] {name} = {{ bucket = \"...\" }}`.",
-                        candidates.len(),
-                        names.join(", ")
-                    ),
-                }
-            }
-            BucketChoice::NotCloned {
-                name: bucket_name,
-                dir,
-            } => Resolution::Failed {
-                why: bucket::not_cloned_why("it", &bucket_name, &dir),
-            },
-            BucketChoice::Undeclared { name: bucket_name } => Resolution::Failed {
-                why: bucket::not_declared_why("it", &bucket_name),
-            },
-            BucketChoice::NotFound { searched, missing } => Resolution::Failed {
-                why: bucket::not_found_why("it", &searched, &missing),
-            },
-            BucketChoice::Chosen {
-                name: bucket_name,
-                dir,
-                tip,
-            } => match bucket::resolve_latest(&dir, name, &tip.rev) {
-                Ok(Some(latest)) => {
-                    if latest.fell_back_to_tip {
-                        warnings.push(format!(
-                            "{name}: no single commit carries this manifest's current \
-                             content, so the bucket tip was pinned instead."
-                        ));
-                    }
-                    // Worth noting: winget is the opposite case from
-                    // `bucket_name.key()` below. Measured this phase
-                    // (docs/measurements-2026-08-09-winget.md §3): `--exact`
-                    // makes `winget --id` case-sensitive, so the folded key
-                    // cannot be used there the way it is used here. That is
-                    // NOT "so a winget call needs `--exact --id
-                    // <canonical>`" -- an earlier draft of this comment said
-                    // exactly that, and it stopped being true when Task 12
-                    // settled the opposite design: no winget call this crate
-                    // makes ever passes `--exact` at all. It asks `show`
-                    // without it, using whatever spelling was declared, and
-                    // records the canonical id winget echoes back
-                    // (`backend::winget::parse_show`). Nothing to change here
-                    // for it; this file only resolves scoop buckets.
-                    Resolution::Resolved {
-                        pin: Pin::ScoopCommit {
-                            // `key()`, not the display spelling. `choose_bucket`
-                            // folds the directory it opens to `key()` and
-                            // `Scoop::stage` opens what the lock says verbatim, so
-                            // recording `Extras` for a directory that is really
-                            // `extras` resolves here and fails at `apply` on any
-                            // case-sensitive filesystem. Recording the folded key
-                            // records the directory that was actually opened and
-                            // read -- the display spelling names nothing that was
-                            // verified. (Folding inside `stage` instead would also
-                            // close the gap, but it would make `stage` accept a
-                            // bucket spelling that never existed on disk, and
-                            // pkg.lock is a committed file whose diff people read.)
-                            bucket: bucket_name.key().to_string(),
-                            commit: latest.commit,
-                            version: latest.version,
-                        },
-                    }
-                }
-                Ok(None) => Resolution::Failed {
-                    why: format!("bucket {bucket_name} has no manifest for it"),
-                },
-                Err(e) => Resolution::Failed {
-                    why: format!("{e:#}"),
-                },
-            },
-        };
-        resolutions.insert(name.clone(), resolution);
+        resolutions.insert(name.clone(), scoop.resolve_latest(name, &ctx));
     }
+    // Emitted in the same relative order as before this task: per-package
+    // fallback warnings belong here, ahead of the whole-run winget notice
+    // below, matching where the loop used to push them directly.
+    warnings.extend(fallback_warnings.into_inner());
 
     if !declared.winget.packages.is_empty() {
         warnings.push(format!(

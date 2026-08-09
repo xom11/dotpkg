@@ -4,8 +4,24 @@
 //! `fixture` helper is duplicated here rather than shared, for the same
 //! reason it is duplicated there: each integration test binary is its own
 //! compilation unit).
+//!
+//! From Task 13 onward this file also carries `Winget::resolve_latest` and
+//! `Winget::resolve_installed` -- the two `Backend` trait methods that make
+//! `Backend` a real seam rather than decoration. Those tests DO use
+//! `FakeWinget` (`tests/common/fake_winget.rs`), so `mod common;` is pulled
+//! in below; the plain-text parser tests above it stay exactly as Task 12
+//! left them.
 
-use dotpkg::backend::winget::{parse_show, parse_versions};
+mod common;
+
+use common::fake_winget::FakeWinget;
+use dotpkg::backend::winget::{
+    parse_show, parse_versions, Winget, NO_APPLICATIONS_FOUND, NO_VERSION_FOUND,
+};
+use dotpkg::backend::{Backend, ResolveCtx};
+use dotpkg::lock::Pin;
+use dotpkg::model::{Installed, Name, WINGET};
+use dotpkg::update::Resolution;
 
 fn fixture(name: &str) -> String {
     // Rust does no newline translation, so this keeps the CRLF the fixture was
@@ -111,5 +127,196 @@ fn parse_show_and_parse_versions_agree_on_a_version_string_for_the_same_package(
     assert_ne!(
         pinned.version, vs[0],
         "0.9.0 is not the newest (0.10.0) -- a versioned pin must not silently read back as latest"
+    );
+}
+
+// -- Winget::resolve_latest / Winget::resolve_installed (Task 13) ---------
+//
+// The single check that says whether Task 13 worked lives in
+// `src/update.rs`, not here: `update::run` must no longer name
+// `bucket::resolve_latest` directly. These tests are what they became
+// possible to write once that was true -- winget's own two resolvers,
+// exercised through `Backend` with a `FakeWinget` so nothing here ever
+// spawns `winget.exe`.
+
+/// An `Installed` for winget, built by hand. `scan`'s own `rows_to_scan`
+/// (Task 10) never puts an opaque name or a `"> "` version into `installed`
+/// -- so this is the only way `resolve_installed`'s own refusal of one
+/// (`an_opaque_package_is_refused_by_adopt_rather_than_pinned` below) is ever
+/// reachable at all: a caller with a hand-built `Installed`, not `scan`.
+fn installed_winget(id: &str, version: &str) -> Installed {
+    Installed {
+        backend: WINGET.to_string(),
+        name: Name::new(id),
+        version: version.to_string(),
+        arch: None,
+        bucket: None,
+        bins: Vec::new(),
+    }
+}
+
+#[test]
+fn resolving_latest_asks_without_exact_and_pins_what_came_back() {
+    let fake = FakeWinget::returning(0, fixture("show-canonical-echo.txt"));
+    let w = Winget::new(fake.clone());
+    let r = w.resolve_latest(&Name::new("git.git"), &ResolveCtx::offline());
+    assert_eq!(
+        fake.calls(),
+        vec![vec!["show", "--id", "git.git", "--disable-interactivity"]],
+        "no --exact: it is case-sensitive and would refuse this spelling"
+    );
+    let Resolution::Resolved { pin } = r else {
+        panic!("got {r:?}")
+    };
+    assert_eq!(
+        pin,
+        Pin::WingetVersion {
+            version: "2.55.0.3".into()
+        }
+    );
+}
+
+/// The positive sibling to both refusals below: an installed version that is
+/// STILL in the index is confirmed -- via the exact `-v` probe
+/// `show-old-version.txt` was captured from (`PROVENANCE.md`: `show -e --id
+/// ajeetdsouza.zoxide -v 0.9.0 …`, minus the `-e` this crate never passes) --
+/// and pinned, not merely assumed because it was already on disk.
+#[test]
+fn a_pin_whose_version_is_still_in_the_index_is_confirmed_and_pinned() {
+    let fake = FakeWinget::returning(0, fixture("show-old-version.txt"));
+    let w = Winget::new(fake.clone());
+    let inst = installed_winget("ajeetdsouza.zoxide", "0.9.0");
+    let r = w.resolve_installed(&inst, &ResolveCtx::offline());
+    assert_eq!(
+        fake.calls(),
+        vec![vec![
+            "show",
+            "--id",
+            "ajeetdsouza.zoxide",
+            "-v",
+            "0.9.0",
+            "--disable-interactivity"
+        ]]
+    );
+    let Resolution::Resolved { pin } = r else {
+        panic!("got {r:?}")
+    };
+    assert_eq!(
+        pin,
+        Pin::WingetVersion {
+            version: "0.9.0".into()
+        }
+    );
+}
+
+#[test]
+fn a_pin_whose_version_left_the_index_is_refused_and_says_how_deep_the_index_is() {
+    let fake = FakeWinget::script(vec![
+        (NO_VERSION_FOUND, fixture("show-version-gone.txt")),
+        (0, fixture("show-versions-zoxide.txt")),
+    ]);
+    let w = Winget::new(fake);
+    let inst = installed_winget("ajeetdsouza.zoxide", "0.8.0");
+    let Resolution::Failed { why } = w.resolve_installed(&inst, &ResolveCtx::offline()) else {
+        panic!("0.8.0 is not in the index")
+    };
+    assert!(why.contains("0.8.0"), "name the version: {why}");
+    assert!(
+        why.contains("11"),
+        "and how many the publisher keeps: {why}"
+    );
+}
+
+#[test]
+fn a_package_that_left_the_index_entirely_is_a_different_message() {
+    // 0x8A150014 and 0x8A150017 are distinct codes for distinct facts.
+    let fake = FakeWinget::returning(NO_APPLICATIONS_FOUND, fixture("show-package-gone.txt"));
+    let w = Winget::new(fake);
+    let Resolution::Failed { why } =
+        w.resolve_latest(&Name::new("Xyzzy.NoSuch"), &ResolveCtx::offline())
+    else {
+        panic!("absent package")
+    };
+    assert!(
+        why.contains("no longer") || why.contains("not in"),
+        "got {why}"
+    );
+    assert!(
+        !why.contains("version"),
+        "this is not a version problem: {why}"
+    );
+}
+
+/// The same distinct-code principle, on `resolve_installed`'s own path
+/// rather than `resolve_latest`'s: `NO_APPLICATIONS_FOUND` here must read as
+/// "the package is gone", not "this version is gone" -- the message
+/// `NO_VERSION_FOUND` earns in the sibling test above.
+#[test]
+fn resolve_installed_also_tells_a_gone_package_apart_from_a_gone_version() {
+    let fake = FakeWinget::returning(NO_APPLICATIONS_FOUND, fixture("show-package-gone.txt"));
+    let w = Winget::new(fake);
+    let inst = installed_winget("Xyzzy.NoSuch", "1.0.0");
+    let Resolution::Failed { why } = w.resolve_installed(&inst, &ResolveCtx::offline()) else {
+        panic!("absent package")
+    };
+    assert!(
+        why.contains("no longer") || why.contains("not in"),
+        "got {why}"
+    );
+}
+
+#[test]
+fn an_opaque_package_is_refused_by_adopt_rather_than_pinned() {
+    // rows_to_scan never puts an opaque name into `installed`, so
+    // resolve_installed cannot be reached for one through scan -- but it is
+    // public, and a caller with a hand-built Installed must still be refused.
+    let fake = FakeWinget::returning(0, fixture("show-git.txt"));
+    let w = Winget::new(fake.clone());
+    let inst = installed_winget("Microsoft.VisualStudio.2022.BuildTools", "> 17.14.37");
+    let Resolution::Failed { why } = w.resolve_installed(&inst, &ResolveCtx::offline()) else {
+        panic!("a version dotpkg cannot vouch for must not be pinned")
+    };
+    assert!(why.contains("> 17.14.37"), "got {why}");
+    // The zero-count pairing for this refusal: "before spawning anything" is
+    // only true if nothing was spawned, and `fake.returning(0, ...)` would
+    // silently make this pass even if the refusal check were deleted, since
+    // then resolve_installed would go on to call the fake and still get a
+    // success back. Only this count actually catches that.
+    assert_eq!(
+        fake.calls().len(),
+        0,
+        "refused before spawning anything: {:?}",
+        fake.calls()
+    );
+}
+
+#[test]
+fn resolve_latest_reports_when_winget_cannot_be_spawned_at_all() {
+    let fake = FakeWinget::failing_to_spawn();
+    let w = Winget::new(fake);
+    let Resolution::Failed { why } =
+        w.resolve_latest(&Name::new("Git.Git"), &ResolveCtx::offline())
+    else {
+        panic!("a spawn failure must refuse")
+    };
+    assert!(why.contains("PATH") || why.contains("winget"), "{why}");
+}
+
+#[test]
+fn an_unrecognised_nonzero_exit_is_reported_with_the_code_and_first_line() {
+    // Neither of the two named codes this crate trusts -- a generic failure
+    // still refuses, and still says something a user can act on rather than
+    // silently becoming a resolved pin for the wrong reason.
+    let fake = FakeWinget::returning(7, "boom, something else failed\nmore detail\n".to_string());
+    let w = Winget::new(fake);
+    let Resolution::Failed { why } =
+        w.resolve_latest(&Name::new("Some.Pkg"), &ResolveCtx::offline())
+    else {
+        panic!("nonzero exit must refuse")
+    };
+    assert!(why.contains('7'), "name the exit code: {why}");
+    assert!(
+        why.contains("boom, something else failed"),
+        "name the first line: {why}"
     );
 }

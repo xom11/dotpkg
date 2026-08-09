@@ -1,5 +1,7 @@
-use super::{Backend, Scan};
+use super::{Backend, ResolveCtx, Scan};
+use crate::lock::Pin;
 use crate::model::{Installed, Name, WINGET};
+use crate::update::Resolution;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
@@ -610,5 +612,175 @@ impl<C: WingetCmd> Backend for Winget<C> {
             out.stdout.lines().next().unwrap_or("(no output)")
         );
         Ok(rows_to_scan(parse_list(&out.stdout)?))
+    }
+
+    /// Ask winget what the declared spelling resolves to right now.
+    ///
+    /// `["show", "--id", <the declared spelling>, "--disable-interactivity"]`
+    /// -- **no `--exact`**. Measured (`PROVENANCE.md`, `parse_show`'s own doc
+    /// comment): `--exact` is what makes `--id` case-sensitive, so a folded
+    /// or wrong-case spelling gets `NO_APPLICATIONS_FOUND` for a package that
+    /// exists. Dropping it both folds case on the way in and hands back the
+    /// canonical id on the way out, in the same `Found <name> [<Id>]` line
+    /// `parse_show` reads -- ask with what the user wrote, `parse_show`
+    /// records what winget matched.
+    ///
+    /// `ctx` is unused: unlike `Scoop::resolve_latest`, nothing here reads
+    /// `declared`, `scoop_root`, `old` or `offline` -- winget has no bucket to
+    /// choose and this call is not gated on network reachability, matching
+    /// the brief's own test (`ResolveCtx::offline()` still resolves).
+    fn resolve_latest(&self, name: &Name, _ctx: &ResolveCtx) -> Resolution {
+        let id = name.to_string();
+        let out = match self
+            .cmd
+            .run(&["show", "--id", &id, "--disable-interactivity"])
+        {
+            Ok(out) => out,
+            Err(e) => {
+                return Resolution::Failed {
+                    why: format!("winget show could not be run: {e:#}"),
+                }
+            }
+        };
+        if out.code == NO_APPLICATIONS_FOUND {
+            // The package itself is gone -- not "no longer at this version",
+            // which is `NO_VERSION_FOUND`'s fact, not this one's.
+            return Resolution::Failed {
+                why: format!(
+                    "{name}: no longer in the winget index ({})",
+                    out.stdout.lines().next().unwrap_or("(no output)")
+                ),
+            };
+        }
+        if out.code != 0 {
+            return Resolution::Failed {
+                why: format!(
+                    "winget show {name} exited {}: {}",
+                    out.code,
+                    out.stdout.lines().next().unwrap_or("(no output)")
+                ),
+            };
+        }
+        match parse_show(&out.stdout) {
+            Ok(found) => Resolution::Resolved {
+                pin: Pin::WingetVersion {
+                    version: found.version,
+                },
+            },
+            Err(e) => Resolution::Failed {
+                why: format!("{e:#}"),
+            },
+        }
+    }
+
+    /// Confirm that `inst`'s installed version is still in winget's index --
+    /// the installed version *is* the pin, but only if `show -v` still finds
+    /// it.
+    ///
+    /// Refuses a version starting `"> "` before spawning anything: `rows_to_scan`
+    /// already keeps those out of `installed` (see its own doc comment,
+    /// reason 2), but this method is public API and a caller with a
+    /// hand-built `Installed` must still be refused. Measured: `> 17.14.37`
+    /// is winget saying *at least*, for an install whose exact version it
+    /// cannot determine -- pinning it would write a lock entry that can never
+    /// match.
+    ///
+    /// Otherwise `["show", "--id", <name>, "-v", <version>,
+    /// "--disable-interactivity"]` -- again no `--exact`, for the same reason
+    /// as `resolve_latest`. `NO_VERSION_FOUND` means the package is still in
+    /// the index but this exact version is not: a second call to `--versions`
+    /// answers how deep that index goes, because retention is a publisher
+    /// policy that spans three orders of magnitude (8 for
+    /// `BurntSushi.ripgrep.MSVC`, 828 for `JanDeDobbeleer.OhMyPosh`) and "this
+    /// publisher keeps N releases" is more help than "the manifest is gone".
+    /// `NO_APPLICATIONS_FOUND` means the package itself is gone -- a
+    /// different fact, so a different message, never conflated with the
+    /// version-only one above.
+    fn resolve_installed(&self, inst: &Installed, _ctx: &ResolveCtx) -> Resolution {
+        if inst.version.starts_with("> ") {
+            return Resolution::Failed {
+                why: format!(
+                    "{}: winget reports the installed version as {:?} -- that is winget \
+                     saying *at least*, for an install whose exact version it cannot \
+                     determine, not a version dotpkg can pin",
+                    inst.name, inst.version
+                ),
+            };
+        }
+
+        let id = inst.name.to_string();
+        let out = match self.cmd.run(&[
+            "show",
+            "--id",
+            &id,
+            "-v",
+            &inst.version,
+            "--disable-interactivity",
+        ]) {
+            Ok(out) => out,
+            Err(e) => {
+                return Resolution::Failed {
+                    why: format!("winget show could not be run: {e:#}"),
+                }
+            }
+        };
+
+        if out.code == NO_VERSION_FOUND {
+            let depth =
+                match self
+                    .cmd
+                    .run(&["show", "--id", &id, "--versions", "--disable-interactivity"])
+                {
+                    Ok(versions_out) if versions_out.code == 0 => {
+                        parse_versions(&versions_out.stdout).ok()
+                    }
+                    _ => None,
+                };
+            let why = match depth {
+                Some((_, versions)) => format!(
+                    "{}: version {} is no longer in the winget index -- this publisher \
+                     currently keeps {} version(s) ({}..{})",
+                    inst.name,
+                    inst.version,
+                    versions.len(),
+                    versions.first().map(String::as_str).unwrap_or("?"),
+                    versions.last().map(String::as_str).unwrap_or("?"),
+                ),
+                None => format!(
+                    "{}: version {} is no longer in the winget index",
+                    inst.name, inst.version
+                ),
+            };
+            return Resolution::Failed { why };
+        }
+        if out.code == NO_APPLICATIONS_FOUND {
+            return Resolution::Failed {
+                why: format!(
+                    "{}: no longer in the winget index ({})",
+                    inst.name,
+                    out.stdout.lines().next().unwrap_or("(no output)")
+                ),
+            };
+        }
+        if out.code != 0 {
+            return Resolution::Failed {
+                why: format!(
+                    "winget show {} exited {}: {}",
+                    inst.name,
+                    out.code,
+                    out.stdout.lines().next().unwrap_or("(no output)")
+                ),
+            };
+        }
+        match parse_show(&out.stdout) {
+            Ok(found) => Resolution::Resolved {
+                pin: Pin::WingetVersion {
+                    version: found.version,
+                },
+            },
+            Err(e) => Resolution::Failed {
+                why: format!("{e:#}"),
+            },
+        }
     }
 }

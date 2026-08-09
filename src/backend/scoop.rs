@@ -1,7 +1,9 @@
-use super::{Backend, Scan};
+use super::{Backend, ResolveCtx, Scan};
+use crate::bucket::{self, BucketChoice};
 use crate::lock::Pin;
 use crate::model::{Installed, Name, Running, SCOOP};
 use crate::sys::{Process, EXECUTABLE_SUFFIXES};
+use crate::update::Resolution;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -318,6 +320,186 @@ impl Backend for Scoop {
             });
         }
         Ok(out)
+    }
+
+    /// `update`'s resolver. Moved from `update::run` unchanged (Task 13):
+    /// same precedence in `bucket::choose_bucket` (existing lock entry, then
+    /// `[scoop.opts]`, then a search), same `bucket::resolve_latest` --
+    /// deliberately without `--full-history`, see that function's own doc
+    /// comment -- and the same fallback warning when no single commit carries
+    /// the manifest's current content, now written through `ctx.warnings`
+    /// rather than into a `Vec` `update::run` owned directly (`ResolveCtx`'s
+    /// own doc comment explains why a sink rather than a wider `Resolution`).
+    fn resolve_latest(&self, name: &Name, ctx: &ResolveCtx) -> Resolution {
+        let already = ctx.old.scoop.get(name).and_then(|p| match p {
+            Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
+            Pin::WingetVersion { .. } => None,
+        });
+        match bucket::choose_bucket(ctx.scoop_root, ctx.declared, name, already) {
+            BucketChoice::Ambiguous { candidates } => {
+                let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
+                Resolution::Failed {
+                    why: format!(
+                        "{} declared buckets carry it ({}). Say which with \
+                         `[scoop.opts] {name} = {{ bucket = \"...\" }}`.",
+                        candidates.len(),
+                        names.join(", ")
+                    ),
+                }
+            }
+            BucketChoice::NotCloned {
+                name: bucket_name,
+                dir,
+            } => Resolution::Failed {
+                why: bucket::not_cloned_why("it", &bucket_name, &dir),
+            },
+            BucketChoice::Undeclared { name: bucket_name } => Resolution::Failed {
+                why: bucket::not_declared_why("it", &bucket_name),
+            },
+            BucketChoice::NotFound { searched, missing } => Resolution::Failed {
+                why: bucket::not_found_why("it", &searched, &missing),
+            },
+            BucketChoice::Chosen {
+                name: bucket_name,
+                dir,
+                tip,
+            } => match bucket::resolve_latest(&dir, name, &tip.rev) {
+                Ok(Some(latest)) => {
+                    if latest.fell_back_to_tip {
+                        ctx.warnings.borrow_mut().push(format!(
+                            "{name}: no single commit carries this manifest's current \
+                             content, so the bucket tip was pinned instead."
+                        ));
+                    }
+                    Resolution::Resolved {
+                        pin: Pin::ScoopCommit {
+                            // `key()`, not the display spelling -- see the
+                            // identical comment this replaced in
+                            // `update::run` for why.
+                            bucket: bucket_name.key().to_string(),
+                            commit: latest.commit,
+                            version: latest.version,
+                        },
+                    }
+                }
+                Ok(None) => Resolution::Failed {
+                    why: format!("bucket {bucket_name} has no manifest for it"),
+                },
+                Err(e) => Resolution::Failed {
+                    why: format!("{e:#}"),
+                },
+            },
+        }
+    }
+
+    /// `adopt`'s pin-liveness check. Moved from `adopt::adopt_one` unchanged
+    /// (Task 13): the same bucket hint precedence (an existing lock entry,
+    /// then `install.json`'s `bucket` -- a legitimate hint only here, because
+    /// `adopt` targets packages dotpkg has never touched), the same
+    /// `adopt::resolve_installed` search over the bucket's full history --
+    /// deliberately WITH `--full-history`, the opposite of `resolve_latest`
+    /// above, see `bucket::history`'s doc comment -- and the same shallow-clone
+    /// hint on a search that comes back empty.
+    ///
+    /// `adopt.rs`'s own call site is untouched by this task (Task 15's job is
+    /// routing it, and `update`, through `Backend` generically); this exists
+    /// so the trait -- which both methods belong to -- has a real
+    /// implementation rather than a stub, ready for that wiring.
+    fn resolve_installed(&self, inst: &Installed, ctx: &ResolveCtx) -> Resolution {
+        let already = ctx.old.scoop.get(&inst.name).and_then(|p| match p {
+            Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
+            Pin::WingetVersion { .. } => None,
+        });
+        let hint = already.or(inst.bucket.as_deref());
+        let (bucket_name, dir, rev) =
+            match bucket::choose_bucket(ctx.scoop_root, ctx.declared, &inst.name, hint) {
+                BucketChoice::Chosen { name, dir, tip } => (name, dir, tip.rev),
+                BucketChoice::Ambiguous { candidates } => {
+                    let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
+                    return Resolution::Failed {
+                        why: format!(
+                            "{} declared buckets carry {} ({}). Say which with \
+                             `[scoop.opts] {} = {{ bucket = \"...\" }}`.",
+                            candidates.len(),
+                            inst.name,
+                            names.join(", "),
+                            inst.name
+                        ),
+                    };
+                }
+                BucketChoice::NotCloned { name, dir } => {
+                    return Resolution::Failed {
+                        why: bucket::not_cloned_why(&inst.name.to_string(), &name, &dir),
+                    };
+                }
+                BucketChoice::Undeclared { name } => {
+                    return Resolution::Failed {
+                        why: bucket::not_declared_why(&inst.name.to_string(), &name),
+                    };
+                }
+                BucketChoice::NotFound { searched, missing } => {
+                    return Resolution::Failed {
+                        why: bucket::not_found_why(&inst.name.to_string(), &searched, &missing),
+                    };
+                }
+            };
+
+        let manifest_path = ctx
+            .scoop_root
+            .join("apps")
+            .join(inst.name.to_string())
+            .join("current")
+            .join("manifest.json");
+        let installed_manifest = match std::fs::read(&manifest_path) {
+            Ok(b) => b,
+            Err(e) => {
+                return Resolution::Failed {
+                    why: format!(
+                        "cannot read the installed manifest at {}: {e}. Without it there is \
+                         nothing to match against, and matching on the version alone would \
+                         report a comparison that never happened.",
+                        manifest_path.display()
+                    ),
+                }
+            }
+        };
+
+        match crate::adopt::resolve_installed(
+            &dir,
+            &inst.name,
+            &inst.version,
+            &installed_manifest,
+            &rev,
+        ) {
+            Ok(Some(found)) => Resolution::Resolved {
+                pin: Pin::ScoopCommit {
+                    bucket: bucket_name.key().to_string(),
+                    commit: found.commit,
+                    version: found.version,
+                },
+            },
+            Ok(None) => {
+                let shallow = if bucket::is_shallow(&dir) {
+                    format!(
+                        " -- and bucket {bucket_name} is a SHALLOW clone, so most of its \
+                         history is not on this machine. `git -C {} fetch --unshallow` \
+                         and try again.",
+                        dir.display()
+                    )
+                } else {
+                    String::new()
+                };
+                Resolution::Failed {
+                    why: format!(
+                        "no commit in bucket {bucket_name} carries {} {}{}",
+                        inst.name, inst.version, shallow
+                    ),
+                }
+            }
+            Err(e) => Resolution::Failed {
+                why: format!("{e:#}"),
+            },
+        }
     }
 }
 

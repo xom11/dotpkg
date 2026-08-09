@@ -69,24 +69,21 @@ fn the_lock_update_writes_is_one_apply_would_accept() {
 }
 
 #[test]
-fn an_ambiguous_bucket_keeps_the_old_pin_and_names_both_candidates() {
+fn an_ambiguous_bucket_is_refused_rather_than_guessed_and_names_both_candidates() {
+    // NOT "keeps the old pin", which is what this was called until Task 14:
+    // it runs with `Lock::default()`, deliberately, because an existing lock
+    // entry NAMES a bucket and so decides the question before ambiguity can
+    // arise at all. What this proves is that with nothing to decide it, two
+    // candidate buckets are reported rather than picked between. The
+    // keeps-the-old-pin property is covered at the unit level, in
+    // `src/update.rs`'s `a_failed_reresolve_keeps_the_previous_entry_rather_
+    // than_dropping_it`.
     let f = Fixture::new();
     for b in ["main", "extras"] {
         let dir = f.bucket(b);
         f.commit(&dir, "tool.json", "1.0.0", "v100");
     }
-    let mut old = Lock::default();
-    old.scoop.insert(
-        Name::new("tool"),
-        Pin::ScoopCommit {
-            bucket: "main".into(),
-            commit: "a".repeat(40),
-            version: "0.9.0".into(),
-        },
-    );
 
-    // The lock names a bucket, so it decides -- that arm must be exercised
-    // separately from the ambiguity. Here the lock is dropped to force it.
     let (u, _) = update::run(
         &f.scoop_root(),
         &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
@@ -105,7 +102,6 @@ fn an_ambiguous_bucket_keeps_the_old_pin_and_names_both_candidates() {
         other => panic!("ambiguity must not be guessed: {other:?}"),
     }
     assert!(u.lock.scoop.is_empty(), "nothing resolved, nothing written");
-    let _ = old;
 }
 
 #[test]

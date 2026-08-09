@@ -302,7 +302,11 @@ mod tests {
     /// Windows, the one platform `a_failed_last_write_leaves_a_prefix_that_
     /// plan_does_nothing_about` (tests/adopt.rs) cannot reach.
     #[test]
-    fn write_in_order_calls_lock_then_pkg_toml_then_state_and_stops_on_the_third() {
+    fn write_in_order_calls_lock_then_pkg_toml_then_state_and_propagates_the_last_failure() {
+        // Named for what it can actually discriminate. The third write is the
+        // last, so this test alone cannot tell "stopped after the failure"
+        // from "recorded it and had nothing left to do" -- its sibling below,
+        // where the FIRST write fails, is the short-circuit proof.
         let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
         let result = write_in_order(
             || {

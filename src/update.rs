@@ -577,12 +577,11 @@ mod tests {
 
     // -- wrote_anything --------------------------------------------------
     //
-    // `wrote_anything` has no direct test as of Task 8: it is correct by
-    // inspection, but what it protects names its own failure consequence --
-    // get it wrong and `update` rewrites pkg.lock, and displaces its `.bak`,
-    // on every run of an already-converged machine. These call it directly
-    // rather than through `resolve_into_lock`, so a future change to that
-    // fold cannot make this pass for the wrong reason.
+    // What this protects names its own failure consequence: get it wrong and
+    // `update` rewrites pkg.lock, and displaces its `.bak`, on every run of
+    // an already-converged machine. The three below call it directly rather
+    // than through `resolve_into_lock`, so a future change to that fold
+    // cannot make them pass for the wrong reason.
 
     #[test]
     fn wrote_anything_is_false_when_every_change_is_unchanged() {

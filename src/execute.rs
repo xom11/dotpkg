@@ -23,7 +23,13 @@ pub struct CommandReport {
     pub stderr: String,
 }
 
-/// Every scoop invocation that changes installed software.
+/// Every scoop invocation this crate makes.
+///
+/// It was "every invocation that changes installed software" until `download`
+/// joined it: that one changes nothing, but it is still a scoop process, and
+/// leaving it outside the seam meant no test on any platform could reach the
+/// code that builds its argv. The seam is about which calls are OBSERVABLE in
+/// a test, not about which of them mutate.
 ///
 /// `Err` means the process could not be run at all. It does **not** mean the
 /// operation failed — that is `verify::verdict`'s answer, and only its answer.

@@ -284,10 +284,79 @@ fn report_marker_and_rest(action: &Action) -> (&'static str, String) {
     }
 }
 
+use crate::update::{Change, Update};
+
+/// The diff between the old lock and the new one — the only place both exist
+/// at once, and therefore the only place a user can be told that a
+/// same-version re-pin will produce no action at all.
+pub fn render_update(u: &Update) -> String {
+    let mut out = String::new();
+    for c in &u.changes {
+        let line = match c {
+            Change::Added { name, version } => {
+                format!("  + scoop  {name:<14} {version:<26} (new pin)")
+            }
+            Change::VersionChanged { name, from, to } => format!(
+                "  ^ scoop  {name:<14} {:<26} (version changed)",
+                format!("{from} -> {to}")
+            ),
+            Change::RepinnedSameVersion { name, version } => format!(
+                "  = scoop  {name:<14} {:<26} (apply will not act on this)",
+                format!("{version}, commit re-pinned")
+            ),
+            Change::Dropped { name, version } => {
+                format!("  - scoop  {name:<14} {version:<26} (dropped, no longer declared)")
+            }
+            // Two different facts share this variant, and they must not read
+            // the same: a package that already had a pin genuinely keeps it
+            // (shown, so the reader can tell what is still installed), while
+            // a brand-new package whose first resolution failed has no pin
+            // to keep at all -- saying "kept the previous pin" about it would
+            // be a false line the reader has no way to catch.
+            Change::Kept {
+                name,
+                version: Some(v),
+                why,
+            } => {
+                format!("  ! scoop  {name:<14} {v:<26} kept the previous pin: {why}")
+            }
+            Change::Kept {
+                name,
+                version: None,
+                why,
+            } => {
+                format!("  ! scoop  {name:<14} could not be resolved, nothing to keep: {why}")
+            }
+            // An unchanged package is the ordinary case and would drown the
+            // lines that matter. Counted in the summary instead.
+            Change::Unchanged { .. } => continue,
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+
+    let unchanged = u
+        .changes
+        .iter()
+        .filter(|c| matches!(c, Change::Unchanged { .. }))
+        .count();
+    out.push_str(&format!(
+        "\n  {} changed, {} unchanged, {} could not be resolved.\n",
+        u.changes.len() - unchanged - u.failed_count(),
+        unchanged,
+        u.failed_count(),
+    ));
+    if !u.wrote_anything() {
+        out.push_str("  pkg.lock is already current -- not rewritten.\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::apply::{Outcome, Preparation, Prepared};
+    use crate::lock::Lock;
     use crate::model::{SCOOP, WINGET};
 
     /// A fetched-and-verified outcome, with the staged path `prepare` would
@@ -784,5 +853,207 @@ mod tests {
         };
         let out = render_execution(&ex);
         assert!(out.contains("permission denied"), "{out}");
+    }
+
+    // -- render_update -----------------------------------------------------
+    //
+    // This function produces 100% of what a user of `dotpkg update` reads,
+    // and it shipped with no test of its own -- which is exactly how the
+    // `Kept` variant's false "kept the previous pin" line (printed even when
+    // there was no previous pin at all) reached this file undetected.
+
+    #[test]
+    fn each_change_variant_renders_a_distinguishable_line() {
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![
+                Change::Added {
+                    name: Name::new("fzf"),
+                    version: "0.74.2".into(),
+                },
+                Change::VersionChanged {
+                    name: Name::new("bat"),
+                    from: "0.25.0".into(),
+                    to: "0.26.1".into(),
+                },
+                Change::RepinnedSameVersion {
+                    name: Name::new("ripgrep"),
+                    version: "14.1.0".into(),
+                },
+                Change::Dropped {
+                    name: Name::new("aichat"),
+                    version: "0.30.0".into(),
+                },
+                Change::Kept {
+                    name: Name::new("zellij"),
+                    version: Some("0.44.3".into()),
+                    why: "bucket \"extras\" has no zellij.json".into(),
+                },
+                Change::Unchanged {
+                    name: Name::new("neovim"),
+                },
+            ],
+        };
+        let out = render_update(&u);
+        assert!(out.contains("+ scoop  fzf"), "Added: {out}");
+        assert!(out.contains("^ scoop  bat"), "VersionChanged: {out}");
+        assert!(
+            out.contains("= scoop  ripgrep"),
+            "RepinnedSameVersion: {out}"
+        );
+        assert!(out.contains("- scoop  aichat"), "Dropped: {out}");
+        assert!(out.contains("! scoop  zellij"), "Kept: {out}");
+        // Unchanged is the ordinary case and would drown the lines that
+        // matter -- it must not get a line of its own, only a count.
+        assert!(
+            !out.contains("neovim"),
+            "an Unchanged package must not get a line of its own: {out}"
+        );
+    }
+
+    #[test]
+    fn the_repin_line_says_outright_that_apply_will_not_act_on_it() {
+        // The whole answer to "does update converge by version or by commit"
+        // that a user can actually see. Asserted on the substring that
+        // carries the meaning, not merely that the `=` line exists.
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![Change::RepinnedSameVersion {
+                name: Name::new("ripgrep"),
+                version: "14.1.0".into(),
+            }],
+        };
+        let out = render_update(&u);
+        assert!(
+            out.contains("apply will not act on this"),
+            "the = line must say outright that apply will not act on it: {out}"
+        );
+    }
+
+    #[test]
+    fn kept_with_a_previous_pin_says_so_and_shows_what_is_still_pinned() {
+        // The `Kept` line is the only one that could otherwise show no
+        // version at all -- and when a package that already had a pin fails
+        // to re-resolve, the reader needs to be able to tell what is still
+        // installed.
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Kept {
+                name: Name::new("zellij"),
+                version: Some("0.44.3".into()),
+                why: "bucket \"extras\" has no zellij.json".into(),
+            }],
+        };
+        let out = render_update(&u);
+        assert!(
+            out.contains("0.44.3"),
+            "the version that is still pinned must be visible: {out}"
+        );
+        assert!(out.contains("kept the previous pin"), "{out}");
+    }
+
+    #[test]
+    fn kept_with_no_previous_pin_does_not_claim_anything_was_kept() {
+        // Regression test for the false line this used to print
+        // unconditionally: a brand-new declared package whose FIRST
+        // resolution fails (ambiguous bucket, bucket not found, resolve
+        // error) has no previous pin at all -- `resolve_into_lock` records
+        // this as `version: None`. `tests/update.rs`'s
+        // `an_ambiguous_bucket_keeps_the_old_pin_and_names_both_candidates`
+        // constructs exactly this state, with `Lock::default()`.
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Kept {
+                name: Name::new("tool"),
+                version: None,
+                why: "2 declared buckets carry it (main, extras)".into(),
+            }],
+        };
+        let out = render_update(&u);
+        assert!(
+            !out.contains("kept the previous pin"),
+            "nothing was kept -- there was no previous pin to keep: {out}"
+        );
+        assert!(out.contains("tool"), "{out}");
+    }
+
+    #[test]
+    fn the_summary_counts_changed_unchanged_and_unresolved_correctly() {
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![
+                Change::Added {
+                    name: Name::new("a"),
+                    version: "1.0".into(),
+                },
+                Change::VersionChanged {
+                    name: Name::new("b"),
+                    from: "1.0".into(),
+                    to: "2.0".into(),
+                },
+                Change::Unchanged {
+                    name: Name::new("c"),
+                },
+                Change::Unchanged {
+                    name: Name::new("d"),
+                },
+                Change::Kept {
+                    name: Name::new("e"),
+                    version: Some("1.0".into()),
+                    why: "no bucket has it".into(),
+                },
+            ],
+        };
+        let out = render_update(&u);
+        assert!(
+            out.contains("2 changed, 2 unchanged, 1 could not be resolved."),
+            "{out}"
+        );
+        // Unchanged is counted above but must not print a line of its own:
+        // only the two changed entries and the one Kept entry get a marker
+        // line at all.
+        let marker_lines = out
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("+ ")
+                    || t.starts_with("^ ")
+                    || t.starts_with("= ")
+                    || t.starts_with("- ")
+                    || t.starts_with("! ")
+            })
+            .count();
+        assert_eq!(
+            marker_lines, 3,
+            "Unchanged must be counted but not printed: {out}"
+        );
+    }
+
+    #[test]
+    fn the_not_rewritten_line_appears_exactly_when_nothing_was_written() {
+        let converged = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Unchanged {
+                name: Name::new("fzf"),
+            }],
+        };
+        assert!(
+            render_update(&converged).contains("pkg.lock is already current -- not rewritten."),
+            "{}",
+            render_update(&converged)
+        );
+
+        let changed = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Added {
+                name: Name::new("fzf"),
+                version: "1.0".into(),
+            }],
+        };
+        assert!(
+            !render_update(&changed).contains("not rewritten"),
+            "{}",
+            render_update(&changed)
+        );
     }
 }

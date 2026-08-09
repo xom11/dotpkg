@@ -49,12 +49,21 @@ pub enum Change {
         name: Name,
         version: String,
     },
-    /// Re-resolution failed and the previous pin was kept. Dropping it would
+    /// Re-resolution failed. If there was a previous pin, dropping it would
     /// turn a working package into `Skip{NotLocked}`, which makes the next
-    /// `apply` refuse the whole run.
+    /// `apply` refuse the whole run, so it is kept instead.
+    ///
+    /// `version` is `None` for a brand-new declared package whose FIRST
+    /// resolution fails: an ambiguous bucket, a bucket that does not carry
+    /// it, or a resolve error. There is no previous pin in that case, so
+    /// nothing was "kept" -- `render_update` must not say otherwise. `Option`
+    /// rather than an empty string on purpose: an empty string that means
+    /// "there was nothing to keep" is exactly the kind of implicit encoding
+    /// this codebase avoids everywhere else, and it very nearly let
+    /// `render_update` print a false line here.
     Kept {
         name: Name,
-        version: String,
+        version: Option<String>,
         why: String,
     },
 }
@@ -157,9 +166,7 @@ pub fn resolve_into_lock(
             Some(Resolution::Failed { why }) => {
                 changes.push(Change::Kept {
                     name: name.clone(),
-                    version: previous
-                        .map(|p| p.version().to_string())
-                        .unwrap_or_default(),
+                    version: previous.map(|p| p.version().to_string()),
                     why: why.clone(),
                 });
                 if let Some(p) = previous {
@@ -195,6 +202,127 @@ pub fn resolve_into_lock(
     }
 
     Update { lock, changes }
+}
+
+use crate::bucket::{self, BucketChoice};
+use crate::config::Config;
+use std::path::Path;
+
+/// Resolve every declared scoop package against the buckets on disk.
+///
+/// Returns the decision plus the warnings that belong on stderr. Warnings are
+/// returned rather than printed so that this whole function is testable.
+///
+/// `offline` skips the fetch. Everything else about the run is identical, and
+/// the caller is told, because "latest" out of a bucket nobody fetched is
+/// "latest as of whenever something else last pulled it".
+pub fn run(
+    scoop_root: &Path,
+    declared: &Config,
+    old: &Lock,
+    scope: &Scope,
+    offline: bool,
+) -> (Update, Vec<String>) {
+    let mut warnings = Vec::new();
+
+    if offline {
+        warnings.push(
+            "offline: buckets were not fetched, so `latest` means whatever this \
+             machine last pulled."
+                .to_string(),
+        );
+    } else {
+        for b in &declared.scoop.buckets {
+            let dir = scoop_root.join("buckets").join(b.name.key());
+            if !dir.join(".git").exists() {
+                continue;
+            }
+            if bucket::tip(&dir).stale.is_some() {
+                warnings.push(format!(
+                    "bucket {}: no upstream to fetch from, so `latest` is only as \
+                     current as this clone.",
+                    b.name
+                ));
+                continue;
+            }
+            if let Err(e) = bucket::fetch(&dir) {
+                warnings.push(format!(
+                    "bucket {}: could not fetch ({e:#}); resolving against what is \
+                     already on disk.",
+                    b.name
+                ));
+            }
+        }
+    }
+
+    let mut resolutions = BTreeMap::new();
+    for name in &declared.scoop.packages {
+        if !scope.covers(name) {
+            continue;
+        }
+        let already = old.scoop.get(name).and_then(|p| match p {
+            Pin::ScoopCommit { bucket, .. } => Some(bucket.as_str()),
+            Pin::WingetVersion { .. } => None,
+        });
+        let resolution = match bucket::choose_bucket(scoop_root, declared, name, already) {
+            BucketChoice::Ambiguous { candidates } => {
+                let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
+                Resolution::Failed {
+                    why: format!(
+                        "{} declared buckets carry it ({}). Say which with \
+                         `[scoop.opts] {name} = {{ bucket = \"...\" }}`.",
+                        candidates.len(),
+                        names.join(", ")
+                    ),
+                }
+            }
+            BucketChoice::NotFound { searched } => {
+                let names: Vec<String> = searched.iter().map(|s| s.to_string()).collect();
+                Resolution::Failed {
+                    why: format!("no declared bucket has it (searched: {})", names.join(", ")),
+                }
+            }
+            BucketChoice::Chosen {
+                name: bucket_name,
+                dir,
+                tip,
+            } => match bucket::resolve_latest(&dir, name, &tip.rev) {
+                Ok(Some(latest)) => {
+                    if latest.fell_back_to_tip {
+                        warnings.push(format!(
+                            "{name}: no single commit carries this manifest's current \
+                             content, so the bucket tip was pinned instead."
+                        ));
+                    }
+                    Resolution::Resolved {
+                        bucket: bucket_name.to_string(),
+                        commit: latest.commit,
+                        version: latest.version,
+                    }
+                }
+                Ok(None) => Resolution::Failed {
+                    why: format!("bucket {bucket_name} has no manifest for it"),
+                },
+                Err(e) => Resolution::Failed {
+                    why: format!("{e:#}"),
+                },
+            },
+        };
+        resolutions.insert(name.clone(), resolution);
+    }
+
+    if !declared.winget.packages.is_empty() {
+        warnings.push(format!(
+            "{} winget package(s) were not resolved: the winget backend lands in \
+             phase 4. Their existing pins are untouched.",
+            declared.winget.packages.len()
+        ));
+    }
+
+    (
+        resolve_into_lock(old, &declared.scoop.packages, &resolutions, scope),
+        warnings,
+    )
 }
 
 #[cfg(test)]
@@ -392,7 +520,7 @@ mod tests {
             u.changes,
             vec![Change::Kept {
                 name: Name::new("zellij"),
-                version: "0.44.3".into(),
+                version: Some("0.44.3".into()),
                 why: "bucket \"extras\" has no zellij.json".into()
             }]
         );
@@ -418,7 +546,16 @@ mod tests {
         );
         assert_eq!(u.failed_count(), 1);
         match &u.changes[0] {
-            Change::Kept { why, .. } => assert!(why.contains("no declared bucket")),
+            Change::Kept { why, version, .. } => {
+                assert!(why.contains("no declared bucket"));
+                // There was no previous entry, so there is nothing to keep --
+                // `render_update` reads exactly this field to decide whether
+                // it may say "kept the previous pin".
+                assert_eq!(
+                    *version, None,
+                    "nothing was kept: there was no previous pin"
+                );
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -436,5 +573,73 @@ mod tests {
         );
         let u = resolve_into_lock(&old, &[], &BTreeMap::new(), &Scope::WholeRun);
         assert_eq!(u.lock.winget, old.winget);
+    }
+
+    // -- wrote_anything --------------------------------------------------
+    //
+    // `wrote_anything` has no direct test as of Task 8: it is correct by
+    // inspection, but what it protects names its own failure consequence --
+    // get it wrong and `update` rewrites pkg.lock, and displaces its `.bak`,
+    // on every run of an already-converged machine. These call it directly
+    // rather than through `resolve_into_lock`, so a future change to that
+    // fold cannot make this pass for the wrong reason.
+
+    #[test]
+    fn wrote_anything_is_false_when_every_change_is_unchanged() {
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![
+                Change::Unchanged {
+                    name: Name::new("fzf"),
+                },
+                Change::Unchanged {
+                    name: Name::new("bat"),
+                },
+            ],
+        };
+        assert!(
+            !u.wrote_anything(),
+            "an already-converged run must not ask for a rewrite"
+        );
+    }
+
+    #[test]
+    fn wrote_anything_is_true_when_a_change_is_added() {
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![
+                Change::Unchanged {
+                    name: Name::new("fzf"),
+                },
+                Change::Added {
+                    name: Name::new("bat"),
+                    version: "0.26.1".into(),
+                },
+            ],
+        };
+        assert!(
+            u.wrote_anything(),
+            "a genuinely new pin must ask for a rewrite"
+        );
+    }
+
+    #[test]
+    fn wrote_anything_is_false_when_the_only_change_is_kept() {
+        // Kept means re-resolution failed and the previous pin was carried
+        // forward byte-for-byte. Nothing about the lock actually changed, so
+        // rewriting it -- and displacing its .bak -- for this alone would be
+        // exactly the failure this function exists to prevent.
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Kept {
+                name: Name::new("zellij"),
+                version: Some("0.44.3".into()),
+                why: "bucket \"extras\" has no zellij.json".into(),
+            }],
+        };
+        assert!(
+            !u.wrote_anything(),
+            "a failed re-resolve that changed nothing must not ask for a rewrite"
+        );
     }
 }

@@ -67,6 +67,21 @@ enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
     },
+    /// Re-resolve pkg.toml against the buckets and rewrite pkg.lock. The only
+    /// command that asks what is newest, and the only one that fetches.
+    Update {
+        #[arg(long, default_value = "pkg.toml")]
+        config: PathBuf,
+        #[arg(long, default_value = "pkg.lock")]
+        lock: PathBuf,
+        /// Do not fetch. `latest` then means whatever this machine last
+        /// pulled, and the output says so.
+        #[arg(long)]
+        offline: bool,
+        /// Resolve only these packages. Nothing else is rewritten and no
+        /// entry is dropped.
+        packages: Vec<String>,
+    },
 }
 
 /// Print a refusal and exit 2.
@@ -384,6 +399,49 @@ fn main() -> Result<()> {
             };
             if code != 0 {
                 std::process::exit(code);
+            }
+        }
+        Command::Update {
+            config,
+            lock,
+            offline,
+            packages,
+        } => {
+            let declared = dotpkg::config::load(&config)?;
+            let old = dotpkg::lock::load_or_empty(&lock)?;
+            let scope = if packages.is_empty() {
+                dotpkg::update::Scope::WholeRun
+            } else {
+                dotpkg::update::Scope::Named(dotpkg::model::fold_names(
+                    packages,
+                    "the packages named on the command line",
+                )?)
+            };
+            if let dotpkg::update::Scope::Named(names) = &scope {
+                for n in names {
+                    if !declared.scoop.packages.contains(n) {
+                        refuse(anyhow::anyhow!(
+                            "{n} is not declared in {}. `update` re-resolves what pkg.toml \
+                             already asks for; add it there first.",
+                            config.display()
+                        ));
+                    }
+                }
+            }
+
+            let scoop = Scoop::discover();
+            let (u, warnings) = dotpkg::update::run(scoop.root(), &declared, &old, &scope, offline);
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
+            print!("{}", dotpkg::render::render_update(&u));
+            std::io::stdout().flush().ok();
+
+            if u.wrote_anything() {
+                dotpkg::lock::save(&u.lock, &lock)?;
+            }
+            if u.failed_count() > 0 {
+                std::process::exit(1);
             }
         }
     }

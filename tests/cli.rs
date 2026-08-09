@@ -335,9 +335,11 @@ fn apply_with_no_answer_available_refuses_and_changes_nothing() {
 
 #[test]
 fn the_scoop_cmd_sentinel_is_reachable_or_the_assertion_above_proves_nothing() {
-    // Production prints `cannot run <root>/shims/scoop.cmd` only once it has
-    // actually tried to run scoop. Without this sibling, the negative
-    // assertion above stays green even if the whole executor is deleted.
+    // Production records a `Failed` outcome for `fzf` only once
+    // `stage_and_fetch` has actually called `scoop.download` and
+    // `download_verdict` (or the `Command` spawn itself) has ruled on it.
+    // Without this sibling, the negative assertion above stays green even if
+    // the whole executor is deleted.
     //
     // Here fzf is declared and locked at 1.0.0 but NOT installed, so the plan
     // is an Install, prepare stages it for real against real git, and the
@@ -350,8 +352,35 @@ fn the_scoop_cmd_sentinel_is_reachable_or_the_assertion_above_proves_nothing() {
 
     let out = f.run(&["apply", "--prepare"]);
     let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+
+    // The old assertion looked for the literal `scoop.cmd` path fragment
+    // that `Scoop::download` puts into its error via
+    // `.with_context(|| format!("cannot run {}", self.scoop_exe().display()))`
+    // -- reached only when `Command::new(missing_path).output()` returns
+    // `Err`. Measured on the real Windows machine (rustc 1.97.1):
+    // `Command::new("C:\definitely\nope\scoop.cmd").arg("download").output()`
+    // returns `Ok(status=Some(1), stdout="", stderr="The system cannot find
+    // the path specified.")` instead of `Err(NotFound)` -- `cmd.exe` itself
+    // swallows the missing file and reports it on stderr, which `download()`
+    // never reads. So on Windows the `.with_context` branch never fires,
+    // `download_verdict("")` finds no marker at all and returns `Unproven`,
+    // and the message becomes "scoop download did not report a verified
+    // hash for <manifest> (...): scoop printed nothing at all" -- sharing no
+    // substring, `scoop.cmd` included, with the macOS/Linux "cannot run
+    // <root>/shims/scoop.cmd: ..." message. Neither of those two strings is
+    // usable as a cross-platform sentinel.
+    //
+    // What IS identical on both platforms: this fixture's bucket is a real
+    // git commit matching the lock's pin, so `scoop.stage` succeeds
+    // deterministically (relied on elsewhere, e.g.
+    // `keep_going_does_not_report_success_when_a_declared_package_could_not_be_prepared`),
+    // which leaves `scoop.download` as the only thing that can turn fzf's
+    // `Outcome` into `Failed`. `render_preparation` renders that as
+    // "FAILED  scoop  fzf ..." and folds it into the "N failed" summary
+    // count regardless of what OS-specific text `download()` produced --
+    // that structural fact, not the wording, is the sentinel now.
     assert!(
-        all.contains("scoop.cmd"),
+        all.contains("FAILED") && all.contains("fzf") && all.contains("1 failed"),
         "the sentinel must be reachable: {all}"
     );
 }
@@ -409,7 +438,32 @@ fn a_prune_authorised_by_both_flags_runs_and_records_the_release() {
     let out = f.run(&["apply", "--yes", "--allow-prune"]);
     let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
 
-    assert!(all.contains("scoop.cmd"), "it must have tried: {all}");
+    // The old assertion looked for the literal `scoop.cmd` path fragment
+    // that `Scoop::run` puts into its error via
+    // `.with_context(|| format!("cannot run {}", self.scoop_exe().display()))`
+    // -- reached only when spawning the process itself fails. Measured on
+    // the real Windows machine: a missing `<root>/shims/scoop.cmd` makes
+    // `Command::new(..).output()` return `Ok(status=Some(1), stdout="",
+    // stderr="The system cannot find the path specified.")`, not `Err`. So
+    // on Windows `m.uninstall(app)` in `run_step` never errors at all --
+    // execution falls through to `verify::verdict`, which correctly finds
+    // `aichat` still on disk, and the message becomes "aichat: uninstall
+    // did not happen -- it is still on disk at <path>". That shares no
+    // substring, `scoop.cmd` included, with the macOS/Linux "aichat: could
+    // not run uninstall: cannot run <root>/shims/scoop.cmd: ..." message.
+    //
+    // What IS identical on both platforms: aichat is the only package this
+    // fixture can ever mutate, and `run_step` only ever constructs a
+    // `StepOutcome::Failed` for it after `m.uninstall` has returned
+    // (successfully or not) and, on the Ok path, `verdict` has ruled --
+    // i.e. after a genuine attempt. `render_execution` renders that as
+    // "FAILED  scoop  aichat ..." on every platform; only the reason text
+    // after it differs. That marker plus the app name, not the wording, is
+    // the sentinel now.
+    assert!(
+        all.contains("FAILED") && all.contains("aichat"),
+        "it must have tried: {all}"
+    );
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -675,9 +729,12 @@ fn a_preparation_that_could_not_be_completed_refuses_before_execute_ever_runs() 
     // could-not-be-prepared floor -- exit 1, not 2. `the_scoop_cmd_sentinel_
     // is_reachable_or_the_assertion_above_proves_nothing` and
     // `a_prune_authorised_by_both_flags_runs_and_records_the_release` are
-    // this test's positive siblings: both already prove `scoop.cmd` DOES
-    // appear once `prepare` or `execute` genuinely reaches it, so its
-    // absence here is not vacuous.
+    // this test's positive siblings: both already prove a `FAILED` outcome
+    // (naming `fzf` and `aichat` respectively, with a "N failed" count on
+    // the first) DOES appear once `prepare` or `execute` genuinely reaches
+    // scoop, so its absence here is not vacuous. `scoop.cmd` itself is not
+    // usable for that proof -- see the comment on each sibling's assertion
+    // for why the string differs (and on Windows, disappears) by platform.
     let f = Fixture::new("[scoop]\npackages = [\"fzf\"]\n", "{}");
     let before = f.snapshot();
 

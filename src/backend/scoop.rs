@@ -307,11 +307,17 @@ impl Backend for Scoop {
 
 /// Refuse a string that is about to become one path component.
 ///
-/// `stage()` composes three of them into filesystem paths: `$SCOOP/buckets/
-/// <bucket>` and `<staging_root>/<app>/<version>/<commit>`. All three arrive from
+/// `stage()` composes four of them into filesystem paths: `$SCOOP/buckets/
+/// <bucket>` and `<staging_root>/<app>/<version>/<commit>`. All four arrive from
 /// `pkg.lock`, and Phase 3's `update` fills that file in verbatim from a scoop
 /// bucket — an arbitrary third-party git repository. So these are hostile
 /// input in the ordinary case, not only under a hand-edited lock.
+///
+/// This function covers three of the four. `<commit>` is checked by
+/// `ensure_commit_hash` instead, whose own doc comment (below) explains why a
+/// stricter rule — 40 or 64 lowercase hex, nothing else — is available there
+/// and why it is worth having: it makes `<commit>` safe as a path component
+/// for free, which is what lets `stage_text` join it without re-checking.
 /// `parse_buckets` reuses this same check for a bucket name straight out of
 /// `pkg.toml`, before any lock is even involved.
 ///

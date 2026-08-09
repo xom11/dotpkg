@@ -1038,8 +1038,8 @@ mod tests {
         // resolution fails (ambiguous bucket, bucket not found, resolve
         // error) has no previous pin at all -- `resolve_into_lock` records
         // this as `version: None`. `tests/update.rs`'s
-        // `an_ambiguous_bucket_keeps_the_old_pin_and_names_both_candidates`
-        // constructs exactly this state, with `Lock::default()`.
+        // `an_ambiguous_bucket_is_refused_rather_than_guessed_and_names_both_
+        // candidates` constructs exactly this state, with `Lock::default()`.
         let u = Update {
             lock: Lock::default(),
             changes: vec![Change::Kept {

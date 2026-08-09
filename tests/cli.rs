@@ -1098,7 +1098,9 @@ fn update_resolves_a_declared_package_and_exits_zero() {
     let lock = fs::read_to_string(f.work.path().join("pkg.lock"))
         .expect("update must have written pkg.lock");
     assert!(lock.contains("[scoop.fzf]"), "{lock}");
-    assert!(lock.contains("0.74.1") || lock.contains("1.0.0"), "{lock}");
+    // `bucket_only` commits exactly one version, `1.0.0`. The `|| "0.74.1"`
+    // this used to carry could never fire and only made the assertion weaker.
+    assert!(lock.contains("1.0.0"), "{lock}");
 }
 
 #[test]

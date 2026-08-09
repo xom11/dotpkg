@@ -438,9 +438,7 @@ pub fn parse_versions(stdout: &str) -> Result<(String, Vec<String>)> {
 
     let id = found_id(&lines).ok_or_else(|| {
         let head: String = stdout.chars().take(120).collect();
-        anyhow::anyhow!(
-            "winget show --versions produced no \"Found <name> [<id>]\" line: {head:?}"
-        )
+        anyhow::anyhow!("winget show --versions produced no \"Found <name> [<id>]\" line: {head:?}")
     })?;
 
     let header_idx = lines

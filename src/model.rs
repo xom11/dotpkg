@@ -13,19 +13,18 @@ use std::hash::{Hash, Hasher};
 /// runs last.
 ///
 /// winget does NOT: measured (`docs/measurements-2026-08-09-winget.md` §3),
-/// `--exact` is what makes `winget --id` case-sensitive, and `--exact` is the
-/// form this backend needs everywhere except the one call this comment is
-/// about. `show -e --id git.git` exits `0x8A150014` ("no package found") for
-/// a package that exists as `Git.Git`; only `show --id git.git`, WITHOUT
-/// `--exact`, exits `0` and answers `Found Git [Git.Git]`. So `key()` below
-/// -- the folded form every other comparison on this type uses -- is
-/// unusable against `winget --exact --id`: a `Name` built from the wrong case
-/// would compare equal to the right package and still get "not found" from
-/// winget itself. The winget backend's fix is to never fold case going in:
-/// ask `show` without `--exact`, using whatever spelling was declared, and
-/// record the canonical id winget echoes back in `Found <name> [<Id>]`
-/// (`backend::winget::parse_show`) rather than trusting the spelling it was
-/// asked with.
+/// `--exact` is what makes `winget --id` case-sensitive. `show -e --id
+/// git.git` exits `0x8A150014` ("no package found") for a package that
+/// exists as `Git.Git`. So `key()` below -- the folded form every other
+/// comparison on this type uses -- cannot be used against `winget --exact
+/// --id`: a `Name` built from the wrong case compares equal to the right
+/// package *inside dotpkg* and still gets "not found" *from winget*. That
+/// mismatch is the mirror of the scoop bucket-spelling defect Phase 3 fixed,
+/// pointing the other way. The winget backend's answer is to never fold case
+/// going in: ask `show` without `--exact`, using whatever spelling was
+/// declared, and record the canonical id winget echoes back in `Found <name>
+/// [<Id>]` (`backend::winget::parse_show`) rather than trusting the spelling
+/// it was asked with.
 ///
 /// Equality, ordering and hashing use the folded key; `Display` and
 /// serialization keep what the user wrote, because `Git.Git` is what a winget

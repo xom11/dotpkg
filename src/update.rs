@@ -310,11 +310,20 @@ pub fn run(
                              content, so the bucket tip was pinned instead."
                         ));
                     }
-                    // Worth noting: winget is the opposite case (Task 13/14
-                    // handles it). Measured this phase, `winget --exact --id`
-                    // is case-SENSITIVE, so the folded key is exactly what
-                    // does not work there -- the canonical spelling is the
-                    // only one that resolves. Nothing to change here for it.
+                    // Worth noting: winget is the opposite case from
+                    // `bucket_name.key()` below. Measured this phase
+                    // (docs/measurements-2026-08-09-winget.md §3): `--exact`
+                    // makes `winget --id` case-sensitive, so the folded key
+                    // cannot be used there the way it is used here. That is
+                    // NOT "so a winget call needs `--exact --id
+                    // <canonical>`" -- an earlier draft of this comment said
+                    // exactly that, and it stopped being true when Task 12
+                    // settled the opposite design: no winget call this crate
+                    // makes ever passes `--exact` at all. It asks `show`
+                    // without it, using whatever spelling was declared, and
+                    // records the canonical id winget echoes back
+                    // (`backend::winget::parse_show`). Nothing to change here
+                    // for it; this file only resolves scoop buckets.
                     Resolution::Resolved {
                         pin: Pin::ScoopCommit {
                             // `key()`, not the display spelling. `choose_bucket`

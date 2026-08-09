@@ -29,7 +29,10 @@ fn show_yields_the_canonical_id_even_when_asked_in_the_wrong_case() {
     // that compares equal to the right package and is unusable against winget.
     // Asking without --exact and recording what came back is the fix.
     let f = parse_show(&fixture("show-canonical-echo.txt")).unwrap();
-    assert_eq!(f.id, "Git.Git", "the canonical spelling, not the one we asked with");
+    assert_eq!(
+        f.id, "Git.Git",
+        "the canonical spelling, not the one we asked with"
+    );
     assert_eq!(f.version, "2.55.0.3");
 }
 
@@ -45,7 +48,10 @@ fn show_of_the_canonical_spelling_gives_the_same_answer() {
 #[test]
 fn a_not_found_body_is_refused_rather_than_parsed_into_an_empty_found() {
     let r = parse_show(&fixture("show-package-gone.txt"));
-    assert!(r.is_err(), "an empty Found would be a package named \"\" at version \"\"");
+    assert!(
+        r.is_err(),
+        "an empty Found would be a package named \"\" at version \"\""
+    );
 }
 
 #[test]

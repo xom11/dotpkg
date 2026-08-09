@@ -64,6 +64,10 @@ pub fn render(plan: &Plan) -> String {
                     SkipReason::BackendNotImplemented => {
                         format!("{backend} backend not implemented until phase 4")
                     }
+                    SkipReason::Opaque => {
+                        "installed, but its state could not be read -- see the warnings above"
+                            .to_string()
+                    }
                 };
                 format!("  ! {backend:<6} {name:<14} {why}")
             }

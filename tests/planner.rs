@@ -26,6 +26,7 @@ fn a_declared_locked_package_that_is_absent_is_an_install() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -46,6 +47,7 @@ fn a_package_already_at_the_locked_version_produces_no_action() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1")],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -58,6 +60,7 @@ fn a_newer_installed_version_is_a_downgrade_because_the_lock_is_authoritative() 
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.2")],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -81,6 +84,7 @@ fn an_older_installed_version_is_an_upgrade() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.0")],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -104,6 +108,7 @@ fn a_declared_package_with_no_lock_entry_is_reported_not_resolved() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::Lock::default(),
         &[],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -123,6 +128,7 @@ fn a_running_package_is_skipped_rather_than_changed() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.2")],
+        &[],
         &State::default(),
         &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
     );
@@ -151,6 +157,7 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1")],
+        &[],
         &State::default(),
         &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
     );
@@ -178,6 +185,7 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
         &lock::parse("[scoop.neovim]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.10.1\"\n")
             .unwrap(),
         &[inst],
+        &[],
         &State::default(),
         &Running::new(BTreeSet::from(["nvim".to_string()]), Default::default()),
     );
@@ -201,6 +209,7 @@ fn a_declared_winget_package_is_reported_rather_than_silently_dropped() {
     let p = plan(
         &config::parse("[winget]\npackages = [\"Git.Git\", \"Brave.Brave\"]\n").unwrap(),
         &lock::Lock::default(),
+        &[],
         &[],
         &State::default(),
         &Running::default(),
@@ -229,6 +238,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
         &config::parse("[scoop]\npackages = [\"fzf\"]\n\n[winget]\npackages = [\"Git.Git\"]\n")
             .unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
+        &[],
         &[],
         &State::default(),
         &Running::default(),
@@ -261,6 +271,7 @@ fn an_undeclared_owned_package_is_a_prune() {
         &config::parse(DECLARED_FZF).unwrap(),
         &lock::parse(LOCK_FZF_741).unwrap(),
         &[installed("fzf", "0.74.1"), installed("aichat", "0.30.0")],
+        &[],
         &state,
         &Running::default(),
     );
@@ -284,6 +295,7 @@ fn an_undeclared_unowned_package_is_reported_but_never_pruned() {
             installed("fzf", "0.74.1"),
             installed("antigravity", "2.0.6"),
         ],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -311,6 +323,7 @@ fn scoop_helpers_are_never_reported_as_strays() {
             installed("7zip", "26.01"),
             installed("lessmsi", "2.1"),
         ],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -326,6 +339,7 @@ fn a_helper_that_the_user_declared_is_managed_normally() {
         )
         .unwrap(),
         &[installed("7zip", "26.01")],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -368,6 +382,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
             installed("antigravity", "2.0.6"),
             installed_arch("python", "3.14.5", Some("64bit")),
         ],
+        &[],
         &state,
         &Running::default(),
     );
@@ -399,6 +414,7 @@ fn counts_separate_changes_from_skips_and_reports() {
         &config::parse("[scoop]\npackages = [\"fzf\", \"bat\"]\n").unwrap(),
         &lock::parse("[scoop.fzf]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.74.1\"\n").unwrap(),
         &[installed("antigravity", "2.0.6")],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -466,6 +482,7 @@ fn a_case_difference_between_pkg_toml_and_disk_is_not_two_packages() {
         &config::parse("[scoop]\npackages = [\"FZF\"]\n").unwrap(),
         &lock::parse("[scoop.FZF]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"0.74.1\"\n").unwrap(),
         &[installed("fzf", "0.74.1")],
+        &[],
         &state,
         &Running::default(),
     );
@@ -501,6 +518,7 @@ fn a_running_package_is_never_pruned() {
         &config::parse("[scoop]\npackages = []\n").unwrap(),
         &lock::Lock::default(),
         &[installed("kanata", "1.12.0")],
+        &[],
         &state,
         &Running::new(BTreeSet::from(["kanata".to_string()]), Default::default()),
     );
@@ -529,6 +547,7 @@ fn a_running_package_is_not_pruned_when_only_its_manifest_names_the_process() {
         &config::parse("[scoop]\npackages = []\n").unwrap(),
         &lock::Lock::default(),
         &[inst],
+        &[],
         &state,
         &Running::new(
             BTreeSet::from(["kanata_windows_tty_winiov2_arm64".to_string()]),
@@ -558,6 +577,7 @@ fn an_idle_owned_undeclared_package_is_still_pruned() {
         &config::parse("[scoop]\npackages = []\n").unwrap(),
         &lock::Lock::default(),
         &[installed("aichat", "0.30.0")],
+        &[],
         &state,
         &Running::default(),
     );
@@ -586,6 +606,7 @@ fn a_package_installed_for_the_wrong_architecture_is_reported() {
         &config::parse(ARM64_PYTHON).unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -611,6 +632,7 @@ fn architecture_comparison_ignores_case() {
         &config::parse(ARM64_PYTHON).unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", Some("ARM64"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -626,6 +648,7 @@ fn drift_is_reported_even_without_a_lock_entry() {
         &config::parse(ARM64_PYTHON).unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -640,6 +663,7 @@ fn an_unknown_installed_architecture_is_not_drift() {
         &config::parse(ARM64_PYTHON).unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", None)],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -655,6 +679,7 @@ fn keep_means_never_report_whatever_is_installed() {
         .unwrap(),
         &lock::Lock::default(),
         &[installed_arch("rustup", "1.28.0", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -667,6 +692,7 @@ fn an_undeclared_architecture_is_no_opinion_and_no_report() {
         &config::parse("[scoop]\npackages = [\"python\"]\n").unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -679,6 +705,7 @@ fn drift_is_a_report_not_a_change() {
         &config::parse(ARM64_PYTHON).unwrap(),
         &lock::Lock::default(),
         &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -694,6 +721,7 @@ fn a_package_can_be_both_an_upgrade_and_a_drift() {
         &lock::parse("[scoop.python]\nbucket=\"main\"\ncommit=\"a\"\nversion=\"3.14.6\"\n")
             .unwrap(),
         &[installed_arch("python", "3.14.5", Some("64bit"))],
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -713,7 +741,14 @@ fn an_owned_undeclared_helper_is_pruned_rather_than_silently_kept_forever() {
     let mut state = State::default();
     state.set(SCOOP, &Name::new("7zip"), Ownership::Installed);
 
-    let p = plan(&declared, &lock, &installed, &state, &Running::default());
+    let p = plan(
+        &declared,
+        &lock,
+        &installed,
+        &[],
+        &state,
+        &Running::default(),
+    );
 
     assert!(
         p.actions.iter().any(|a| matches!(
@@ -770,6 +805,7 @@ fn the_architecture_an_install_will_use_is_decided_in_the_plan_not_in_the_execut
         &declared,
         &lock,
         &installed,
+        &[],
         &State::default(),
         &Running::default(),
     );
@@ -807,6 +843,49 @@ fn the_architecture_an_install_will_use_is_decided_in_the_plan_not_in_the_execut
 }
 
 #[test]
+fn a_declared_package_the_scan_could_not_read_is_skipped_rather_than_installed() {
+    // Measured on a14: zellij and actionlint are installed at exactly the
+    // pinned version, but their manifest cannot be traversed, so scan omits
+    // them. plan() used to read that omission as "not installed" and emit
+    // Install -- which under --yes is uninstall-then-install of a package
+    // that was never absent.
+    let p = plan(
+        &config::parse(DECLARED_FZF).unwrap(),
+        &lock::parse(LOCK_FZF_741).unwrap(),
+        &[],                 // scan found nothing readable
+        &[Name::new("fzf")], // ...because fzf was opaque
+        &State::default(),
+        &Running::default(),
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: SCOOP.into(),
+            name: "fzf".into(),
+            reason: SkipReason::Opaque,
+        }]
+    );
+}
+
+#[test]
+fn an_undeclared_package_the_scan_could_not_read_is_not_a_stray_and_not_a_prune() {
+    // The counterweight. An entry whose state is unknown is not evidence of
+    // a stray, and it must not become a Prune even when dotpkg owns it --
+    // "I cannot see it" is not "it is not declared".
+    let mut state = State::default();
+    state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
+    let p = plan(
+        &config::parse(DECLARED_FZF).unwrap(),
+        &lock::parse(LOCK_FZF_741).unwrap(),
+        &[installed("fzf", "0.74.1")],
+        &[Name::new("aichat")],
+        &state,
+        &Running::default(),
+    );
+    assert!(p.actions.is_empty(), "got {:?}", p.actions);
+}
+
+#[test]
 fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
     // src/plan.rs's own doc comment claimed 1.0.0-rc1 and 1.0.0 reduce to the
     // same [1,0,0] and compare equal. `parts` keeps every numeric run, so rc1
@@ -823,6 +902,7 @@ fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
         &declared,
         &lock,
         &installed,
+        &[],
         &State::default(),
         &Running::default(),
     );

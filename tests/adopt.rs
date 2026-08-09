@@ -410,6 +410,7 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
         &declared,
         &lock,
         &scan.installed,
+        &scan.opaque,
         &state,
         &dotpkg::model::Running::default(),
     );
@@ -819,6 +820,7 @@ fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
         &declared,
         &lock,
         &scan.installed,
+        &scan.opaque,
         &State::default(),
         &dotpkg::model::Running::default(),
     );
@@ -963,6 +965,7 @@ fn the_forbidden_write_order_leaves_a_shape_plan_turns_into_a_prune() {
         &declared,
         &locked,
         &scan.installed,
+        &scan.opaque,
         &loaded_state,
         &dotpkg::model::Running::default(),
     );

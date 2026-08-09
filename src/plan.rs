@@ -24,6 +24,11 @@ pub enum SkipReason {
     /// product of `status` is the printed plan. A user who follows the spec's
     /// own example pkg.toml and gets `nothing to do` has been lied to.
     BackendNotImplemented,
+    /// Installed, but the scan could not establish its state (see
+    /// `Scan::opaque`). Must not be read as "not installed" -- that reading is
+    /// what turned two working, pinned-at-version packages into an
+    /// uninstall-then-reinstall under `--yes` on a14.
+    Opaque,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +122,7 @@ pub fn plan(
     declared: &Config,
     lock: &Lock,
     installed: &[Installed],
+    opaque: &[Name],
     state: &State,
     running: &Running,
 ) -> Plan {
@@ -162,6 +168,15 @@ pub fn plan(
                     });
                 }
             }
+        }
+
+        if opaque.iter().any(|o| o == name) {
+            actions.push(Action::Skip {
+                backend: SCOOP.into(),
+                name: name.clone(),
+                reason: SkipReason::Opaque,
+            });
+            continue;
         }
 
         let Some(pin) = lock.scoop.get(name) else {

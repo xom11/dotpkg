@@ -120,6 +120,22 @@ fn a_directory_with_no_manifest_is_ignored_rather_than_failing_the_scan() {
 }
 
 #[test]
+fn a_half_finished_install_with_no_manifest_yet_is_silent_not_opaque() {
+    // The NotFound arm is the benign one and must stay benign: this is the
+    // `Err(e) if e.kind() == NotFound => <benign default>` idiom whose other
+    // error kinds went untested in three places across this crate.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("apps").join("fzf").join("current")).unwrap();
+    let scan = Backend::scan(&Scoop::new(root.path().to_path_buf())).unwrap();
+    assert!(scan.installed.is_empty());
+    assert!(
+        scan.opaque.is_empty(),
+        "an absent manifest is not an unreadable one"
+    );
+    assert!(scan.warnings.is_empty(), "and says nothing");
+}
+
+#[test]
 fn a_manifest_that_cannot_be_read_is_skipped_with_a_warning_not_in_silence() {
     // The failure this separates out: an app that IS installed but whose
     // manifest is corrupt or unreadable. Dropping it silently makes it look
@@ -141,6 +157,26 @@ fn a_manifest_that_cannot_be_read_is_skipped_with_a_warning_not_in_silence() {
     assert!(
         scan.warnings[0].contains("halfwritten"),
         "the warning must name the app: {:?}",
+        scan.warnings
+    );
+}
+
+#[test]
+fn an_app_whose_manifest_cannot_be_read_is_reported_as_opaque_not_as_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let current = root.path().join("apps").join("zellij").join("current");
+    std::fs::create_dir_all(current.join("manifest.json")).unwrap(); // a DIRECTORY
+    let scan = Backend::scan(&Scoop::new(root.path().to_path_buf())).unwrap();
+    assert!(scan.installed.is_empty(), "got {:?}", scan.installed);
+    assert_eq!(
+        scan.opaque,
+        vec![Name::new("zellij")],
+        "the name must survive"
+    );
+    assert_eq!(scan.warnings.len(), 1, "and still be explained to the user");
+    assert!(
+        scan.warnings[0].contains("zellij"),
+        "got {:?}",
         scan.warnings
     );
 }

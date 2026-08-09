@@ -156,6 +156,13 @@ pub fn classify(action: &Action) -> Intent {
             SkipReason::BackendNotImplemented => {
                 Intent::Skip(format!("{backend} backend not implemented until phase 4"))
             }
+            // Same shape as Running: dotpkg cannot act on a state it could not
+            // establish, and installing over it is exactly the mistake this
+            // variant exists to prevent. The user fixes the read (usually by
+            // rerunning without the elevated/restricted context) and reruns.
+            SkipReason::Opaque => Intent::Skip(
+                "installed, but its state could not be read -- see the warnings above".to_string(),
+            ),
         },
         Action::Unmanaged { .. } | Action::ArchDrift { .. } => Intent::Report,
     }

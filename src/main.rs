@@ -162,7 +162,14 @@ fn main() -> Result<()> {
                 eprintln!("warning: scoop: {w}");
             }
 
-            let plan = dotpkg::plan::plan(&declared, &locked, &scan.installed, &state, &running);
+            let plan = dotpkg::plan::plan(
+                &declared,
+                &locked,
+                &scan.installed,
+                &scan.opaque,
+                &state,
+                &running,
+            );
             print!("{}", dotpkg::render::render(&plan));
         }
         Command::Apply {
@@ -210,6 +217,7 @@ fn main() -> Result<()> {
                 &d.declared,
                 &d.locked,
                 &d.scan.installed,
+                &d.scan.opaque,
                 &d.state,
                 &d.running,
             );

@@ -250,6 +250,10 @@ impl Backend for Scoop {
                     continue;
                 }
             };
+            // The entry itself is unreadable, so there is no name to carry
+            // into `opaque` -- unlike the four checks below, which do have
+            // one. This one stays a warning only; `plan()` has nothing to
+            // compare it against either way.
             if !entry.path().is_dir() {
                 continue;
             }
@@ -277,6 +281,7 @@ impl Backend for Scoop {
                 Err(e) => {
                     out.warnings
                         .push(format!("{name}: cannot read manifest.json: {e}"));
+                    out.opaque.push(Name::new(name));
                     continue;
                 }
             };
@@ -285,12 +290,14 @@ impl Backend for Scoop {
                 Err(e) => {
                     out.warnings
                         .push(format!("{name}: manifest.json is not usable: {e}"));
+                    out.opaque.push(Name::new(name));
                     continue;
                 }
             };
             let Some(version) = manifest.get("version").and_then(|v| v.as_str()) else {
                 out.warnings
                     .push(format!("{name}: manifest.json has no version"));
+                out.opaque.push(Name::new(name));
                 continue;
             };
             let bins = declared_executables(&manifest);

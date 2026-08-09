@@ -1277,7 +1277,30 @@ git commit -m "Put winget behind a seam so no test spawns it"
 
 **Files:**
 - Modify: `src/backend/winget.rs`
+- Modify: `src/model.rs` — **correct `Name`'s doc comment**, see below
 - Test: `tests/winget_resolve.rs` (new)
+
+**`src/model.rs:10` states something this phase measured to be false, and
+`Name` is built on it.** Added 2026-08-10. The comment reads:
+
+> *Scoop and winget both resolve names case-insensitively. Comparing them any
+> other way is how `apply` removes the app it has just installed…*
+
+Measured: that holds for winget only when `--exact` is **absent**.
+`show -e --id git.git` exits `0x8A150014`; `show --id git.git` exits `0` and
+answers `Found Git [Git.Git]`. So the sentence is true of the *positional and
+non-exact* forms and false of the one an implementer would reach for first.
+
+The scoop half of the comment stays — it is right, and the `Install{FZF}` /
+`Prune{fzf}` hazard it describes is real. What must change is that the winget
+half stops claiming something the measurement contradicts, and instead records
+that `Name`'s folded `key()` is **unusable** against `winget --exact --id`,
+which is why this backend asks without `--exact` and records the canonical id
+winget echoes back. Point at `docs/measurements-2026-08-09-winget.md` §3.
+
+This is a load-bearing comment on the type that decides whether two spellings
+are one package. Phase 3's closing audit found four wrong sentences in
+committed docs and this project treats that as a defect class, not a nit.
 
 **Interfaces:**
 - Produces:

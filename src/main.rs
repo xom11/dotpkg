@@ -181,7 +181,18 @@ fn main() -> Result<()> {
                 // printed here instead.
                 println!("  Nothing has been changed.");
                 std::io::stdout().flush().ok();
-                if !preparation.is_ok() {
+                // A package skipped because its own process is running does
+                // not fail `is_ok()` -- deliberately, see
+                // `Preparation::running_skips`'s doc comment -- but it is
+                // still outstanding work the user asked for and did not get.
+                // The same fact, the same reasoning, and the same "Exit
+                // codes" promise apply here as to the floor the full `apply`
+                // path below applies after `execute` returns: 2 would be
+                // wrong regardless, since `--prepare` genuinely changed
+                // nothing, so what is left to distinguish is 0 (fully
+                // realised, nothing outstanding) from 1 (something is), and
+                // a running skip is the latter.
+                if !preparation.is_ok() || !preparation.running_skips().is_empty() {
                     std::process::exit(1);
                 }
                 return Ok(());

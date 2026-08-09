@@ -950,3 +950,52 @@ fn a_declared_package_skipped_as_running_is_outstanding_not_success() {
         "a skipped package must not have been removed"
     );
 }
+
+#[test]
+fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
+    // The same hole, one command over: `--prepare` exits on
+    // `!preparation.is_ok()` alone, which a running skip never fails
+    // (deliberately -- see `Preparation::running_skips`'s doc comment).
+    // Before this fix, `--prepare` against the exact same pkg.toml, lock and
+    // machine as the full-apply test above reported exit 0 while the full
+    // run reported 1 -- the same fact, the same skip, two disagreeing exit
+    // codes for a user who reasonably expects `status`/`--prepare`/`apply`
+    // to agree.
+    let f = Fixture::new("[scoop]\npackages = [\"aichat\"]\n", "{}");
+    fs::write(
+        f.work.path().join("pkg.lock"),
+        format!(
+            "[scoop.aichat]\nbucket = \"main\"\ncommit = \"{}\"\nversion = \"2.0.0\"\n",
+            "a".repeat(40)
+        ),
+    )
+    .unwrap();
+    f.install_app("aichat", "1.0.0");
+    let _marker = spawn_running_marker(f.scoop.path(), "aichat");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--prepare"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--prepare must agree with the full apply run over the identical \
+         pkg.toml and machine: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Nothing has been changed."),
+        "--prepare's own promise must still hold -- it genuinely changed \
+         nothing, so 2 would be as wrong as 0 here: {stdout}"
+    );
+    // `prepared_line`'s `Outcome::Skipped` arm already named this before
+    // either fix existed -- pinned here so the exit code stays explainable
+    // on this branch too, matching the format `render_preparation`'s own
+    // test (`src/render.rs`) pins for the identical shape.
+    assert!(
+        stdout.contains("  !       scoop  aichat       running -- stop it first\n"),
+        "the preparation table must name the skipped package: {stdout}"
+    );
+    f.assert_nothing_was_touched(before);
+}

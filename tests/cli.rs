@@ -955,7 +955,7 @@ fn a_declared_package_skipped_as_running_is_outstanding_not_success() {
 fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     // The same hole, one command over: `--prepare` exits on
     // `!preparation.is_ok()` alone, which a running skip never fails
-    // (deliberately -- see `Preparation::running_skips`'s doc comment).
+    // (deliberately -- see `Preparation::outstanding_skips`'s doc comment).
     // Before this fix, `--prepare` against the exact same pkg.toml, lock and
     // machine as the full-apply test above reported exit 0 while the full
     // run reported 1 -- the same fact, the same skip, two disagreeing exit
@@ -996,6 +996,96 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     assert!(
         stdout.contains("  !       scoop  aichat       running -- stop it first\n"),
         "the preparation table must name the skipped package: {stdout}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn a_declared_package_whose_manifest_is_unreadable_is_outstanding_not_success() {
+    // The Opaque half of the hole caught in review of Task 4's own fix:
+    // `SkipReason::Opaque` -> `Intent::Skip` -> `Outcome::Skipped` has the
+    // identical shape as `Running` (never fails `is_ok()`, never becomes a
+    // `Step`), but `Preparation::running_skips` (as it existed right after
+    // Task 4) recognised only `Running` by name -- so a package whose state
+    // dotpkg could not establish vanished from the closing table and the run
+    // reported exit 0, exactly the "0 lies to a scheduled task" shape
+    // `floor_exit_code`'s own doc comment warns against.
+    //
+    // No pkg.lock is written: `plan()`'s opaque check fires before the lock
+    // lookup, so aichat never needs one to reach `Action::Skip { Opaque }`.
+    let f = Fixture::new("[scoop]\npackages = [\"aichat\"]\n", "{}");
+    let cur = f.scoop.path().join("apps").join("aichat").join("current");
+    // A DIRECTORY at manifest.json -- portable, needs no chmod, and is the
+    // exact technique `tests/scoop_scan.rs`'s opaque test uses.
+    fs::create_dir_all(cur.join("manifest.json")).unwrap();
+
+    let out = f.run(&["apply", "--yes"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a declared package whose state could not be read is outstanding work, \
+         not success: stdout: {stdout} stderr: {stderr}"
+    );
+    let closing_line = format!(
+        "  held    scoop  {:<13}installed, but its state could not be read -- see the warnings above\n",
+        "aichat"
+    );
+    assert!(
+        stdout.contains(&closing_line),
+        "the closing table must name the opaque package with its own reason, \
+         not just count it: {stdout}"
+    );
+    assert!(
+        stdout.contains("0 verified on disk, 0 failed, 1 held."),
+        "the held count in the closing table must reflect the skip: {stdout}"
+    );
+    assert!(
+        !stdout.contains("FAILED") && !stderr.contains("FAILED"),
+        "an opaque skip is benign, not a failure: stdout: {stdout} stderr: {stderr}"
+    );
+    // The package that was never touched must still be exactly where it
+    // was -- an opaque skip is a refusal to act, not a partial one.
+    assert!(
+        f.scoop.path().join("apps").join("aichat").exists(),
+        "a skipped package must not have been removed"
+    );
+}
+
+#[test]
+fn apply_prepare_also_reports_an_opaque_skip_as_outstanding() {
+    // The `--prepare` mirror of the test above, matching
+    // `apply_prepare_also_reports_a_running_skip_as_outstanding`: `--prepare`
+    // exits on `!preparation.is_ok()` alone, which an opaque skip never
+    // fails, so this is the other place the same query had to be widened.
+    let f = Fixture::new("[scoop]\npackages = [\"aichat\"]\n", "{}");
+    let cur = f.scoop.path().join("apps").join("aichat").join("current");
+    fs::create_dir_all(cur.join("manifest.json")).unwrap();
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--prepare"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--prepare must agree with the full apply run over the identical \
+         pkg.toml and machine: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Nothing has been changed."),
+        "--prepare's own promise must still hold -- it genuinely changed \
+         nothing, so 2 would be as wrong as 0 here: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  !       scoop  aichat       installed, but its state could not be read -- \
+             see the warnings above\n"
+        ),
+        "the preparation table must name the opaque package: {stdout}"
     );
     f.assert_nothing_was_touched(before);
 }

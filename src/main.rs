@@ -118,13 +118,14 @@ fn refuse(err: anyhow::Error) -> ! {
 /// The `apply` exit-code floor, lifted out of `main` so it can be observed.
 ///
 /// A package that failed to PREPARE never becomes a `Step`, so `Execution`
-/// cannot see it; a package skipped because its own process was running is
+/// cannot see it; a package skipped for a reason that could differ on the
+/// next run (`Preparation::outstanding_skips` -- running, or opaque) is
 /// outstanding work the user asked for and did not get. Either one means 0
 /// would tell a scheduled task the machine is fine when it is not.
 ///
 /// A floor, not an override: a non-zero code passes through untouched.
-fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> i32 {
-    if code == 0 && (!preparation_ok || has_running_skips) {
+fn floor_exit_code(code: i32, preparation_ok: bool, has_outstanding_skips: bool) -> i32 {
+    if code == 0 && (!preparation_ok || has_outstanding_skips) {
         1
     } else {
         code
@@ -254,18 +255,18 @@ fn main() -> Result<()> {
                 // printed here instead.
                 println!("  Nothing has been changed.");
                 std::io::stdout().flush().ok();
-                // A package skipped because its own process is running does
-                // not fail `is_ok()` -- deliberately, see
-                // `Preparation::running_skips`'s doc comment -- but it is
-                // still outstanding work the user asked for and did not get.
-                // The same fact, the same reasoning, and the same "Exit
-                // codes" promise apply here as to the floor the full `apply`
-                // path below applies after `execute` returns: 2 would be
-                // wrong regardless, since `--prepare` genuinely changed
-                // nothing, so what is left to distinguish is 0 (fully
-                // realised, nothing outstanding) from 1 (something is), and
-                // a running skip is the latter.
-                if !preparation.is_ok() || !preparation.running_skips().is_empty() {
+                // A package skipped for a reason that could differ on the
+                // next run (running, or opaque) does not fail `is_ok()` --
+                // deliberately, see `Preparation::outstanding_skips`'s doc
+                // comment -- but it is still outstanding work the user asked
+                // for and did not get. The same fact, the same reasoning,
+                // and the same "Exit codes" promise apply here as to the
+                // floor the full `apply` path below applies after `execute`
+                // returns: 2 would be wrong regardless, since `--prepare`
+                // genuinely changed nothing, so what is left to distinguish
+                // is 0 (fully realised, nothing outstanding) from 1
+                // (something is), and an outstanding skip is the latter.
+                if !preparation.is_ok() || !preparation.outstanding_skips().is_empty() {
                     std::process::exit(1);
                 }
                 return Ok(());
@@ -384,15 +385,16 @@ fn main() -> Result<()> {
                 ));
             }
 
-            // A package skipped at prepare time because its own process was
-            // running never becomes a `Step`, so `execute` never sees it and
-            // the closing table would otherwise say nothing about it at all
-            // -- the same blind spot the loop above closes for a held
+            // A package skipped at prepare time for a reason that could
+            // differ on the next run (its own process running, or its state
+            // unreadable) never becomes a `Step`, so `execute` never sees it
+            // and the closing table would otherwise say nothing about it at
+            // all -- the same blind spot the loop above closes for a held
             // removal, but for a package that never even tried. Pushed in
             // here, not inside `execute` itself, because `execute` only ever
             // sees the steps a preparation actually produced.
-            let running_skips = preparation.running_skips();
-            for (app, why) in running_skips.iter().cloned() {
+            let outstanding_skips = preparation.outstanding_skips();
+            for (app, why) in outstanding_skips.iter().cloned() {
                 ex.results
                     .push((app, dotpkg::execute::ItemResult::Held(why)));
             }
@@ -422,17 +424,19 @@ fn main() -> Result<()> {
             // cannot see it. Without this floor, `--keep-going` reports
             // success for a run that left a declared package uninstalled.
             //
-            // A package SKIPPED at prepare time because its own process was
-            // running floors the same way, and for the same reason: it is
-            // outstanding work the user asked for and did not get. It is
-            // pushed into `ex` above as `Held`, which already makes
-            // `exit_code` return 1 -- but this checks `preparation` directly,
-            // rather than trusting that push alone, for the same reason the
-            // line above does not trust `ex` alone: a skipped package is a
-            // fact about the plan, not about what `execute` happened to see,
-            // and 0 would tell a scheduled task the machine is fine for as
-            // long as the editor stays open.
-            let code = floor_exit_code(code, preparation.is_ok(), !running_skips.is_empty());
+            // A package SKIPPED at prepare time for a reason that could
+            // differ on the next run (`Preparation::outstanding_skips` --
+            // running, or opaque) floors the same way, and for the same
+            // reason: it is outstanding work the user asked for and did not
+            // get. It is pushed into `ex` above as `Held`, which already
+            // makes `exit_code` return 1 -- but this checks `preparation`
+            // directly, rather than trusting that push alone, for the same
+            // reason the line above does not trust `ex` alone: a skipped
+            // package is a fact about the plan, not about what `execute`
+            // happened to see, and 0 would tell a scheduled task the machine
+            // is fine for as long as the editor stays open, or for as long
+            // as a package's state could not be read.
+            let code = floor_exit_code(code, preparation.is_ok(), !outstanding_skips.is_empty());
             if code != 0 {
                 std::process::exit(code);
             }
@@ -603,6 +607,54 @@ mod tests {
             floor_exit_code(2, false, true),
             2,
             "the floor is a floor, not an override"
+        );
+    }
+
+    #[test]
+    fn an_opaque_only_preparation_is_ok_but_still_outstanding_and_floors_the_exit_code() {
+        // The consequence review caught: `Opaque` fails neither `is_ok()`
+        // nor becomes a `Step`, so nothing about an otherwise "successful"
+        // apply run notices it was never verified -- unless
+        // `outstanding_skips()` counts it, which is exactly what this run's
+        // real call site (below) feeds into `floor_exit_code`'s third
+        // argument.
+        let prep = dotpkg::apply::Preparation {
+            prepared: vec![dotpkg::apply::Prepared {
+                action: dotpkg::plan::Action::Skip {
+                    backend: dotpkg::model::SCOOP.into(),
+                    name: dotpkg::model::Name::new("zellij"),
+                    reason: dotpkg::plan::SkipReason::Opaque,
+                },
+                outcome: dotpkg::apply::Outcome::Skipped {
+                    why: "installed, but its state could not be read -- see the warnings above"
+                        .to_string(),
+                },
+            }],
+        };
+        assert!(
+            prep.is_ok(),
+            "an opaque skip must not fail the run on its own"
+        );
+        assert!(
+            !prep.outstanding_skips().is_empty(),
+            "an opaque skip is outstanding work"
+        );
+        assert_eq!(
+            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty()),
+            1,
+            "an otherwise-clean run with only an opaque package must not report success"
+        );
+
+        // The counterweight: a preparation with nothing outstanding at all
+        // must not be floored -- otherwise the assertion above would pass
+        // for a `floor_exit_code` that always returns 1 regardless of what
+        // `prep` actually contains.
+        let clean = dotpkg::apply::Preparation::default();
+        assert!(clean.outstanding_skips().is_empty());
+        assert_eq!(
+            floor_exit_code(0, clean.is_ok(), !clean.outstanding_skips().is_empty()),
+            0,
+            "a preparation with nothing outstanding must keep its own exit code"
         );
     }
 }

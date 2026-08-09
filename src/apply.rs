@@ -274,32 +274,55 @@ impl Preparation {
         self.failed_count() == 0 && self.not_locked_count() == 0
     }
 
-    /// Every package skipped at prepare time because its own process is
-    /// running, by name and reason -- not because `is_ok()` needs widening
-    /// (it does not: a running package is benign and must not gate removals
-    /// or refuse the run), but because this is still outstanding work the
-    /// user asked for and did not get, and `main.rs` needs a way to say so
-    /// both in the closing table and in the exit code.
+    /// Every skip that is a fact about *this run* and could be different on
+    /// the next one, by name and reason -- not because `is_ok()` needs
+    /// widening (it does not: none of these gate removals or refuse the
+    /// run), but because this is still outstanding work the user asked for
+    /// and did not get, and `main.rs` needs a way to say so both in the
+    /// closing table and in the exit code.
     ///
     /// Deliberately narrower than `skipped_count()`, which also counts a
     /// declared winget package (`SkipReason::BackendNotImplemented`). That
     /// skip is permanent and structural until Phase 4 ships -- every single
-    /// run reports it, forever -- and must never floor an otherwise-clean
-    /// exit code the way a `Running` skip does.
-    pub fn running_skips(&self) -> Vec<(Name, String)> {
+    /// run reports it identically, forever -- and must never floor an
+    /// otherwise-clean exit code the way these do. See `is_outstanding` for
+    /// the rule itself.
+    ///
+    /// Named for what the query answers, not for the first variant it
+    /// recognised (`running_skips`, before review caught that `Opaque` had
+    /// silently been left out of it): a skip's *kind* decides whether it
+    /// belongs here, and that decision lives in `is_outstanding`, not in
+    /// this method's name.
+    pub fn outstanding_skips(&self) -> Vec<(Name, String)> {
         self.prepared
             .iter()
             .filter_map(|p| match (&p.action, &p.outcome) {
-                (
-                    Action::Skip {
-                        reason: SkipReason::Running,
-                        ..
-                    },
-                    Outcome::Skipped { why },
-                ) => Some((action_name(&p.action), why.clone())),
+                (Action::Skip { reason, .. }, Outcome::Skipped { why })
+                    if is_outstanding(reason) =>
+                {
+                    Some((action_name(&p.action), why.clone()))
+                }
                 _ => None,
             })
             .collect()
+    }
+}
+
+/// Whether a skip is a fact about *this run* that could differ on the next
+/// one (floors the exit code, appears in the closing table), as opposed to a
+/// skip that is permanent and structural, reported identically on every run
+/// forever (neither).
+///
+/// Exhaustive on purpose, with no wildcard arm: a `SkipReason` this match
+/// does not name is a compile error, not a silent "does not float" default.
+/// Task 14 adds `SkipReason::ReportedOnly` (a winget package that differs
+/// from the lock) to this enum, and its own floor-or-not answer must be a
+/// decision made here, not an oversight this match's shape would let slip
+/// through.
+fn is_outstanding(reason: &SkipReason) -> bool {
+    match reason {
+        SkipReason::Running | SkipReason::Opaque => true,
+        SkipReason::NotLocked | SkipReason::BackendNotImplemented => false,
     }
 }
 
@@ -1213,10 +1236,10 @@ mod tests {
     }
 
     #[test]
-    fn running_skips_finds_the_running_package_but_not_the_backend_not_implemented_one() {
+    fn outstanding_skips_finds_the_running_package_but_not_the_backend_not_implemented_one() {
         // Both are `Outcome::Skipped` and `skipped_count()` counts both --
         // this is the narrower query `main.rs` needs, which must find only
-        // the one shape that is outstanding work rather than a permanent,
+        // the shapes that are outstanding work rather than a permanent,
         // every-run-forever fact about an unimplemented backend.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
@@ -1245,10 +1268,55 @@ mod tests {
             "the positive control: both really are Skipped outcomes"
         );
 
-        let running = prep.running_skips();
+        let outstanding = prep.outstanding_skips();
         assert_eq!(
-            running,
+            outstanding,
             vec![(Name::new("kanata"), "running -- stop it first".to_string())]
+        );
+    }
+
+    #[test]
+    fn outstanding_skips_finds_the_opaque_package_but_not_the_backend_not_implemented_one() {
+        // The Opaque half of the same discrimination, added after review
+        // caught that a query recognising only `Running` by name silently
+        // dropped `Opaque` -- a state dotpkg could not establish is exactly
+        // as much outstanding work as a running process is, and both must
+        // be told apart from the permanent, every-run-forever
+        // `BackendNotImplemented` skip the same way.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let lock = Lock::default();
+        let declared = Config::default();
+        let plan = Plan {
+            actions: vec![
+                Action::Skip {
+                    backend: SCOOP.into(),
+                    name: Name::new("zellij"),
+                    reason: SkipReason::Opaque,
+                },
+                Action::Skip {
+                    backend: WINGET.into(),
+                    name: Name::new("Git.Git"),
+                    reason: SkipReason::BackendNotImplemented,
+                },
+            ],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        assert_eq!(
+            prep.skipped_count(),
+            2,
+            "the positive control: both really are Skipped outcomes"
+        );
+
+        let outstanding = prep.outstanding_skips();
+        assert_eq!(
+            outstanding,
+            vec![(
+                Name::new("zellij"),
+                "installed, but its state could not be read -- see the warnings above".to_string()
+            )]
         );
     }
 

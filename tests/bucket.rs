@@ -403,3 +403,116 @@ fn blobs_returns_bytes_not_a_string_because_line_endings_are_the_evidence() {
         "the blob must come back byte for byte, trailing newline included"
     );
 }
+
+use dotpkg::bucket::BucketChoice;
+
+fn cfg(text: &str) -> dotpkg::config::Config {
+    dotpkg::config::parse(text).unwrap()
+}
+
+#[test]
+fn a_package_in_exactly_one_declared_bucket_is_chosen_without_asking() {
+    let f = Fixture::new();
+    let main = f.bucket("main");
+    f.commit(&main, "tool.json", "1.0.0", "v100");
+    let extras = f.bucket("extras");
+    f.commit(&extras, "other.json", "1.0.0", "v100");
+
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &Name::new("tool"),
+        None,
+    );
+    match choice {
+        BucketChoice::Chosen { name, .. } => assert_eq!(name, Name::new("main")),
+        other => panic!("expected a clean choice, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_package_in_two_declared_buckets_refuses_and_names_both() {
+    // Never a guess based on declaration order: reordering `buckets` would
+    // silently move a pin.
+    let f = Fixture::new();
+    for b in ["main", "extras"] {
+        let dir = f.bucket(b);
+        f.commit(&dir, "tool.json", "1.0.0", "v100");
+    }
+
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &Name::new("tool"),
+        None,
+    );
+    match choice {
+        BucketChoice::Ambiguous { candidates } => {
+            assert!(candidates.contains(&Name::new("main")), "{candidates:?}");
+            assert!(candidates.contains(&Name::new("extras")), "{candidates:?}");
+        }
+        other => panic!("two buckets have it; guessing is forbidden: {other:?}"),
+    }
+}
+
+#[test]
+fn scoop_opts_bucket_settles_an_ambiguity() {
+    let f = Fixture::new();
+    for b in ["main", "extras"] {
+        let dir = f.bucket(b);
+        f.commit(&dir, "tool.json", "1.0.0", "v100");
+    }
+
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg(
+            "[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n\
+              [scoop.opts]\ntool = { bucket = \"extras\" }\n",
+        ),
+        &Name::new("tool"),
+        None,
+    );
+    match choice {
+        BucketChoice::Chosen { name, .. } => assert_eq!(name, Name::new("extras")),
+        other => panic!("the opt must settle it: {other:?}"),
+    }
+}
+
+#[test]
+fn an_existing_lock_entry_pins_the_bucket_so_update_never_moves_a_package() {
+    // update re-resolves a version, not a provenance. A package silently
+    // migrating from extras to main would change its url and hash with no line
+    // in the diff saying so.
+    let f = Fixture::new();
+    for b in ["main", "extras"] {
+        let dir = f.bucket(b);
+        f.commit(&dir, "tool.json", "1.0.0", "v100");
+    }
+
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n"),
+        &Name::new("tool"),
+        Some("extras"),
+    );
+    match choice {
+        BucketChoice::Chosen { name, .. } => assert_eq!(name, Name::new("extras")),
+        other => panic!("the lock's bucket wins: {other:?}"),
+    }
+}
+
+#[test]
+fn a_package_no_declared_bucket_has_names_what_was_searched() {
+    let f = Fixture::new();
+    f.bucket("main");
+    let choice = bucket::choose_bucket(
+        &f.scoop_root(),
+        &cfg("[scoop]\nbuckets = [\"main\"]\npackages = [\"tool\"]\n"),
+        &Name::new("tool"),
+        None,
+    );
+    match choice {
+        BucketChoice::NotFound { searched } => assert_eq!(searched, vec![Name::new("main")]),
+        other => panic!("{other:?}"),
+    }
+}

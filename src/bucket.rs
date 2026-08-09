@@ -391,3 +391,90 @@ pub fn blobs(dir: &Path, commits: &[String], path_in_repo: &str) -> Result<Vec<O
     }
     Ok(answers)
 }
+
+/// Which bucket a package comes from, or why that cannot be decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketChoice {
+    Chosen {
+        name: Name,
+        dir: std::path::PathBuf,
+        tip: Tip,
+    },
+    /// More than one declared bucket carries it. Never resolved by declaration
+    /// order: reordering `buckets` would silently move a pin.
+    Ambiguous {
+        candidates: Vec<Name>,
+    },
+    NotFound {
+        searched: Vec<Name>,
+    },
+}
+
+/// Decide which declared bucket a package comes from.
+///
+/// Precedence, strongest first: the existing lock entry (so `update`
+/// re-resolves a version and never a provenance), then `[scoop.opts] <pkg>
+/// = { bucket = "..." }`, then a search of every declared bucket.
+pub fn choose_bucket(
+    scoop_root: &Path,
+    declared: &crate::config::Config,
+    app: &Name,
+    already_locked: Option<&str>,
+) -> BucketChoice {
+    let open = |name: &Name| -> BucketChoice {
+        let dir = scoop_root.join("buckets").join(name.key());
+        BucketChoice::Chosen {
+            name: name.clone(),
+            tip: tip(&dir),
+            dir,
+        }
+    };
+
+    let declared_names: Vec<Name> = declared
+        .scoop
+        .buckets
+        .iter()
+        .map(|b| b.name.clone())
+        .collect();
+
+    if let Some(stated) = [
+        already_locked.map(Name::new),
+        declared
+            .scoop
+            .opts
+            .get(app)
+            .and_then(|o| o.bucket.as_deref())
+            .map(Name::new),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return if declared_names.contains(&stated) {
+            open(&stated)
+        } else {
+            BucketChoice::NotFound {
+                searched: vec![stated],
+            }
+        };
+    }
+
+    let mut found = Vec::new();
+    for name in &declared_names {
+        let dir = scoop_root.join("buckets").join(name.key());
+        if !dir.join(".git").exists() {
+            continue;
+        }
+        let at = tip(&dir);
+        if manifest_path(&dir, app, &at.rev).is_some() {
+            found.push(name.clone());
+        }
+    }
+    match found.len() {
+        0 => BucketChoice::NotFound {
+            searched: declared_names,
+        },
+        1 => open(&found[0]),
+        _ => BucketChoice::Ambiguous { candidates: found },
+    }
+}

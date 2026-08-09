@@ -114,6 +114,13 @@ impl Arch {
 pub struct PkgOpts {
     #[serde(default)]
     pub arch: Option<Arch>,
+    /// Which declared bucket this package comes from.
+    ///
+    /// Needed only when two declared buckets both carry the app. Nothing else
+    /// can answer it: a new package has no lock entry, and `install.json`
+    /// records `bucket` only for packages dotpkg has never installed.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,7 +152,7 @@ struct RawWingetSection {
 
 pub fn parse(text: &str) -> Result<Config> {
     let raw: RawConfig = toml::from_str(text).context("pkg.toml is not valid")?;
-    Ok(Config {
+    let cfg = Config {
         scoop: ScoopSection {
             buckets: parse_buckets(raw.scoop.buckets)?,
             packages: fold_names(raw.scoop.packages, "[scoop]")?,
@@ -154,7 +161,21 @@ pub fn parse(text: &str) -> Result<Config> {
         winget: WingetSection {
             packages: fold_names(raw.winget.packages, "[winget]")?,
         },
-    })
+    };
+    // `fold_map` does not look inside values, so the bucket opt -- which
+    // becomes `$SCOOP/buckets/<it>` and a git argument -- is validated here,
+    // explicitly, with the same check `[scoop] buckets` uses.
+    for (name, opts) in &cfg.scoop.opts {
+        if let Some(b) = &opts.bucket {
+            crate::backend::scoop::ensure_plain_component(
+                name,
+                "pkg.toml [scoop.opts]",
+                "bucket name",
+                b,
+            )?;
+        }
+    }
+    Ok(cfg)
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -347,6 +368,36 @@ packages = ["Git.Git"]
             cfg.scoop.buckets[0].url.as_deref(),
             Some("git@example.invalid:b.git")
         );
+    }
+
+    #[test]
+    fn a_package_can_name_the_bucket_it_comes_from() {
+        // The only place this information can live. Two declared buckets can
+        // both carry an app, and neither pkg.lock (which does not exist yet
+        // for a new package) nor the machine (install.json loses `bucket` for
+        // anything dotpkg installed) can answer which one the user meant.
+        let cfg = parse(
+            "[scoop]\nbuckets = [\"main\", \"extras\"]\npackages = [\"tool\"]\n\
+             [scoop.opts]\ntool = { bucket = \"extras\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.scoop.opts[&Name::new("tool")].bucket.as_deref(),
+            Some("extras")
+        );
+        // arch and bucket are independent, and neither may require the other.
+        let cfg = parse("[scoop.opts]\ntool = { arch = \"arm64\" }\n").unwrap();
+        assert_eq!(cfg.scoop.opts[&Name::new("tool")].bucket, None);
+    }
+
+    #[test]
+    fn a_bucket_opt_that_could_leave_its_directory_is_refused_at_parse_time() {
+        // Same rule as `[scoop] buckets`: this string becomes
+        // `$SCOOP/buckets/<it>` and a git argument.
+        for bad in ["../evil", "a/b", "-oops", "", "c:\\x"] {
+            let text = format!("[scoop.opts]\ntool = {{ bucket = \"{bad}\" }}\n");
+            assert!(parse(&text).is_err(), "{bad:?} must be refused");
+        }
     }
 
     #[test]

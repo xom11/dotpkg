@@ -356,9 +356,24 @@ pub fn blobs(dir: &Path, commits: &[String], path_in_repo: &str) -> Result<Vec<O
         String::from_utf8_lossy(&stderr_bytes).trim()
     );
 
-    let mut answers = Vec::with_capacity(commits.len());
+    Ok(parse_batch(&data, commits.len()))
+}
+
+/// Split `git cat-file --batch`'s response stream into one answer per request.
+///
+/// Separate from `blobs` so the shapes that matter can be exercised without a
+/// repository: a well-formed stream, a `missing` reply in the middle (which
+/// carries no body and must not shift every later answer onto the wrong
+/// commit), and a stream that ends early. That last one is why the length
+/// check below is strict: `blobs` only reaches this after `git cat-file`
+/// exited 0, so a truncated stream should be impossible -- but "should be
+/// impossible" is exactly the reasoning that made the un-drained-pipe deadlock
+/// and the unchecked exit status ship, and the cost of being wrong here is an
+/// index panic inside an unattended `adopt`.
+fn parse_batch(data: &[u8], count: usize) -> Vec<Option<Vec<u8>>> {
+    let mut answers = Vec::with_capacity(count);
     let mut i = 0usize;
-    for _ in commits {
+    for _ in 0..count {
         let Some(nl) = data[i..].iter().position(|b| *b == b'\n').map(|p| i + p) else {
             answers.push(None);
             continue;
@@ -389,7 +404,7 @@ pub fn blobs(dir: &Path, commits: &[String], path_in_repo: &str) -> Result<Vec<O
             }
         }
     }
-    Ok(answers)
+    answers
 }
 
 /// Which bucket a package comes from, or why that cannot be decided.
@@ -476,5 +491,76 @@ pub fn choose_bucket(
         },
         1 => open(&found[0]),
         _ => BucketChoice::Ambiguous { candidates: found },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One `<sha> blob <n>\n<body>\n` response, as `git cat-file --batch`
+    /// writes it.
+    fn response(sha: &str, body: &str) -> Vec<u8> {
+        format!("{sha} blob {}\n{body}\n", body.len()).into_bytes()
+    }
+
+    #[test]
+    fn a_well_formed_stream_yields_one_body_per_request_in_order() {
+        let mut data = response("aaa", "hello");
+        data.extend(response("bbb", "bye"));
+
+        assert_eq!(
+            parse_batch(&data, 2),
+            vec![Some(b"hello".to_vec()), Some(b"bye".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_missing_reply_has_no_body_and_does_not_shift_the_answers_after_it() {
+        // The property the whole header-keyed parse exists for. A parser that
+        // assumed one body per request would consume the NEXT commit's header
+        // as this one's body and hand every later answer back against the
+        // wrong commit -- `adopt` would then pin a commit whose manifest is
+        // not the one that matched.
+        let mut data = response("aaa", "hello");
+        data.extend_from_slice(b"deadbeef missing\n");
+        data.extend(response("bbb", "bye"));
+
+        assert_eq!(
+            parse_batch(&data, 3),
+            vec![Some(b"hello".to_vec()), None, Some(b"bye".to_vec())],
+            "the answer after a missing object must still be its own commit's"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_ends_at_the_body_is_none_because_the_trailing_newline_is_missing() {
+        // `git cat-file --batch` always follows a body with a bare newline, so
+        // a stream ending exactly at the body end is truncated output, not a
+        // complete answer. The check is strict (`<`, not `<=`) precisely so
+        // this case is refused rather than reported as a blob -- and so `i`
+        // stays at or below `data.len()` for the next iteration.
+        let data = b"aaa blob 5\nhello".to_vec();
+        assert_eq!(parse_batch(&data, 1), vec![None]);
+    }
+
+    #[test]
+    fn a_body_shorter_than_its_header_claims_is_none_rather_than_a_panic() {
+        // The bounds check is what keeps this from being an index panic
+        // inside an unattended `adopt`.
+        let data = b"aaa blob 100\nhello\n".to_vec();
+        assert_eq!(parse_batch(&data, 1), vec![None]);
+    }
+
+    #[test]
+    fn a_truncated_stream_still_returns_one_answer_per_request() {
+        // Fewer responses than requests: every request must still get an
+        // answer, or `commits.iter().zip(blobs.iter())` in `adopt` would
+        // silently drop the tail of the history.
+        let data = response("aaa", "hello");
+        assert_eq!(
+            parse_batch(&data, 3),
+            vec![Some(b"hello".to_vec()), None, None]
+        );
     }
 }

@@ -278,7 +278,7 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
     )
     .unwrap();
 
-    dotpkg::adopt::run(
+    let out = dotpkg::adopt::run(
         &f.scoop_root(),
         &[Name::new("aichat")],
         &config_path,
@@ -286,6 +286,14 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
         &state_path,
     )
     .unwrap();
+    // Without this the rest of the test passes VACUOUSLY. `run` returns
+    // `Ok(Outcome)` for a refusal too, and a refused adopt writes nothing --
+    // leaving aichat installed, undeclared and UNOWNED, which is not a Prune
+    // candidate either. The loop below would then find nothing to complain
+    // about for entirely the wrong reason. This is the same failure shape the
+    // Task 12 fixture bug produced, so it is pinned here.
+    assert_eq!(out.adopted.len(), 1, "adopt must have succeeded: {out:?}");
+    assert!(out.refused.is_empty(), "{out:?}");
 
     let declared = dotpkg::config::load(&config_path).unwrap();
     let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
@@ -313,6 +321,14 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
             _ => {}
         }
     }
+    // The positive counterweight to the two panics above, which on their own
+    // are satisfied by any plan that happens to contain neither variant --
+    // including an empty plan produced for the wrong reason.
+    assert!(
+        plan.actions.is_empty(),
+        "a declared, locked, correctly-installed package needs no action: {:?}",
+        plan.actions
+    );
 }
 
 #[test]
@@ -405,10 +421,16 @@ fn a_refusal_names_shallowness_when_that_is_the_likely_cause() {
     )
     .unwrap();
 
+    assert_eq!(out.adopted.len(), 0, "{out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
     let (_, why) = &out.refused[0];
     assert!(
         why.contains("shallow"),
         "a shallow bucket is the likely cause and must be named: {why}"
+    );
+    assert!(
+        why.contains("unshallow"),
+        "naming the cause is only useful with the command that fixes it: {why}"
     );
 }
 
@@ -423,18 +445,35 @@ fn a_package_that_is_not_installed_is_refused_rather_than_invented() {
     )
     .unwrap();
 
+    let lock_path = f.home.path().join("pkg.lock");
+    let state_path = f.home.path().join("state.json");
     let out = dotpkg::adopt::run(
         &f.scoop_root(),
         &[Name::new("nothere")],
         &config_path,
-        &f.home.path().join("pkg.lock"),
-        &f.home.path().join("state.json"),
+        &lock_path,
+        &state_path,
     )
     .unwrap();
+    assert_eq!(out.adopted.len(), 0, "{out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
     let (_, why) = &out.refused[0];
     assert!(
         why.contains("not installed"),
         "adopt brings an EXISTING package under management: {why}"
+    );
+    // The counterweight the message assertion alone does not carry: an
+    // implementation that refuses with the right words AFTER writing is
+    // indistinguishable from this one without it.
+    assert!(!lock_path.exists(), "no lock written");
+    assert!(!state_path.exists(), "no state written");
+    assert!(
+        !dotpkg::config::load(&config_path)
+            .unwrap()
+            .scoop
+            .packages
+            .contains(&Name::new("nothere")),
+        "pkg.toml must not declare a package that is not installed"
     );
 }
 

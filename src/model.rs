@@ -241,6 +241,49 @@ impl Running {
 mod tests {
     use super::*;
 
+    /// `Name`'s companion trait impls, which the Task 14 mutation run found
+    /// were exercised by nothing at all: `PartialEq<&str>`, `PartialOrd` and
+    /// `Hash` could each be replaced by a constant and the whole suite stayed
+    /// green. `Ord` is the one `BTreeMap` uses and it was already covered.
+    ///
+    /// Each of these claims to fold case, and that claim is the whole reason
+    /// `Name` exists -- so it is pinned here rather than left to the three
+    /// doc comments that assert it.
+    #[test]
+    fn names_fold_case_in_every_comparison_the_type_offers() {
+        assert!(Name::new("FZF") == "fzf", "PartialEq<&str> folds case");
+        assert!(Name::new("fzf") == "FZF", "in both directions");
+        assert!(Name::new("fzf") != "bat");
+
+        // PartialOrd, which `<` uses -- distinct from `Ord::cmp`.
+        assert!(
+            Name::new("aichat") < Name::new("BAT"),
+            "ordering folds case"
+        );
+        assert!(!(Name::new("BAT") < Name::new("aichat")));
+        assert_eq!(
+            Name::new("FZF").partial_cmp(&Name::new("fzf")),
+            Some(Ordering::Equal),
+            "two spellings of one name are neither before nor after each other"
+        );
+
+        // Hash, which nothing in the crate uses today -- but a `HashMap<Name,
+        // _>` that disagreed with `Eq` about two spellings of one package is
+        // exactly the collision `parse` refuses elsewhere.
+        use std::collections::hash_map::DefaultHasher;
+        let digest = |n: &Name| {
+            let mut h = DefaultHasher::new();
+            n.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            digest(&Name::new("Git.Git")),
+            digest(&Name::new("git.git")),
+            "equal names must hash equally"
+        );
+        assert_ne!(digest(&Name::new("fzf")), digest(&Name::new("bat")));
+    }
+
     fn bins(v: &[&str]) -> Vec<String> {
         v.iter().map(|b| b.to_string()).collect()
     }

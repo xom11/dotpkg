@@ -321,4 +321,27 @@ mod tests {
         assert!(is_older("26.01", "26.02"));
         assert!(is_older("2026.07.15", "2026.07.29"));
     }
+
+    #[test]
+    fn a_version_with_no_digits_at_all_falls_back_to_a_string_comparison() {
+        // The branch the function's own doc comment calls out and that
+        // nothing exercised until the Task 14 mutation run: scoop manifests
+        // do carry versions like `nightly` and `latest`, and every mutant of
+        // this fallback survived the whole suite.
+        assert!(is_older("nightly", "stable"), "no digits either side");
+        assert!(!is_older("stable", "nightly"));
+
+        // Equal is not older -- on both paths. `<=` here would make `apply`
+        // reinstall a package that is already at the pinned version, every
+        // single run.
+        assert!(!is_older("nightly", "nightly"), "the string path");
+        assert!(!is_older("1.0.0", "1.0.0"), "the numeric path");
+
+        // Exactly one side has digits, so the numeric comparison has nothing
+        // to compare against. Falling through to `[] < [1, 0, 0]` would call
+        // every digitless version older than every numbered one -- which for
+        // an installed `nightly` against a pinned `1.0.0` is a silent
+        // downgrade-shaped reinstall.
+        assert!(!is_older("nightly", "1.0.0"), "one side has no digits");
+    }
 }

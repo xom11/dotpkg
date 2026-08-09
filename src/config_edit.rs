@@ -170,6 +170,66 @@ python = { arch = "64bit" }   # force an architecture
         assert!(msg.contains("already"), "say why: {msg}");
     }
 
+    // -- the LAYOUT the edit leaves behind -------------------------------
+    //
+    // Added by the Task 14 mutation run, which found six survivors in the
+    // `multiline` decision (`src/config_edit.rs:49` and `:52`). Every test
+    // above asserts that the result PARSES and that comments survive; none
+    // asserted the shape of the text, so the whole `multiline` branch --
+    // the reason this function uses `toml_edit` at all rather than
+    // re-rendering the file -- could be computed any way at all and the
+    // suite stayed green. Matching the surrounding style is the promise;
+    // these are what hold it.
+
+    #[test]
+    fn a_multiline_packages_array_keeps_its_shape_and_the_new_entry_gets_its_own_line() {
+        let out = add_scoop_package(HAND_WRITTEN, &Name::new("ripgrep")).unwrap();
+        assert!(
+            out.contains("  \"bat\",\n  \"ripgrep\",\n]"),
+            "the new entry must land on its own indented line with a trailing \
+             comma, and the closing bracket must stay on its own line: {out}"
+        );
+        crate::config::parse(&out).expect("and it must still parse");
+    }
+
+    #[test]
+    fn a_single_line_packages_array_is_not_reflowed_onto_several_lines() {
+        // The other side of the same decision. Reflowing a one-line array is
+        // a diff the user did not ask for in a file they hand-wrote and
+        // committed.
+        let out =
+            add_scoop_package("[scoop]\npackages = [\"fzf\"]\n", &Name::new("ripgrep")).unwrap();
+        assert!(
+            out.contains("packages = [\"fzf\", \"ripgrep\"]"),
+            "a single-line array must stay on one line: {out}"
+        );
+        crate::config::parse(&out).expect("and it must still parse");
+    }
+
+    #[test]
+    fn an_empty_packages_array_keeps_whichever_shape_it_already_had() {
+        // `packages = []` and `packages = [\n]` are both empty, so the entry
+        // count cannot decide this on its own -- only the existing text can.
+        // This is also the empty-pkg.toml case that had no test at all.
+        let flat = add_scoop_package("[scoop]\npackages = []\n", &Name::new("ripgrep")).unwrap();
+        assert!(
+            flat.contains("packages = [\"ripgrep\"]"),
+            "an empty one-line array must stay on one line: {flat}"
+        );
+
+        let broken =
+            add_scoop_package("[scoop]\npackages = [\n]\n", &Name::new("ripgrep")).unwrap();
+        assert!(
+            broken.contains("packages = [\"ripgrep\"\n]"),
+            "an empty array with no entries is not a multiline array: {broken}"
+        );
+
+        for out in [&flat, &broken] {
+            let cfg = crate::config::parse(out).expect("and it must still parse");
+            assert_eq!(cfg.scoop.packages, vec![Name::new("ripgrep")]);
+        }
+    }
+
     #[test]
     fn a_file_with_no_scoop_section_grows_one() {
         let out =

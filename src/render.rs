@@ -690,6 +690,48 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_omits_architecture_drift_entirely_when_there_is_none() {
+        // The counterweight to the assertion above. Without it the drift
+        // clause could be printed unconditionally -- ", 0 architecture
+        // drift" on every ordinary run -- and the suite stayed green.
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: SCOOP.into(),
+                name: "ripgrep".into(),
+                version: "14.1.1".into(),
+                arch: None,
+            }],
+        };
+        let out = render(&plan);
+        assert!(out.contains("1 change(s), 0 skipped"), "{out}");
+        assert!(
+            !out.contains("architecture drift"),
+            "a run with no drift must not mention drift at all: {out}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_failures_says_nothing_about_failures() {
+        // `render_execution`'s failure sentences are gated on `failed() > 0`.
+        // Printed unconditionally, a clean run would end with "the failure(s)
+        // above are everything that happened" -- a false line in a tool whose
+        // spine is that every printed line is true.
+        let out = render_execution(&Execution::default());
+        assert!(
+            !out.contains("failure(s) above"),
+            "a clean run has no failures to explain: {out}"
+        );
+        assert!(
+            !out.contains("Look at the machine"),
+            "and nothing to send the user looking for: {out}"
+        );
+        assert!(
+            out.contains("0 failed"),
+            "the counts are still printed: {out}"
+        );
+    }
+
+    #[test]
     fn render_shows_the_architecture_the_plan_resolved() {
         let plan = Plan {
             actions: vec![

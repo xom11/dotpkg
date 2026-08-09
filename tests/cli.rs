@@ -1049,3 +1049,202 @@ fn status_says_so_when_the_lock_is_one_apply_would_refuse() {
         "the plan must still be printed: {stdout}"
     );
 }
+
+// -- Task 14: `update` and `adopt` end to end -----------------------------
+//
+// Added by the whole-branch review, and found by MUTATION rather than by
+// reading: before these, `tests/cli.rs` invoked only `apply` and `status`, so
+// every exit-code decision in the `Update` and `Adopt` arms of `main.rs` was
+// unreachable from the suite. cargo-mutants reported five survivors there --
+// `main.rs:438` (the undeclared-package refusal), `main.rs:459` (three
+// mutants on `failed_count() > 0`), `main.rs:470` (the relative `--state`
+// refusal) and `main.rs:496` (the refusal exit) -- all of which are killed by
+// the tests below.
+//
+// The exit code IS the product for these commands: `update` runs unattended
+// and a scheduled task learns "a package could not be re-resolved" only from
+// exit 1. This is the ledger's THIRD PATTERN -- the coverage hole sits
+// exactly where the output meets a human or the next command -- so the pairs
+// below are deliberate: a refusal test on its own is satisfied by an
+// implementation that always fails, so each is paired with a positive
+// sibling that must stay green.
+
+/// A bucket with no `pkg.lock` alongside it: `update` writes its own.
+fn bucket_only(f: &Fixture, app: &str, version: &str) {
+    f.write_lock_and_bucket_for(app, version);
+    fs::remove_file(f.work.path().join("pkg.lock")).unwrap();
+}
+
+#[test]
+fn update_resolves_a_declared_package_and_exits_zero() {
+    // The positive sibling for both refusal tests below. Without it, an
+    // `update` that always exited 1 -- or always refused -- would satisfy
+    // every assertion the two negative tests make.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        "{}",
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+
+    let out = f.run(&["update"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a run in which everything resolved must exit 0: stdout: {stdout} stderr: {stderr}"
+    );
+    let lock = fs::read_to_string(f.work.path().join("pkg.lock"))
+        .expect("update must have written pkg.lock");
+    assert!(lock.contains("[scoop.fzf]"), "{lock}");
+    assert!(lock.contains("0.74.1") || lock.contains("1.0.0"), "{lock}");
+}
+
+#[test]
+fn update_exits_one_when_a_declared_package_could_not_be_reresolved() {
+    // `failed_count() > 0`. A package that is declared but that no declared
+    // bucket carries is kept, not dropped -- and the run is not a success.
+    // Unattended, the exit code is the only way anyone finds out.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"nothere\"]\n",
+        "{}",
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+
+    let out = f.run(&["update"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a package that could not be re-resolved is outstanding work: \
+         stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("nothere"),
+        "name the package that failed: {stdout}"
+    );
+}
+
+#[test]
+fn update_refuses_a_package_pkg_toml_does_not_declare_and_writes_nothing() {
+    // `update` re-resolves what pkg.toml asks for; it is not a way to add a
+    // package. A refusal exits 2, not 1: the machine was not touched.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        "{}",
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["update", "nothere"]);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an undeclared package is a refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains("nothere") && stderr.contains("pkg.toml"),
+        "name the package and where to declare it: {stderr}"
+    );
+    // The counterweight: a refusal that had already rewritten the lock would
+    // satisfy the assertions above unchanged.
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "a refused update must not write pkg.lock"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn adopt_brings_an_installed_package_under_management_and_exits_zero() {
+    // The positive sibling for the two adopt refusals below, and the only
+    // end-to-end proof that the three writes happen through the real CLI.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+
+    let out = f.run(&["adopt", "fzf"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a successful adopt exits 0: stdout: {stdout} stderr: {stderr}"
+    );
+    let lock = fs::read_to_string(f.work.path().join("pkg.lock"))
+        .expect("adopt must have written pkg.lock");
+    assert!(lock.contains("[scoop.fzf]"), "{lock}");
+    let cfg = fs::read_to_string(f.work.path().join("pkg.toml")).unwrap();
+    assert!(cfg.contains("fzf"), "pkg.toml must now declare it: {cfg}");
+    let state = fs::read_to_string(f.local.path().join("dotpkg").join("state.json")).unwrap();
+    assert!(state.contains("fzf"), "state.json must own it: {state}");
+}
+
+#[test]
+fn adopt_exits_one_when_a_package_is_refused() {
+    // A refusal is per package and reported, but the run as a whole did not
+    // do what was asked, so it is not a success.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+
+    let out = f.run(&["adopt", "nothere"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a refused adopt is outstanding work: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("nothere") || stderr.contains("nothere"),
+        "name the package: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "a refused adopt writes nothing"
+    );
+}
+
+#[test]
+fn adopt_refuses_a_relative_state_path_before_anything_runs() {
+    // The same rule `apply` has, on the other command that writes state.json.
+    // Verified as a refusal (exit 2), not a `?` propagation (exit 1).
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
+        r#"{"scoop":{}}"#,
+    );
+    bucket_only(&f, "fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["adopt", "--state", "some/relative/path.json", "fzf"]);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a relative --state path is a refusal, and a refusal exits 2: {stderr}"
+    );
+    assert!(
+        stderr.contains("absolute"),
+        "say what is wrong with it: {stderr}"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock").exists(),
+        "the refusal must land before any write"
+    );
+    f.assert_nothing_was_touched(before);
+}

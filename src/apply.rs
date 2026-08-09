@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::execute::Step;
 use crate::lock::Lock;
 use crate::lock::Pin;
-use crate::model::{Name, SCOOP};
+use crate::model::{Name, SCOOP, WINGET};
 use crate::plan::{Action, Plan, SkipReason};
 use crate::state::State;
 use anyhow::Result;
@@ -28,22 +28,27 @@ use std::path::{Path, PathBuf};
 /// their `pkg.toml` is shown the plan and asked, which is the protection that
 /// already exists.
 ///
-/// TODO(phase-4-winget): scoop-only, both in what it reads and in what it
-/// counts. A `pkg.toml` emptied of its `[winget]` section while dotpkg owns
-/// winget packages passes this guard untouched. Deliberately left until the
-/// winget backend exists — there is nothing that can prune a winget package
-/// today, so widening it now would be an untested guard over an unimplemented
-/// path — but it must be widened in the same change that adds one.
+/// Checked per backend, independently: the old version returned from the
+/// whole function on the first backend with any declared packages, so a
+/// `pkg.toml` declaring one scoop package could drop its entire `[winget]`
+/// section and prune every owned winget package with no guard at all. A
+/// declared package in one backend must never vouch for an emptied section
+/// of another.
 pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
-    if !declared.scoop.packages.is_empty() {
-        return Ok(());
+    for (backend, declared_count) in [
+        (SCOOP, declared.scoop.packages.len()),
+        (WINGET, declared.winget.packages.len()),
+    ] {
+        if declared_count > 0 {
+            continue;
+        }
+        let owned = state.owned_count(backend);
+        anyhow::ensure!(
+            owned == 0,
+            "pkg.toml declares no {backend} packages but dotpkg owns {owned}. \
+             Refusing to prune everything. If the file is right, pass --allow-empty-config."
+        );
     }
-    let owned = state.owned_count(SCOOP);
-    anyhow::ensure!(
-        owned == 0,
-        "pkg.toml declares no scoop packages but dotpkg owns {owned}. \
-         Refusing to prune everything. If the file is right, pass --allow-empty-config."
-    );
     Ok(())
 }
 
@@ -807,6 +812,54 @@ mod tests {
             &owning(&["fzf", "bat", "ripgrep"]),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_config_that_declares_no_winget_packages_while_dotpkg_owns_some_is_refused() {
+        let mut state = State::default();
+        state.set(WINGET, &Name::new("Git.Git"), Ownership::Adopted);
+        let cfg = crate::config::parse("[winget]\npackages = []\n").unwrap();
+        let r = mass_prune_guard(&cfg, &state);
+        assert!(
+            r.is_err(),
+            "an emptied [winget] section must not prune silently"
+        );
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(
+            msg.contains("winget"),
+            "the message must name the backend: {msg}"
+        );
+        assert!(msg.contains('1'), "and how many are owned: {msg}");
+    }
+
+    #[test]
+    fn a_declared_scoop_package_does_not_disable_the_winget_half_of_the_guard() {
+        // THE bug. The old short-circuit returned from the whole function on the
+        // first non-empty backend, so a pkg.toml with any scoop package at all
+        // could drop its entire [winget] section and prune every owned winget
+        // package with no guard.
+        let mut state = State::default();
+        state.set(WINGET, &Name::new("Git.Git"), Ownership::Adopted);
+        let cfg = crate::config::parse("[scoop]\npackages = [\"fzf\"]\n").unwrap();
+        let r = mass_prune_guard(&cfg, &state);
+        assert!(
+            r.is_err(),
+            "a non-empty [scoop] must not vouch for an empty [winget]"
+        );
+    }
+
+    #[test]
+    fn a_config_that_declares_packages_for_every_owned_backend_is_allowed() {
+        // The positive sibling: without it, a guard that always refused would
+        // satisfy both assertions above.
+        let mut state = State::default();
+        state.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
+        state.set(WINGET, &Name::new("Git.Git"), Ownership::Adopted);
+        let cfg = crate::config::parse(
+            "[scoop]\npackages = [\"fzf\"]\n[winget]\npackages = [\"Git.Git\"]\n",
+        )
+        .unwrap();
+        assert!(mass_prune_guard(&cfg, &state).is_ok());
     }
 
     // -- default_staging_root ------------------------------------------

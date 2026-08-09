@@ -107,6 +107,25 @@ fn strip_extended_prefix(path: &str) -> Cow<'_, str> {
     Cow::Borrowed(path.strip_prefix(r"\\?\").unwrap_or(path))
 }
 
+/// The rewritten path string, or `None` to keep the original `PathBuf`.
+///
+/// Split out of `resolve_root` so the decision is observed rather than
+/// inferred: the `b.len() == s.len()` arm -- "nothing was stripped, keep
+/// `canon` itself rather than rebuilding it from a lossy string, which would
+/// corrupt a path that is not valid UTF-8" -- is only reachable through
+/// `resolve_root` with a real `\\?\`-prefixed `canonicalize` result (Windows
+/// only) or a non-UTF-8 path (a `#[cfg(unix)]` fixture this project does not
+/// add, per its own history of losing coverage that way). Through
+/// `resolve_root` alone, all three of its mutants survive on every platform a
+/// test can run on. As a pure function over `&str`, the same three are killed
+/// directly, on every platform, with no `#[cfg]` at all.
+fn rewritten(s: &str) -> Option<String> {
+    match strip_extended_prefix(s) {
+        Cow::Borrowed(b) if b.len() == s.len() => None,
+        other => Some(other.into_owned()),
+    }
+}
+
 /// Resolve aliases so path matching compares the string `sysinfo` reports.
 ///
 /// A path that does not exist is kept as given: a machine with no scoop is a
@@ -115,17 +134,7 @@ fn resolve_root(root: PathBuf) -> PathBuf {
     let Ok(canon) = std::fs::canonicalize(&root) else {
         return root;
     };
-    // `None` means "nothing was stripped": keep `canon` itself rather than
-    // rebuilding it from a lossy string, which would corrupt a path that is
-    // not valid UTF-8.
-    let stripped = {
-        let s = canon.to_string_lossy();
-        match strip_extended_prefix(&s) {
-            Cow::Borrowed(b) if b.len() == s.len() => None,
-            other => Some(other.into_owned()),
-        }
-    };
-    match stripped {
+    match rewritten(&canon.to_string_lossy()) {
         Some(s) => PathBuf::from(s),
         None => canon,
     }
@@ -215,7 +224,7 @@ impl Scoop {
 }
 
 impl Backend for Scoop {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         SCOOP
     }
 
@@ -804,6 +813,71 @@ mod tests {
         );
     }
 
+    // -- rewritten ------------------------------------------------------
+
+    #[test]
+    fn an_ordinary_unprefixed_path_needs_no_rewrite() {
+        // The `b.len() == s.len()` arm: nothing was stripped, so `None`
+        // tells `resolve_root` to keep `canon` itself rather than rebuild it
+        // from a lossy string -- the branch that would corrupt a path that
+        // is not valid UTF-8.
+        assert_eq!(rewritten(r"C:\Users\kln\scoop"), None);
+    }
+
+    #[test]
+    fn a_drive_prefixed_path_is_rewritten_to_its_stripped_form() {
+        // The prefix really was stripped, so `b.len() < s.len()`: `Some` is
+        // the correct answer here, and this is the input `resolve_root`
+        // meets on essentially every real Windows machine.
+        assert_eq!(
+            rewritten(r"\\?\C:\Users\kln\scoop"),
+            Some(r"C:\Users\kln\scoop".to_string())
+        );
+    }
+
+    #[test]
+    fn a_unc_prefixed_path_is_rewritten_to_its_restored_form() {
+        // The `Cow::Owned` arm: the two leading backslashes were added back
+        // on, not merely stripped, so this can never satisfy the
+        // `Cow::Borrowed` guard at all -- `Some` regardless of how that
+        // guard is mutated.
+        assert_eq!(
+            rewritten(r"\\?\UNC\server\share\scoop"),
+            Some(r"\\server\share\scoop".to_string())
+        );
+    }
+
+    // -- resolve_root -------------------------------------------------------
+
+    #[test]
+    fn a_root_that_needs_no_prefix_stripping_is_kept_as_canonicalize_returned_it() {
+        // A real (not fabricated) `canonicalize` round trip. This documents
+        // `resolve_root`'s actual contract but -- see `rewritten` above --
+        // cannot discriminate its own guard's mutants on a platform whose
+        // `canonicalize` never emits a `\\?\`-prefixed string in the first
+        // place: `rewritten`'s dedicated tests are what kill those.
+        let d = tempfile::tempdir().unwrap();
+        let got = resolve_root(d.path().to_path_buf());
+        assert_eq!(
+            got,
+            std::fs::canonicalize(d.path()).unwrap_or_else(|_| d.path().to_path_buf())
+        );
+        assert!(!got.to_string_lossy().starts_with(r"\\?\"), "got {got:?}");
+    }
+
+    // -- strip_ansi -----------------------------------------------------
+
+    #[test]
+    fn a_lone_escape_character_not_followed_by_a_bracket_is_kept_not_eaten() {
+        // The `&&` means BOTH bytes -- ESC and a following `[` -- must be
+        // present before anything is treated as a colour code and dropped.
+        // Weakening it to `||` treats a bare ESC as the start of a sequence
+        // on its own; the loop that follows then consumes the very next
+        // character hunting for a terminator that was never there, silently
+        // swallowing real content that happened to sit right after it.
+        assert_eq!(strip_ansi("\u{1b}A"), "\u{1b}A");
+    }
+
     // -- download_verdict -------------------------------------------------
     //
     // Every string below is scoop 0.5.3's real output, captured on a14 on
@@ -901,6 +975,33 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
     }
 
     #[test]
+    fn an_error_url_line_that_does_not_end_in_is_not_valid_is_not_mistaken_for_a_dead_url() {
+        // The `&&` requires BOTH the "ERROR URL " prefix and the " is not
+        // valid" suffix on one line. Weakening it to `||` would call this
+        // UrlDead on the prefix alone -- and a differently-worded ERROR URL
+        // line, sharing the prefix but not the suffix, is exactly the shape
+        // an unrecognized scoop error takes. The fail-closed path
+        // (`has_unrecognized_error`) is what must catch it instead.
+        assert_eq!(
+            download_verdict("ERROR URL https://example.com/x.zip could not be reached\n"),
+            FetchVerdict::Unproven
+        );
+    }
+
+    #[test]
+    fn a_checking_hash_line_that_does_not_end_ok_is_not_mistaken_for_a_verified_hash() {
+        // Same trap on the other `&&`: a line starting "Checking hash of "
+        // but ending in anything other than "... ok." must not read as
+        // verified. `||` would call this Verified on the strength of the
+        // prefix alone, which is the single most dangerous mistake this
+        // function's own doc comment calls out.
+        assert_eq!(
+            download_verdict("Checking hash of x.zip ... failed.\n"),
+            FetchVerdict::Unproven
+        );
+    }
+
+    #[test]
     fn tail_returns_short_input_unchanged() {
         let short = "line 1\nline 2\nline 3";
         assert_eq!(tail(short), short);
@@ -922,6 +1023,24 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
             "got {} lines",
             result.lines().count()
         );
+    }
+
+    #[test]
+    fn exactly_twenty_lines_gets_no_last_lines_prefix_glued_on() {
+        // `skip > 0` is false exactly when input is at or under TAIL_LINES.
+        // At precisely 20 lines, `checked_sub(20)` yields `Some(0)`, so the
+        // guard alone decides whether a "(last 20 lines)" prefix gets glued
+        // onto text nothing was ever truncated from. Forcing the guard to
+        // `true` (or the `>` to `>=`) adds that prefix to input that fits
+        // with room to spare; the existing 500-line test never reaches
+        // `skip == 0`, so it cannot see this.
+        let exactly_20: String = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = tail(&exactly_20);
+        assert_eq!(result, exactly_20);
+        assert!(!result.starts_with("(last"), "got {result:?}");
     }
 
     #[test]

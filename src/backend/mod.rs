@@ -22,6 +22,6 @@ pub struct Scan {
 /// One package manager. `scan` reads state that is already on disk or already
 /// known; nothing here reaches the network. Mutating methods arrive in Phase 2.
 pub trait Backend {
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
     fn scan(&self) -> Result<Scan>;
 }

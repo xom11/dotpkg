@@ -3,6 +3,16 @@ use dotpkg::backend::Backend;
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn the_backend_reports_the_name_every_map_and_guard_is_keyed_by() {
+    // state.json is a map keyed by this string, plan() compares against
+    // model::SCOOP, and owned_count(SCOOP) is what mass_prune_guard reads.
+    // Mutating it to "" or "xyzzy" left the whole suite green.
+    let s = Scoop::new(std::path::PathBuf::from("/nonexistent"));
+    assert_eq!(Backend::name(&s), dotpkg::model::SCOOP);
+    assert_eq!(Backend::name(&s), "scoop");
+}
+
 /// Build the parts of a scoop install that `scan` reads. Mirrors the real
 /// layout: apps/<name>/current/{manifest,install}.json
 fn app(root: &Path, name: &str, version: &str, arch: &str, bucket: &str) {
@@ -278,6 +288,31 @@ fn a_dot_com_bin_is_stripped_the_same_as_dot_exe() {
     assert_eq!(got[0].bins, vec!["tool"]);
 }
 
+#[test]
+fn a_bin_nested_inside_a_json_array_is_still_collected() {
+    // `declared_executables::walk`'s `Value::Array` arm exists for a shape
+    // `bin`/`shortcuts` matching alone cannot reach: a manifest key whose
+    // value is itself an array of objects, each carrying its own `bin`.
+    // Deleting that arm drops straight into the `_ => {}` wildcard and this
+    // executable vanishes -- and nothing before this test ever put a `bin`
+    // behind an array, so the whole suite stayed green while it did.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("apps").join("tool").join("current");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(
+        d.join("manifest.json"),
+        r#"{"version":"1.0","variants":[{"bin":"foo.exe"}]}"#,
+    )
+    .unwrap();
+
+    let got = Scoop::new(dir.path().to_path_buf())
+        .scan()
+        .unwrap()
+        .installed;
+    assert_eq!(got.len(), 1, "got {got:?}");
+    assert_eq!(got[0].bins, vec!["foo"]);
+}
+
 use dotpkg::model::Name;
 use dotpkg::sys::Process;
 use std::collections::BTreeSet;
@@ -394,6 +429,69 @@ fn a_manifest_that_is_not_a_file_warns_rather_than_vanishing() {
         "the warning must name the app: {:?}",
         scan.warnings
     );
+}
+
+#[test]
+fn a_declared_bucket_missing_on_disk_is_reported_by_name_and_a_real_reason() {
+    // Every mutant that replaces `clone_missing_buckets`'s whole body
+    // survives unless the real return value differs from all three literal
+    // stand-ins: an empty vec, or a single entry naming a `Default` (empty)
+    // `Name` with reason `""` or `"xyzzy"`. A declared bucket that is not on
+    // disk, run against a root with no real `scoop.cmd` to invoke, produces
+    // exactly one entry naming the real bucket ("main") with a real "cannot
+    // run" failure text -- distinct from all three stand-ins at once.
+    //
+    // This also exercises the pre-run `.git`-existence skip guard from its
+    // "missing" side: a bucket dir with no `.git` must not be treated as
+    // already cloned. Its sibling below covers the "already present" side.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dotpkg::config::Config {
+        scoop: dotpkg::config::ScoopSection {
+            buckets: vec![dotpkg::config::BucketDecl {
+                name: Name::new("main"),
+                url: None,
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg);
+
+    assert_eq!(failed.len(), 1, "got {failed:?}");
+    assert_eq!(failed[0].0, Name::new("main"));
+    assert!(
+        !failed[0].1.is_empty() && failed[0].1 != "xyzzy",
+        "got {:?}",
+        failed[0].1
+    );
+}
+
+#[test]
+fn a_declared_bucket_already_on_disk_is_left_alone() {
+    // The positive sibling to the test above: a bucket directory that
+    // already has `.git` must be skipped outright -- no clone attempt, no
+    // failure entry -- even on a machine with no working scoop.cmd to
+    // attempt one with. Only `.git`'s existence is checked, not its
+    // validity, so an empty `.git` directory is enough to take this branch.
+    // Pairing this with the "missing" test above means a mutation that
+    // always takes one branch cannot satisfy both.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("buckets").join("main").join(".git")).unwrap();
+    let cfg = dotpkg::config::Config {
+        scoop: dotpkg::config::ScoopSection {
+            buckets: vec![dotpkg::config::BucketDecl {
+                name: Name::new("main"),
+                url: None,
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let failed = Scoop::new(dir.path().to_path_buf()).clone_missing_buckets(&cfg);
+
+    assert!(failed.is_empty(), "got {failed:?}");
 }
 
 use dotpkg::model::{Installed, SCOOP};

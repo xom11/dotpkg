@@ -1,6 +1,6 @@
 # Dogfood: Phase 2b-2, the executor — a14, 2026-08-09
 
-Stage 1 of two. Run against a throwaway `$env:SCOOP` root on a14, driven by a
+Both stages. Stage 1 ran against a throwaway `$env:SCOOP` root on a14, driven by a
 real `scoop` 0.5.3 and the real `main` bucket. The machine's own `~/scoop` was
 read but never written: **31 apps and 76 cache entries before and after,
 `kanata` (`kanata_windows_tty_winIOv2_arm64`, PID 15732) never started or
@@ -217,7 +217,112 @@ it is not a dotpkg defect, and real scoop-written manifests have no BOM.
 - Write every file dotpkg parses with `[System.IO.File]::WriteAllText` and a
   BOM-less `UTF8Encoding($false)`.
 
-## Stage 2 — not run
+## Stage 2 — the real `~/scoop`
 
-Stage 2 is the real `~/scoop`. It has not been run, and nothing in this document
-should be read as covering it.
+Run after Stage 1's fixes, against the machine's own scoop, with `%LOCALAPPDATA%`
+left at its real value so `state.json` landed where it really lives. Scoped to
+**act one only** — downgrade a leaf package, verify, restore. The prune was
+deliberately not repeated here: Stage 1 had already exercised it end to end
+against a real scoop and a real bucket, and repeating it on real software buys
+a window in which a package the user depends on is genuinely absent.
+
+Target: `shfmt` 3.13.1 → 3.13.0 → 3.13.1. Chosen because it is a leaf, small,
+idle (`processes matching *shfmt* = NONE`), and neither `git` nor anything with
+a live process. No package on this machine declares `depends`, measured
+separately.
+
+### Pre-flight, read-only
+
+`dotpkg status` printed exactly one action and twenty-three `? unmanaged -- no
+action` lines — the prune fence visible in practice: dotpkg owns nothing, so it
+proposes to touch nothing it did not plan.
+
+The architecture came through as `64bit`, which is what `shfmt` is actually
+installed as. Preservation, not correction.
+
+Three warnings, on the same three apps as every previous phase:
+
+```
+warning: scoop: actionlint: cannot read manifest.json: The path cannot be
+  traversed because it contains an untrusted mount point. (os error 448)
+warning: scoop: antigravity: ...
+warning: scoop: zellij: ...
+```
+
+That is the known elevated-`ssh` junction quirk, not a dotpkg defect. Worth
+noting for what it demonstrates: dotpkg **warns** rather than silently treating
+those three as absent, which is the Phase 2a fix earning its keep on a real
+machine. None of the three is declared or owned, so the plan was unaffected.
+
+### Act one
+
+```
+before: shfmt = 3.13.1   apps = 31   state = (absent)
+
+  v scoop  shfmt          3.13.1 -> 3.13.0         (downgrade, from lock, 64bit)
+  ready   scoop  shfmt        3.13.1 -> 3.13.0  (downgrade, 64bit)
+  1 of 1 changes ready, 0 failed, 0 skipped, 0 not locked.
+  done    scoop  shfmt        verified on disk
+  1 verified on disk, 0 failed, 0 held.            EXIT = 0
+
+after:  shfmt = 3.13.0   apps = 31
+state.json = { "scoop": { "shfmt": "installed" } }
+shim still present = True
+the binary itself reports: v3.13.0
+```
+
+**Exactly one `state.json` key**, which is the plan's central claim for this
+act. And the check that matters most: `shfmt --version` reports `v3.13.0`, so
+the executable on the machine really changed — not merely the manifest dotpkg
+compares against.
+
+`recover.cmd` was absent afterwards, correctly: the run had no failures.
+
+### Restore
+
+```
+  ^ scoop  shfmt          3.13.0 -> 3.13.1         (upgrade, 64bit)
+  done    scoop  shfmt        verified on disk     EXIT = 0
+the binary reports: v3.13.1
+```
+
+### The machine afterwards
+
+All **31** packages compared against the baseline captured before anything ran:
+**no package added, none removed, no version changed.** Cache 76, unchanged.
+`kanata` still `kanata_windows_tty_winIOv2_arm64` PID **15732** — never started
+or stopped.
+
+One thing did change and is recorded rather than explained away: **`explorer`'s
+PID went from 9620 to 15524** during the session. dotpkg touched only a shell
+formatter, so this is almost certainly Windows or ordinary desktop activity —
+but nothing here establishes that, so it is written down as an observation, not
+as a cleared suspicion.
+
+### Cleanup
+
+`%LOCALAPPDATA%\dotpkg` removed entirely, verified absent. That mattered more
+than ordinary tidiness: `state.json` said `{"scoop":{"shfmt":"installed"}}`, so
+leaving it would have meant dotpkg believed it owned a package it had not
+originally installed — and a later `apply` with `shfmt` undeclared would have
+pruned it. Both probe roots, both staging trees, every `dotpkg-*.txt`, and the
+source tarball removed and re-checked individually.
+
+Kept, matching the precedent of earlier phases: `C:\Users\kln\dotpkg-build` and
+`C:\Users\kln\pkg.toml`. No `Dotpkg*` scheduled task remains; `AHKWatchdog` and
+`KanataWatchdog` are untouched and `Ready`.
+
+### What Stage 2 deliberately did not cover
+
+The prune on real software, and everything Stage 1 already listed as
+un-exercised — `ContentDiffers`, the lost-package path, `touched`, and
+`recover.cmd` surviving a failed run. Stage 2 changes none of those; they remain
+unit-tested only, for the reason Stage 1 records: `apply` re-runs `prepare`,
+which re-derives the staged manifest from the lock, so the tampering needed to
+induce them is healed before it can bite.
+
+Also not exercised: the medium-integrity scheduled-task path. Stage 2 ran over
+plain elevated `ssh`, which is why the three junction warnings appear. A run at
+medium integrity would see all 31 apps; it was not needed here because the three
+unreadable packages are neither declared nor owned, and `status` was used as a
+pre-flight to confirm the plan was unaffected.

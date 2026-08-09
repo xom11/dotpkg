@@ -1024,8 +1024,16 @@ history**, so `adopt`'s refusal had to be constructed.
 1. **`mass_prune_guard` reads scoop only.** Top of this file. Must grow a backend
    loop in the same change that adds winget. **This is now the highest-value
    open item in this document.**
-2. **`main.rs:411`'s exit-code floor has no reachable test.** Recommend
-   extracting it as a pure function in Phase 4.
+2. **`main.rs:411`'s exit-code floor is tested, but its two mutants are not.**
+   `tests/cli.rs:666`
+   (`keep_going_does_not_report_success_when_a_declared_package_could_not_be_prepared`)
+   reaches the floor through the `!preparation.is_ok()` branch and pins exit
+   1; deleting the line turns that test red. What survives is the two
+   line-411 mutants (`&&`→`||`, delete `!`) described above, which are
+   structurally unreachable from this suite because they diverge only on a
+   fully successful non-empty `apply`, and no fixture can construct one
+   without a real scoop binary. Recommend extracting the floor as a pure
+   function in Phase 4.
 3. **15 surviving mutants in `src/backend/scoop.rs`**, listed in their own
    section above. `Backend::name` being asserted by nothing is the one to do
    first, and to do before there is a second backend to tell it apart from.

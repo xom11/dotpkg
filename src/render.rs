@@ -919,6 +919,31 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_unlocked_winget_package_is_not_told_to_run_update() {
+        // `dotpkg update` explicitly declines to resolve winget packages and
+        // carries existing pins through untouched (`update::run`'s own
+        // winget notice) -- so the generic `SkipReason::NotLocked` line
+        // ("no lock entry -- run `dotpkg update`", asserted a few tests
+        // down) would be false advice here. This is the counterpart to
+        // `SkipReason::NotLocked` itself producing that text for scoop,
+        // where the advice IS true.
+        let plan = Plan {
+            actions: vec![Action::Skip {
+                backend: WINGET.into(),
+                name: "Git.Git".into(),
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+            }],
+        };
+        let out = render(&plan);
+        assert!(out.contains("Git.Git"), "got: {out}");
+        assert!(out.contains("not in pkg.lock"), "got: {out}");
+        assert!(
+            !out.contains("dotpkg update"),
+            "update cannot fix this today, so it must not be told to run it: {out}"
+        );
+    }
+
+    #[test]
     fn a_skip_says_what_to_do_about_it() {
         let plan = Plan {
             actions: vec![Action::Skip {

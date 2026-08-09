@@ -24,6 +24,39 @@ use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use tempfile::TempDir;
 
+/// The `PATH` this fixture hands to the spawned `dotpkg` process, with every
+/// directory that carries a `winget`/`winget.exe` binary removed.
+///
+/// Task 14's review caught two tests asserting "winget is absent" as a
+/// property of the DEVELOPER'S machine rather than of the fixture:
+/// `Fixture::run` already overrides `SCOOP`/`LOCALAPPDATA`/`XDG_STATE_HOME`
+/// but inherited the host `PATH` unfiltered, so on any machine that
+/// genuinely has winget installed -- which includes the Windows machine a
+/// later task runs this suite on -- `winget list` would succeed for real,
+/// and both `Winget::scan` warning assertions would go red, one of them
+/// (`status`'s "nothing to do") for a reason that has nothing to do with
+/// winget at all: every real installed winget package would be undeclared
+/// and unowned and become a stray `Action::Unmanaged` report.
+///
+/// Filtered by directory CONTENT, not by a hardcoded typical install path
+/// (`winget.exe` usually lives under `%LOCALAPPDATA%\Microsoft\WindowsApps`,
+/// but nothing requires that): this stays correct regardless of where
+/// winget actually lives, and leaves every OTHER tool on `PATH` --
+/// `git`, which the `dotpkg` binary itself shells out to for real from
+/// `src/bucket.rs` during staging -- untouched. On a machine with no winget
+/// anywhere on `PATH` at all (every machine this suite has actually run on
+/// so far), this is a no-op: nothing is filtered out.
+fn path_without_winget() -> std::ffi::OsString {
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let filtered: Vec<_> = std::env::split_paths(&original)
+        .filter(|dir| !dir.join("winget.exe").exists() && !dir.join("winget").exists())
+        .collect();
+    // `join_paths` only fails if a directory itself contains the platform
+    // path-separator byte -- fall back to the unfiltered original rather
+    // than an empty PATH, which would break `git` resolution too.
+    std::env::join_paths(filtered).unwrap_or(original)
+}
+
 /// A scoop root, a state directory and a working directory, wired together.
 struct Fixture {
     work: TempDir,
@@ -71,6 +104,7 @@ impl Fixture {
             .current_dir(self.work.path())
             .env("SCOOP", self.scoop.path())
             .env("LOCALAPPDATA", self.local.path())
+            .env("PATH", path_without_winget())
             .env_remove("XDG_STATE_HOME")
             .output()
             .expect("the dotpkg binary must be runnable")
@@ -1147,16 +1181,15 @@ fn status_says_so_when_the_lock_is_one_apply_would_refuse() {
 // was on the machine. These pin the wiring end to end through the real
 // compiled binary rather than through `plan()`/`Winget` directly.
 //
-// This dev machine has no `winget` binary on `PATH` -- winget is a Windows
-// tool -- so `Winget::scan()` deterministically takes its "cannot be run"
-// branch on every run here: an empty `Scan` plus exactly one warning,
-// mirroring `Scoop::scan`'s own missing-root behaviour. That determinism is
-// exactly what makes "no test depends on a real machine's winget packages"
-// true by construction here: there are none to depend on. It also means these
-// two tests cannot exercise the "winget IS installed" branch -- only a real
-// Windows machine with winget on `PATH` can -- so they assert the one thing
-// that holds on both: no crash, and no second message on top of the one
-// `Winget::scan` already prints.
+// `Fixture::run` hands the spawned process `path_without_winget()`, so
+// `winget` is absent from its `PATH` by construction, not by the accident of
+// which machine happens to run this suite -- review caught the earlier
+// version of this comment claiming the opposite, which would have gone red
+// on the first Windows machine with winget installed to run it. That means
+// these two tests still cannot exercise the "winget IS installed" branch --
+// only a real Windows machine with a `PATH` this fixture does not control
+// can -- so they assert the one thing guaranteed on every machine: no crash,
+// and no second message on top of the one `Winget::scan` already prints.
 
 #[test]
 fn status_stays_quiet_about_winget_beyond_one_warning_when_the_binary_is_absent() {
@@ -1221,6 +1254,71 @@ fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
         "exactly one warning about winget, not a second on top of it: {stderr}"
     );
     f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn a_declared_unlocked_winget_package_does_not_block_a_legitimate_scoop_prune() {
+    // The Critical regression review caught, reproduced at the level it
+    // actually broke: not `plan()` alone, but the whole chain through
+    // `prepare()` to the exit code. Before the fix, a declared winget
+    // package with no lock entry became `SkipReason::NotLocked` --
+    // `Intent::NotLocked` -> `Outcome::NotLocked` -> `not_locked_count() > 0`
+    // -> `Preparation::is_ok() == false` -- and `main.rs`'s `!preparation.
+    // is_ok() && !keep_going` branch refused the ENTIRE run before `execute`
+    // was ever called, printing "N package(s) could not be prepared, so
+    // nothing has been changed" and exiting 2. `aichat`'s prune -- entirely
+    // unrelated to the undeclared winget package -- never got a chance.
+    //
+    // This is otherwise `a_prune_authorised_by_both_flags_runs_and_records_
+    // the_release` with one addition: `[winget] packages = ["Git.Git"]`,
+    // declared and never locked. If the regression were still present, this
+    // run would refuse outright (exit 2, no "FAILED" line at all, because
+    // `execute` never runs) instead of genuinely attempting the prune and
+    // failing at the uninstall step the way the sibling test does.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n[winget]\npackages = [\"Git.Git\"]\n",
+        r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+
+    let out = f.run(&["apply", "--yes", "--allow-prune"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    let all = format!("{stdout}{stderr}");
+
+    assert!(
+        !all.contains("could not be prepared, so nothing has been changed"),
+        "this must not be a refusal -- the winget package is reported, not \
+         fatal: {all}"
+    );
+    // Same proof `a_prune_authorised_by_both_flags_runs_and_records_the_
+    // release` uses: `execute` was genuinely called (aichat's uninstall was
+    // attempted and failed, since this platform has no real scoop.cmd),
+    // which is only reachable if `preparation.is_ok()` was true.
+    assert!(
+        all.contains("FAILED") && all.contains("aichat"),
+        "the scoop prune must have been genuinely attempted, not refused \
+         before execute ever ran: {all}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a genuine attempt that failed is outstanding, not a refusal (2) \
+         and not success (0): {all}"
+    );
+    // The winget package is still reported somewhere in the run, not
+    // silently dropped now that it no longer fails the run.
+    assert!(
+        all.contains("Git.Git"),
+        "a declared winget package must still be visible even though it no \
+         longer fails the run: {all}"
+    );
+    assert!(
+        f.scoop.path().join("apps").join("aichat").exists(),
+        "a failed uninstall must leave the app alone"
+    );
 }
 
 // -- Task 14: `update` and `adopt` end to end -----------------------------

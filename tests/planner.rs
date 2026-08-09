@@ -216,14 +216,18 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
 
 #[test]
 fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped() {
-    // Winget has had a real `BackendView` since Task 14, so a declared
-    // package with no lock entry is `NotLocked` -- the same reason a scoop
-    // package in the same shape gets -- not a permanent "phase 4"
-    // placeholder. Reporting
-    // it at all is still the point: the spec's example pkg.toml declares
-    // `[winget]`, and a user who copies it must not be told `nothing to do`.
-    // Silence is the one answer that is indistinguishable from "dotpkg never
-    // read your file".
+    // Winget has had a real `BackendView` since Task 14, but its capability
+    // is `ReportsOnly` -- a declared package with no lock entry is
+    // `ReportedOnly(Divergence::NotLocked)`, NOT `SkipReason::NotLocked`.
+    // `NotLocked` fails the whole `apply` run (see `Divergence::NotLocked`'s
+    // own doc comment for why that is right for scoop and wrong here); this
+    // task's own review caught that using it for winget too broke `apply`
+    // outright for anyone whose pkg.toml has a `[winget]` section with no
+    // matching lock entries -- which, before `update` resolves winget at
+    // all, is every one of them. Reporting it at all is still the point: the
+    // spec's example pkg.toml declares `[winget]`, and a user who copies it
+    // must not be told `nothing to do`. Silence is the one answer that is
+    // indistinguishable from "dotpkg never read your file".
     let p = plan(
         &config::parse("[winget]\npackages = [\"Git.Git\", \"Brave.Brave\"]\n").unwrap(),
         &lock::Lock::default(),
@@ -238,16 +242,21 @@ fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped()
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::NotLocked,
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
             },
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Brave.Brave".into(),
-                reason: SkipReason::NotLocked,
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
             },
         ]
     );
     assert_eq!(p.skip_count(), 2);
+    assert_eq!(
+        p.change_count(),
+        0,
+        "nothing in this plan will be done, so nothing must count as a change"
+    );
 }
 
 #[test]
@@ -273,7 +282,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::NotLocked,
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
             },
         ]
     );
@@ -1138,9 +1147,11 @@ fn a_running_owned_undeclared_scoop_package_still_prints_before_the_winget_view(
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                // No lock at all, so this is NotLocked, not ReportedOnly --
-                // there is nothing to diff against.
-                reason: SkipReason::NotLocked,
+                // No lock at all, and winget's capability is `ReportsOnly`,
+                // so this is `ReportedOnly(NotLocked)`, not the fatal
+                // `SkipReason::NotLocked` a scoop package in the same shape
+                // would get.
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
             },
         ],
         "got {:?}",

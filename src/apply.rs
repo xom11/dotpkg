@@ -163,10 +163,13 @@ pub fn classify(action: &Action) -> Intent {
         Action::Skip { reason, .. } => match reason {
             SkipReason::NotLocked => Intent::NotLocked,
             SkipReason::Running => Intent::Skip("running -- stop it first".to_string()),
-            // Unlike the old `BackendNotImplemented` arm this replaced,
-            // `Divergence::describe()` names no backend of its own -- the
-            // preparation table's own `backend` column, printed to the left
-            // by `render::prepared_line`, already says which one.
+            // Unlike the old `BackendNotImplemented` arm this replaced, this
+            // reads no `backend` field itself -- `Divergence::describe()`
+            // already names "winget" in its own text, since every
+            // `Capability::ReportsOnly` backend today is winget. That is a
+            // known simplification (ledgered, not fixed here): if a second
+            // `ReportsOnly` backend ever existed, `describe()` would need to
+            // stop hardcoding the name and start reading it from somewhere.
             SkipReason::ReportedOnly(divergence) => Intent::Skip(divergence.describe()),
             // Same shape as Running: dotpkg cannot act on a state it could not
             // establish, and installing over it is exactly the mistake this
@@ -619,7 +622,9 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
     let scoop = Scoop::discover();
     let scan = scoop.scan()?;
     let winget = crate::backend::winget::Winget::new(crate::backend::winget::RealWinget);
-    let winget_scan = winget.scan()?;
+    // Not `?`: a winget hiccup must not abort scoop's entirely unrelated
+    // half of this run. See `crate::backend::scan_or_warn`'s own doc comment.
+    let winget_scan = crate::backend::scan_or_warn(&winget);
     let procs = crate::sys::running_processes();
     let running = scoop.running_set(&procs);
     Ok(Driver {
@@ -744,6 +749,27 @@ mod tests {
                     from: "151.1.93.132".into(),
                     to: "151.1.93.134".into(),
                 }),
+            }),
+            Intent::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn a_declared_unlocked_winget_package_is_skip_not_notlocked_so_it_cannot_fail_the_run() {
+        // The regression this task's own review caught: `SkipReason::
+        // ReportedOnly(Divergence::NotLocked)` must classify to
+        // `Intent::Skip`, the same as every other ReportedOnly shape --
+        // NOT to `Intent::NotLocked`, which is what `SkipReason::NotLocked`
+        // itself gets a few lines above in this same match, and which fails
+        // the whole run. Getting this one wrong is exactly how a declared,
+        // unlocked winget package made `apply` refuse the entire plan --
+        // scoop actions included -- with "N package(s) could not be
+        // prepared, so nothing has been changed."
+        assert!(matches!(
+            classify(&Action::Skip {
+                backend: WINGET.into(),
+                name: Name::new("Git.Git"),
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
             }),
             Intent::Skip(_)
         ));
@@ -1325,6 +1351,80 @@ mod tests {
             panic!("expected Skipped, got {:?}", prep.prepared[0].outcome);
         };
         assert!(why.contains("running"), "got {why}");
+    }
+
+    #[test]
+    fn a_declared_unlocked_winget_package_does_not_fail_the_whole_preparation() {
+        // The end-to-end proof of the Critical fix, one level below the full
+        // `apply` CLI: before it, this exact plan -- a declared winget
+        // package with no lock entry, nothing else -- produced `Outcome::
+        // NotLocked`, `not_locked_count() == 1`, and `is_ok() == false`,
+        // which is what made `main.rs` print "N package(s) could not be
+        // prepared, so nothing has been changed" and exit 2 for a plan that
+        // has no scoop action in it at all, let alone a failing one.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let lock = Lock::default();
+        let declared = Config::default();
+        let plan = Plan {
+            actions: vec![Action::Skip {
+                backend: WINGET.into(),
+                name: Name::new("Git.Git"),
+                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+            }],
+        };
+
+        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        assert_eq!(
+            prep.not_locked_count(),
+            0,
+            "this must NOT be counted as a not-locked failure"
+        );
+        assert!(
+            prep.is_ok(),
+            "a backend that cannot act does not fail the run just because \
+             it also has no lock entry"
+        );
+        assert_eq!(prep.skipped_count(), 1);
+        let Outcome::Skipped { why } = &prep.prepared[0].outcome else {
+            panic!(
+                "expected Outcome::Skipped, got {:?} -- Outcome::NotLocked here is the \
+                 regression",
+                prep.prepared[0].outcome
+            );
+        };
+        assert!(why.contains("not in pkg.lock"), "got {why}");
+        assert!(
+            !why.contains("dotpkg update"),
+            "dotpkg update does not create a winget lock entry today, so this \
+             advice would be false: {why}"
+        );
+
+        // The positive control: without it, a `prepare()` that always
+        // reported `is_ok()` regardless of input would pass the assertion
+        // above too.
+        let unlocked_scoop_plan = Plan {
+            actions: vec![Action::Skip {
+                backend: SCOOP.into(),
+                name: Name::new("zellij"),
+                reason: SkipReason::NotLocked,
+            }],
+        };
+        let unlocked_scoop_prep = prepare(
+            &unlocked_scoop_plan,
+            &lock,
+            &scoop,
+            &scoop,
+            stage_dir.path(),
+            &declared,
+        );
+        assert!(
+            !unlocked_scoop_prep.is_ok(),
+            "a scoop package really is not-locked-and-fatal in the same shape -- \
+             the fix must not have widened NotLocked's meaning generally, only \
+             narrowed it for a ReportsOnly backend"
+        );
     }
 
     #[test]

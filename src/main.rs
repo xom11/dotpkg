@@ -205,7 +205,11 @@ fn main() -> Result<()> {
             let scoop = Scoop::discover();
             let scan = scoop.scan()?;
             let winget = Winget::new(RealWinget);
-            let winget_scan = winget.scan()?;
+            // Not `?`: a winget hiccup (winget signals failure through its
+            // exit code far more readily than scoop does) must not abort
+            // scoop's entirely unrelated half of this run. See
+            // `scan_or_warn`'s own doc comment.
+            let winget_scan = dotpkg::backend::scan_or_warn(&winget);
             let procs = dotpkg::sys::running_processes();
             let running = scoop.running_set(&procs);
 

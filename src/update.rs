@@ -147,10 +147,27 @@ fn fold_backend(
     changes: &mut Vec<Change>,
 ) {
     for name in declared {
-        let previous = old_map.get(name);
+        // `get_key_value`, not `get`: a carried-forward pin must be
+        // reinserted under the key the OLD map actually used, which for a
+        // winget entry a prior `update`/`adopt` may have already written
+        // under its canonical spelling -- not under `name`, the spelling
+        // THIS run's `declared` list happens to carry. Task 15 review,
+        // Important 1: every branch below except `Resolution::Resolved`
+        // used to reinsert under `name.clone()` regardless, so a named
+        // `update <unrelated-scoop-package>` run -- touching no winget
+        // package at all -- silently rewrote a committed canonical winget
+        // key back to whatever pkg.toml happens to spell it as, with no
+        // `Change` line and no warning. Pinned three ways: the three
+        // `fold_backend_keeps_the_canonical_key_*` unit tests below (one per
+        // branch) and `tests/update.rs`'s
+        // `a_named_scoop_only_update_does_not_revert_an_existing_winget_
+        // lock_entrys_canonical_case`, which reproduces the review's own
+        // `dotpkg update fzf` example end to end.
+        let previous_entry = old_map.get_key_value(name);
+        let previous = previous_entry.map(|(_, p)| p);
         if !scope.covers(name) {
-            if let Some(p) = previous {
-                lock_map.insert(name.clone(), p.clone());
+            if let Some((old_key, p)) = previous_entry {
+                lock_map.insert(old_key.clone(), p.clone());
             }
             continue;
         }
@@ -190,15 +207,15 @@ fn fold_backend(
                     version: previous.map(|p| p.version().to_string()),
                     why: why.clone(),
                 });
-                if let Some(p) = previous {
-                    lock_map.insert(name.clone(), p.clone());
+                if let Some((old_key, p)) = previous_entry {
+                    lock_map.insert(old_key.clone(), p.clone());
                 }
             }
             // Not resolved and not failed: the driver never asked about it,
             // which happens for a named run's untouched neighbours. Keep it.
             None => {
-                if let Some(p) = previous {
-                    lock_map.insert(name.clone(), p.clone());
+                if let Some((old_key, p)) = previous_entry {
+                    lock_map.insert(old_key.clone(), p.clone());
                 }
             }
         }
@@ -788,6 +805,132 @@ mod tests {
             Change::Added { backend, .. } => assert_eq!(*backend, crate::model::SCOOP),
             other => panic!("{other:?}"),
         }
+    }
+
+    // -- fold_backend: the canonical key must survive every "carry
+    // forward" branch, not just Resolution::Resolved (review, Important 1)
+    //
+    // `fold_backend`'s Resolved branch correctly stores under `canonical`,
+    // but every OTHER branch used to reinsert a carried-forward pin under
+    // `name.clone()` -- the DECLARED spelling -- discarding whatever
+    // canonical key the OLD map actually used. A same-case fixture cannot
+    // discriminate this at all: `Name`'s `Eq`/`Ord` fold case, so
+    // `old_map.get(name)` finds the entry either way, and if `old_map`'s own
+    // key and `name` stringify identically there is nothing for `stored_key
+    // .to_string()` to catch. Every test below deliberately uses "Git.Git"
+    // in the old map and "git.git" as the declared spelling -- the two
+    // must produce different `to_string()`s for the assertion to mean
+    // anything.
+
+    fn winget_canonical_fixture() -> (Name, Name, BTreeMap<Name, Pin>) {
+        let canonical = Name::new("Git.Git");
+        let declared_spelling = Name::new("git.git");
+        let mut old_map = BTreeMap::new();
+        old_map.insert(
+            canonical.clone(),
+            Pin::WingetVersion {
+                version: "2.55.0".into(),
+            },
+        );
+        (canonical, declared_spelling, old_map)
+    }
+
+    #[test]
+    fn fold_backend_keeps_the_canonical_key_for_an_entry_outside_the_named_scope() {
+        // The exact shape the review's concrete example reproduces: an
+        // unrelated named run (`update fzf`) that does not cover this
+        // winget package at all must not touch its key.
+        let (canonical, declared_spelling, old_map) = winget_canonical_fixture();
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+
+        fold_backend(
+            crate::model::WINGET,
+            &mut lock_map,
+            &old_map,
+            std::slice::from_ref(&declared_spelling),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &Scope::Named(vec![]), // covers nothing
+            &mut changes,
+        );
+
+        assert_eq!(lock_map.len(), 1, "not stored under both spellings");
+        let (stored_key, _) = lock_map.get_key_value(&declared_spelling).unwrap();
+        assert_eq!(
+            stored_key.to_string(),
+            canonical.to_string(),
+            "an out-of-scope carry-forward must keep the canonical key: {:?}",
+            lock_map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            changes.is_empty(),
+            "nothing outside the scope is reported as changed: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn fold_backend_keeps_the_canonical_key_when_re_resolution_fails() {
+        let (canonical, declared_spelling, old_map) = winget_canonical_fixture();
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+        let resolutions = res(&[(
+            "git.git",
+            Resolution::Failed {
+                why: "no longer in the winget index".into(),
+            },
+        )]);
+
+        fold_backend(
+            crate::model::WINGET,
+            &mut lock_map,
+            &old_map,
+            std::slice::from_ref(&declared_spelling),
+            &resolutions,
+            &BTreeMap::new(),
+            &Scope::WholeRun,
+            &mut changes,
+        );
+
+        let (stored_key, _) = lock_map.get_key_value(&declared_spelling).unwrap();
+        assert_eq!(
+            stored_key.to_string(),
+            canonical.to_string(),
+            "a failed re-resolve's carried-forward pin must keep the canonical \
+             key: {:?}",
+            lock_map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fold_backend_keeps_the_canonical_key_when_the_driver_never_asked() {
+        // Covered by scope but absent from `resolutions` entirely --
+        // unreachable through `update::run` today (its own winget loop
+        // inserts a resolution for every in-scope name), but `fold_backend`
+        // is a shared, general fold and its contract must hold regardless
+        // of which caller reaches this branch.
+        let (canonical, declared_spelling, old_map) = winget_canonical_fixture();
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+
+        fold_backend(
+            crate::model::WINGET,
+            &mut lock_map,
+            &old_map,
+            std::slice::from_ref(&declared_spelling),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &Scope::WholeRun,
+            &mut changes,
+        );
+
+        let (stored_key, _) = lock_map.get_key_value(&declared_spelling).unwrap();
+        assert_eq!(
+            stored_key.to_string(),
+            canonical.to_string(),
+            "an unresolved carry-forward must keep the canonical key: {:?}",
+            lock_map.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]

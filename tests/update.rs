@@ -728,6 +728,53 @@ fn winget_source_update_is_never_called_when_nothing_is_declared_for_it() {
 }
 
 #[test]
+fn a_named_scoop_only_update_does_not_revert_an_existing_winget_lock_entrys_canonical_case() {
+    // Review finding, Important 1, reproduced at the level a real command
+    // line hits it: `pkg.lock` already canonically pins "Git.Git" (as an
+    // earlier `update` run would have written it); `pkg.toml` declares it
+    // as "git.git"; and `dotpkg update fzf` -- a NAMED run touching only an
+    // entirely unrelated scoop package -- must not silently rewrite the
+    // winget key back to the declared spelling. `no_winget()` is load-
+    // bearing here, not incidental: `git.git` is outside this run's named
+    // scope, so winget must never be asked about it at all -- if the fix
+    // were wrong in a way that also called `resolve_latest` for an
+    // out-of-scope name, THAT would panic first and this test would still
+    // catch a regression, just a different one.
+    let f = Fixture::new();
+    let dir = f.bucket("main");
+    f.commit(&dir, "fzf.json", "1.0.0", "v100");
+
+    let mut old = Lock::default();
+    old.winget.insert(
+        Name::new("Git.Git"),
+        Pin::WingetVersion {
+            version: "2.55.0".into(),
+        },
+    );
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &no_winget(),
+        &cfg(
+            "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n[winget]\npackages = \
+             [\"git.git\"]\n",
+        ),
+        &old,
+        &Scope::Named(vec![Name::new("fzf")]),
+        true,
+    );
+
+    let (stored_key, _) = u.lock.winget.get_key_value(&Name::new("git.git")).unwrap();
+    assert_eq!(
+        stored_key.to_string(),
+        "Git.Git",
+        "an unrelated named update must not silently rewrite a committed \
+         winget lock key back to the declared spelling: {:?}",
+        u.lock.winget.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn a_fetch_moves_the_pin_forward() {
     // The one property that most needs proving and is invisible when the
     // bucket is already current: `latest` means fetched, not cached.

@@ -462,8 +462,12 @@ packages = [
 
     #[test]
     fn adding_a_winget_package_that_is_already_declared_is_refused_rather_than_duplicated() {
-        let err = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("git.git")).unwrap_err();
-        let msg = format!("{err:#}");
+        let result = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("git.git"));
+        assert!(
+            result.is_err(),
+            "a package already declared under [winget] must be refused: {result:?}"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
         assert!(
             msg.contains("git.git") || msg.contains("Git.Git"),
             "name it: {msg}"

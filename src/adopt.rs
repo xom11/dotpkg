@@ -304,6 +304,23 @@ fn run_winget<C: WingetCmd>(
         match adopt_one_winget(winget, &scan, &declared, &state, name, config_path) {
             Err(why) => out.refused.push((name.clone(), why)),
             Ok((canonical, pin, config_text, config_changed)) => {
+                // The canonical-id rule, `adopt`'s half: `update` warns when
+                // the spelling it was asked to resolve differs from what
+                // winget echoed back (`src/update.rs`); `adopt` must be just
+                // as loud, or a user running `adopt --backend winget
+                // git.git` sees only "+ winget Git.Git adopted" and is never
+                // told the two differ at all. Compared by `Display`
+                // (`.to_string()`), not `Name`'s own `Eq`, which folds case
+                // and would never see a difference here.
+                if canonical.to_string() != name.to_string() {
+                    let typed = name.to_string();
+                    let matched = canonical.to_string();
+                    out.warnings.push(format!(
+                        "{typed}: you typed this as {typed:?}, but winget's own listing spells \
+                         it {matched:?} -- pkg.lock and state.json record the canonical \
+                         spelling; pkg.toml keeps the spelling you typed."
+                    ));
+                }
                 // Looked up by the CANONICAL name -- the key a previous
                 // `adopt`/`update` would have written -- not the name this
                 // call was given, for the same fold-case reason

@@ -4,7 +4,7 @@ use common::fake_winget::FakeWinget;
 use common::*;
 use dotpkg::adopt::{self, Matched};
 use dotpkg::backend::winget::Winget;
-use dotpkg::model::{Name, SCOOP};
+use dotpkg::model::{Name, SCOOP, WINGET};
 
 /// `adopt::run` dispatches on a backend name and needs a `Winget<C>`
 /// instance even for a scoop-only call (see its own doc comment). Every
@@ -30,6 +30,41 @@ fn run_scoop(
         lock_path,
         state_path,
     )
+}
+
+/// The winget twin of `run_scoop`, for the tests below Task 15's review
+/// found missing entirely (`tests/adopt.rs` had exactly one winget test, a
+/// refusal, and nothing exercising the write path at all). `scoop_root` is
+/// still required by `adopt::run`'s dispatcher even though the winget
+/// branch never reads it -- a tempdir stands in.
+fn run_winget(
+    winget: Winget<FakeWinget>,
+    names: &[Name],
+    config_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    state_path: &std::path::Path,
+) -> anyhow::Result<adopt::Outcome> {
+    let unused_scoop_root = tempfile::tempdir().unwrap();
+    adopt::run(
+        unused_scoop_root.path(),
+        &winget,
+        WINGET,
+        names,
+        config_path,
+        lock_path,
+        state_path,
+    )
+}
+
+/// Read a winget fixture, keeping the CRLF it was captured with -- see
+/// `tests/winget_resolve.rs`'s identical helper for why.
+fn winget_fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/winget")
+            .join(name),
+    )
+    .unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
 
 /// The installed manifest, as scoop leaves it: the bucket's bytes with CRLF.
@@ -1129,5 +1164,224 @@ fn adopting_two_packages_in_one_command_does_not_lose_the_first() {
     assert_eq!(
         state.ownership(dotpkg::model::SCOOP, &Name::new("widget")),
         Some(Ownership::Adopted)
+    );
+}
+
+// -- adopt --backend winget (Task 15 review, Important 2) -------------------
+//
+// Before this addition, `tests/adopt.rs` had exactly one winget test, a
+// refusal (`tests/cli.rs`'s `adopt_backend_winget_refuses_gracefully_when_
+// the_package_is_not_installed`), and nothing at all exercised the success
+// path: ~90 lines that write three files to the user's disk. Fixtures are
+// the same rule `tests/winget_scan.rs`/`tests/winget_resolve.rs` already
+// follow: no hand-built `winget list`/`winget show` text, only the checked-in
+// a14 captures (`tests/fixtures/winget/PROVENANCE.md`). `list-single.txt`
+// carries exactly one installed package, `ajeetdsouza.zoxide` at `0.10.0`;
+// `show-old-version.txt` is a real `show -v 0.9.0` reply for that same
+// package -- the version mismatch between the two (scan says 0.10.0,
+// resolve_installed's canned reply says 0.9.0) is harmless here, the same
+// way `tests/winget_resolve.rs`'s own tests never try to make a `FakeWinget`
+// script internally consistent across calls, only correct per call.
+
+#[test]
+fn adopt_backend_winget_brings_an_installed_package_under_management() {
+    let fake = FakeWinget::script(vec![
+        (0, winget_fixture("list-single.txt")),
+        (0, winget_fixture("show-old-version.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&config_path, "# hand written\n[scoop]\npackages = []\n").unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert_eq!(
+        out.adopted[0],
+        (
+            Name::new("ajeetdsouza.zoxide"),
+            Matched::WingetConfirmed,
+            None
+        ),
+        "winget's own confirmation rule, not one of scoop's two, and no \
+         previous pin to replace"
+    );
+    assert!(out.refused.is_empty(), "{out:?}");
+
+    // The lock, keyed by the canonical id, holding the version `show -v`
+    // actually confirmed.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert_eq!(
+        lock.winget[&Name::new("ajeetdsouza.zoxide")],
+        dotpkg::lock::Pin::WingetVersion {
+            version: "0.9.0".to_string(),
+        }
+    );
+
+    // pkg.toml, comments preserved, now declaring the package.
+    let cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(cfg_text.contains("# hand written"), "{cfg_text}");
+    let cfg = dotpkg::config::parse(&cfg_text).unwrap();
+    assert!(cfg
+        .winget
+        .packages
+        .contains(&Name::new("ajeetdsouza.zoxide")));
+    assert!(
+        cfg.scoop.packages.is_empty(),
+        "a different backend's section must be untouched"
+    );
+
+    // state.json, owned under the winget backend.
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(
+        state.ownership(WINGET, &Name::new("ajeetdsouza.zoxide")),
+        Some(Ownership::Adopted)
+    );
+    assert_eq!(
+        state.ownership(SCOOP, &Name::new("ajeetdsouza.zoxide")),
+        None,
+        "adopted under winget, not scoop"
+    );
+}
+
+#[test]
+fn adopt_backend_winget_refuses_a_package_already_managed_rather_than_reconfirming() {
+    // `FakeWinget::script` with only the `list` response: if the `state.owns`
+    // refusal below were ever deleted, `adopt_one_winget` would go on to call
+    // `resolve_installed`, which would try to consume a second scripted
+    // response that does not exist and panic -- a stronger, structural
+    // counterweight than asserting the refused count alone.
+    let fake = FakeWinget::script(vec![(0, winget_fixture("list-single.txt"))]);
+    let winget = Winget::new(fake);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&config_path, "[winget]\npackages = []\n").unwrap();
+
+    let mut state = State::default();
+    state.set(WINGET, &Name::new("ajeetdsouza.zoxide"), Ownership::Adopted);
+    state.save(&state_path).unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 0, "{out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
+    let (name, why) = &out.refused[0];
+    assert_eq!(name, &Name::new("ajeetdsouza.zoxide"));
+    assert!(why.contains("already managed"), "{why}");
+    assert!(!lock_path.exists(), "no lock written for a refusal");
+}
+
+#[test]
+fn adopt_backend_winget_reports_a_canonical_case_difference_the_same_way_update_does() {
+    // The other half of Task 15 review's Important 1: `update` warns when
+    // the spelling it resolved differs from what pkg.toml declared;
+    // `adopt` did not. Typed as "AjeetDSouza.Zoxide" -- `scan.installed`
+    // still finds it (`Name::Eq` folds case), but winget's own `show -v`
+    // reply (`show-old-version.txt`) echoes back the real, lowercase id.
+    let fake = FakeWinget::script(vec![
+        (0, winget_fixture("list-single.txt")),
+        (0, winget_fixture("show-old-version.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&config_path, "[winget]\npackages = []\n").unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("AjeetDSouza.Zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("AjeetDSouza.Zoxide") && w.contains("ajeetdsouza.zoxide")),
+        "name both spellings: {:?}",
+        out.warnings
+    );
+
+    // pkg.toml keeps what the user typed...
+    let cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(cfg_text.contains("AjeetDSouza.Zoxide"), "{cfg_text}");
+    assert!(
+        !cfg_text.contains("ajeetdsouza.zoxide"),
+        "pkg.toml must not be silently corrected: {cfg_text}"
+    );
+
+    // ...but the lock and state.json record the canonical spelling.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    let (stored_key, _) = lock
+        .winget
+        .get_key_value(&Name::new("AjeetDSouza.Zoxide"))
+        .unwrap();
+    assert_eq!(stored_key.to_string(), "ajeetdsouza.zoxide");
+
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(
+        state.ownership(WINGET, &Name::new("ajeetdsouza.zoxide")),
+        Some(Ownership::Adopted)
+    );
+}
+
+#[test]
+fn adopt_backend_winget_does_not_warn_when_the_typed_spelling_already_matches_the_canonical_one() {
+    // The positive counterweight to the test above: without it, a version
+    // that warns on every winget adoption regardless of case would satisfy
+    // the case-difference test on its own.
+    let fake = FakeWinget::script(vec![
+        (0, winget_fixture("list-single.txt")),
+        (0, winget_fixture("show-old-version.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&config_path, "[winget]\npackages = []\n").unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("you typed this as")),
+        "an exact-case match has nothing to report: {:?}",
+        out.warnings
     );
 }

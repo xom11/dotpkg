@@ -91,7 +91,7 @@ pub enum StepOutcome {
     /// uninstall verified `Absent` before its install then failed, and any
     /// install (fresh, or the second half of a replace) whose `verdict`
     /// disagreement is evidence of residue -- `HalfInstalled`,
-    /// `ContentDiffers`, `LineEndingsDiffer`, or `Unreadable` (which means
+    /// `ContentDiffers`, or `Unreadable` (which means
     /// "unknown" and is treated as touched in the safe direction, so an
     /// operator looks). `NotInstalled` alone means the machine is genuinely
     /// as it was. A `Step::Remove` sets it the mirror way: `StillPresent` is
@@ -158,8 +158,8 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // no check dotpkg has.
                 if d != Disagreement::NotInstalled {
                     // Important 1: every other `Disagreement` reachable here
-                    // -- `HalfInstalled`, `ContentDiffers`,
-                    // `LineEndingsDiffer` -- means scoop wrote something to
+                    // -- `HalfInstalled`, `ContentDiffers` -- means scoop
+                    // wrote something to
                     // disk, even for a plain `Install` with no uninstall
                     // half of its own: a hash-mismatched half-install
                     // leaves `apps/<app>/<version>/`, and a different

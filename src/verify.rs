@@ -30,13 +30,13 @@ pub enum Disagreement {
     HalfInstalled {
         leftover: PathBuf,
     },
+    /// The installed manifest is a *different* manifest.
+    ///
+    /// There is deliberately no sibling variant for a line-ending-only
+    /// difference: `verdict` accepts those, because scoop rewrites line
+    /// endings when it copies the staged file and every successful install
+    /// on Windows would otherwise be reported as a failure. See `verdict`.
     ContentDiffers,
-    /// The manifests match under `normalise`, which folds CRLF to LF *and*
-    /// drops trailing newlines -- so this variant covers a trailing-newline
-    /// difference too, not only CRLF-vs-LF. Either way it is still a
-    /// disagreement: `normalise` is only ever used to name a mismatch more
-    /// precisely, never to wave one through.
-    LineEndingsDiffer,
     StillPresent {
         leftover: PathBuf,
     },
@@ -57,10 +57,6 @@ impl std::fmt::Display for Disagreement {
             Disagreement::ContentDiffers => {
                 write!(f, "the installed manifest is not the one that was staged")
             }
-            Disagreement::LineEndingsDiffer => write!(
-                f,
-                "the installed manifest matches the staged one except for line endings"
-            ),
             Disagreement::StillPresent { leftover } => {
                 write!(f, "it is still on disk at {}", leftover.display())
             }
@@ -101,12 +97,13 @@ fn app_dir(root: &Path, app: &Name) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// Collapse CRLF and drop trailing newlines, for telling a line-ending
-/// difference apart from a content difference. Dropping trailing newlines
-/// makes the equivalence class wider than the name `LineEndingsDiffer`
-/// suggests -- `{"a":1}` vs. `{"a":1}\n\n\n` lands here too -- but never
-/// used to *accept* a mismatch, only to describe one: both sides still
-/// report `Err`.
+/// Collapse CRLF and drop trailing newlines.
+///
+/// Two files equal under this are the same JSON, so `verdict` treats them as
+/// a match. The class is slightly wider than "line endings" -- `{"a":1}` vs.
+/// `{"a":1}\n\n\n` lands here too -- and that is still safe: neither
+/// transformation can change a url or a hash, which is what the byte
+/// comparison exists to protect.
 fn normalise(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -157,7 +154,21 @@ pub fn verdict(root: &Path, app: &Name, want: &Expected) -> Result<(), Disagreem
             if got == want_bytes {
                 Ok(())
             } else if normalise(&got) == normalise(&want_bytes) {
-                Err(Disagreement::LineEndingsDiffer)
+                // Accepted, not reported. Measured on the dogfood machine:
+                // scoop rewrites the manifest's line endings when it copies
+                // the staged file into `apps/<app>/current`, so an exact byte
+                // comparison fails on EVERY successful install on Windows.
+                // Treating that as a failure made `apply` report every
+                // upgrade it had just correctly performed as
+                // "install did not happen", and left `state.json` empty, so
+                // nothing dotpkg installed was ever recorded as owned.
+                //
+                // This is safe because the two files are the same JSON: the
+                // check exists to catch a *different* manifest -- the
+                // same-version content swap a lock naming a branch produces
+                // -- and a difference only in line endings and trailing
+                // newlines cannot change a url or a hash.
+                Ok(())
             } else {
                 Err(Disagreement::ContentDiffers)
             }
@@ -325,13 +336,45 @@ mod tests {
     }
 
     #[test]
-    fn a_line_ending_difference_is_reported_as_itself() {
+    fn a_difference_only_in_line_endings_is_accepted_because_scoop_rewrites_them() {
+        // Measured on the dogfood machine: scoop rewrites line endings when
+        // it copies the staged manifest into `apps/<app>/current`, so this is
+        // what EVERY successful install on Windows looks like. Reporting it
+        // as a failure made `apply` call every upgrade it had just performed
+        // correctly "install did not happen", and left `state.json` empty so
+        // nothing was ever recorded as owned.
         let t = Tree::new();
         let staged = t.stage("tool", "1.0.0", "{\n  \"version\": \"1.0.0\"\n}");
         t.install("tool", "{\r\n  \"version\": \"1.0.0\"\r\n}");
         assert_eq!(
             verdict(t.root(), &Name::new("tool"), &Expected::Present { staged }),
-            Err(Disagreement::LineEndingsDiffer)
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_trailing_newline_difference_is_also_accepted() {
+        let t = Tree::new();
+        let staged = t.stage("tool", "1.0.0", "{\"version\":\"1.0.0\"}");
+        t.install("tool", "{\"version\":\"1.0.0\"}\n\n");
+        assert_eq!(
+            verdict(t.root(), &Name::new("tool"), &Expected::Present { staged }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepting_line_endings_does_not_accept_a_content_swap() {
+        // The guard that must survive the fix above: two manifests carrying
+        // the same version but a different url and hash -- what a lock naming
+        // a branch instead of a commit produces -- must still be caught, even
+        // when their line endings also differ.
+        let t = Tree::new();
+        let staged = t.stage("tool", "1.0.0", BODY_A);
+        t.install("tool", &BODY_B.replace('\n', "\r\n"));
+        assert_eq!(
+            verdict(t.root(), &Name::new("tool"), &Expected::Present { staged }),
+            Err(Disagreement::ContentDiffers)
         );
     }
 
@@ -374,11 +417,7 @@ mod tests {
         // `leftover.display()` entirely and stay under no bound at all. Assert
         // the actionable content instead -- the same tightening as commit
         // 42c8b32, a third instance of the shape that review named twice.
-        for d in [
-            Disagreement::NotInstalled,
-            Disagreement::ContentDiffers,
-            Disagreement::LineEndingsDiffer,
-        ] {
+        for d in [Disagreement::NotInstalled, Disagreement::ContentDiffers] {
             let s = d.to_string();
             assert!(!s.trim().is_empty(), "{d:?} renders empty");
         }

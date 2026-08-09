@@ -347,7 +347,22 @@ pub fn render_update(u: &Update) -> String {
         u.failed_count(),
     ));
     if !u.wrote_anything() {
-        out.push_str("  pkg.lock is already current -- not rewritten.\n");
+        if u.failed_count() == 0 {
+            // Every change is `Unchanged`: the lock really does match what a
+            // fresh resolve would produce, so saying so is true.
+            out.push_str("  pkg.lock is already current -- not rewritten.\n");
+        } else {
+            // `wrote_anything()` is false for the same reason above, but not
+            // because everything converged -- at least one package could not
+            // be re-resolved (`Change::Kept`) and nothing was written for it
+            // either. Saying "already current" here would tell the reader
+            // the opposite of their situation, so name the failures instead.
+            out.push_str(&format!(
+                "  pkg.lock was not rewritten -- {} package(s) could not be \
+                 resolved.\n",
+                u.failed_count()
+            ));
+        }
     }
     out
 }
@@ -1118,6 +1133,41 @@ mod tests {
             !render_update(&changed).contains("not rewritten"),
             "{}",
             render_update(&changed)
+        );
+    }
+
+    #[test]
+    fn the_not_rewritten_line_does_not_claim_convergence_when_resolution_failed() {
+        // docs/phase3-notes.md item 9, measured on the dogfood machine: no
+        // pkg.lock at all, one declared package, and its only resolution
+        // failed. `wrote_anything()` is false for the same reason as the
+        // genuinely-converged case above -- `Change::Kept` does not count as
+        // a write -- but nothing is pinned here at all, so "already current"
+        // would tell the reader the opposite of their situation.
+        let old = Lock::default();
+        let u = Update {
+            lock: Lock::default(),
+            changes: vec![Change::Kept {
+                name: Name::new("tool"),
+                version: None,
+                why: "no declared bucket has it (searched: main)".into(),
+            }],
+        };
+        assert_eq!(old, Lock::default(), "sanity: there was no old pkg.lock");
+        assert!(
+            u.lock.scoop.is_empty() && u.lock.winget.is_empty(),
+            "sanity: nothing is pinned in the resulting lock either"
+        );
+        assert!(!u.wrote_anything(), "sanity: nothing was written");
+
+        let out = render_update(&u);
+        assert!(
+            !out.contains("already current"),
+            "nothing is pinned -- this is not convergence: {out}"
+        );
+        assert!(
+            out.contains("could not be resolved"),
+            "the true reason nothing was written must be named: {out}"
         );
     }
 

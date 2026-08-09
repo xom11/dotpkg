@@ -814,20 +814,33 @@ history**, so `adopt`'s refusal had to be constructed.
 7. **`config_edit::save` / `lock::save` / `state::save` temp-file cleanup gap**,
    all three identical.
 8. **`State::names` has no callers.** Give it one or delete it.
-9. **`update` prints `pkg.lock is already current -- not rewritten.` when there
-   is no `pkg.lock` at all** and the only declared package could not be
-   resolved. Measured by the dogfood. It follows correctly from
-   `wrote_anything()` being false and nothing acts on it, but in a tool whose
-   spine is that every printed line is true, it is a false one. One extra
-   condition in `render_update`.
-10. **`--state` relocates `state.json` but not the staging root**, so
-    `apply --prepare --state <elsewhere>` still writes
-    `%LOCALAPPDATA%\dotpkg\manifests`. Deliberate — `default_staging_root`'s
-    doc comment gives the reason — but "point `--state` somewhere else and
-    dotpkg writes nowhere else" is a reasonable belief and is false. Decide
-    whether to document it in `--state`'s own help text.
+9. **`--state` relocates `state.json` but not the staging root**, so
+   `apply --prepare --state <elsewhere>` still writes
+   `%LOCALAPPDATA%\dotpkg\manifests`. Deliberate — `default_staging_root`'s
+   doc comment gives the reason — but "point `--state` somewhere else and
+   dotpkg writes nowhere else" is a reasonable belief and is false. Decide
+   whether to document it in `--state`'s own help text.
 
 **Closed by this review, so not carried:** `adopt::run`'s call-site write order,
 which was unprotected on Windows and is now a compile error. Recorded here
 because the previous draft of this file listed it as the highest-value open
 item, and it should be visible that it moved rather than vanished.
+
+**Also closed, so not carried:** the item formerly numbered 9 here — `update`
+printing `pkg.lock is already current -- not rewritten.` when there was no
+`pkg.lock` at all and the only declared package could not be resolved.
+Measured by the dogfood on a14. `render_update` now prints that line only when
+`wrote_anything()` is false **and** `failed_count() == 0` (every change really
+is `Unchanged`); when `wrote_anything()` is false because everything failed
+instead, it prints `pkg.lock was not rewritten -- N package(s) could not be
+resolved.` instead, which is true in both the fully-empty-lock case the
+dogfood hit and the mixed case where some packages are genuinely unchanged
+and others merely failed to re-resolve. `src/render.rs`'s
+`the_not_rewritten_line_does_not_claim_convergence_when_resolution_failed`
+reproduces the dogfood's exact state — an empty old lock, one declared
+package, a `Change::Kept` with no previous version — and asserts both that
+"already current" is absent and that the true reason is named. The summary
+counts line immediately above (`N changed, N unchanged, N could not be
+resolved.`) was checked in the same state and found already accurate: it
+correctly reports `0 changed, 0 unchanged, 1 could not be resolved.` in the
+dogfood's case, so it needed no change.

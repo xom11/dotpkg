@@ -129,3 +129,90 @@ pub fn fetch(dir: &Path) -> Result<()> {
     );
     Ok(())
 }
+
+use crate::model::Name;
+
+/// The bucket's own path for this app at `rev`, trying the cheap guesses
+/// before paying for a tree listing. Mirrors `Scoop::stage`'s chain exactly,
+/// so `update` records a path `stage` will later find.
+pub fn manifest_path(dir: &Path, app: &Name, rev: &str) -> Option<String> {
+    let mut tried: Vec<String> = Vec::new();
+    for spelling in [app.to_string(), app.key().to_string()] {
+        if tried.contains(&spelling) {
+            continue;
+        }
+        tried.push(spelling.clone());
+        let candidate = format!("bucket/{spelling}.json");
+        if matches!(git_show(dir, rev, &candidate), Ok(Some(_))) {
+            return Some(candidate);
+        }
+    }
+    resolve_spelling(dir, rev, app.key()).map(|real| format!("bucket/{real}"))
+}
+
+/// What `update` records for one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Latest {
+    pub commit: String,
+    pub version: String,
+    pub path_in_repo: String,
+    /// `git log -1` named a commit whose blob is not the tip's, so the tip was
+    /// recorded instead.
+    pub fell_back_to_tip: bool,
+}
+
+/// Resolve "latest" for one app at `rev`. `Ok(None)` means this bucket does
+/// not have the app, which is an ordinary answer during a bucket search.
+///
+/// **Deliberately without `--full-history`.** Measured: that flag makes this
+/// return the merge commit that carried a version rather than the one that
+/// produced it. `adopt` needs the flag and this does not.
+///
+/// The blob comparison against `rev` is what makes "the recorded commit
+/// carries the tip's content for this file" true by construction rather than
+/// by trusting git's history simplification. It costs one extra `git show`.
+pub fn resolve_latest(dir: &Path, app: &Name, rev: &str) -> Result<Option<Latest>> {
+    let Some(path_in_repo) = manifest_path(dir, app, rev) else {
+        return Ok(None);
+    };
+    let Some(tip_text) = git_show(dir, rev, &path_in_repo)? else {
+        return Ok(None);
+    };
+
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["log", "-1", "--format=%H", rev, "--", &path_in_repo])
+        .output()
+        .with_context(|| format!("cannot run git log in {}", dir.display()))?;
+    let per_file = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let (commit, fell_back_to_tip) = match git_show(dir, &per_file, &path_in_repo) {
+        Ok(Some(t)) if !per_file.is_empty() && t == tip_text => (per_file, false),
+        _ => {
+            let sha = Command::new("git")
+                .current_dir(dir)
+                .args(["rev-parse", rev])
+                .output()
+                .with_context(|| format!("cannot run git rev-parse in {}", dir.display()))?;
+            (
+                String::from_utf8_lossy(&sha.stdout).trim().to_string(),
+                true,
+            )
+        }
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(&tip_text)
+        .with_context(|| format!("{app}: {path_in_repo} at {rev} is not valid JSON"))?;
+    let version = parsed
+        .get("version")
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("{app}: {path_in_repo} at {rev} declares no version"))?
+        .to_string();
+
+    Ok(Some(Latest {
+        commit,
+        version,
+        path_in_repo,
+        fell_back_to_tip,
+    }))
+}

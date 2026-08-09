@@ -1131,6 +1131,77 @@ fn update_exits_one_when_a_declared_package_could_not_be_reresolved() {
 }
 
 #[test]
+fn a_carried_forward_entry_that_blocks_the_write_is_named_and_the_advice_is_not_the_command_that_just_ran(
+) {
+    // `lock::save` runs `lock_coherence_guard` over the WHOLE new lock, and
+    // `resolve_into_lock` carries an entry it could not re-resolve forward
+    // unchanged -- so one malformed entry anywhere blocks the write and
+    // discards every other package's resolution in the run.
+    //
+    // The guard's placement is right and stays. What was wrong was the
+    // message: `apply.rs`'s context says "Run `dotpkg update` to rewrite it",
+    // which is correct for `apply` and `status` and is nonsense printed BY
+    // `update`. `update_resolves_a_declared_package_and_exits_zero` above is
+    // the positive sibling: without it, an `update` that always refused to
+    // write would satisfy every assertion here.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\", \"broken\"]\n",
+        "{}",
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    // `broken` is declared, no bucket carries it, and its existing pin is
+    // malformed -- `commit = "main"` is a revision expression, not a hash.
+    // `update` keeps that pin (dropping it would turn a working package into
+    // Skip{NotLocked}) and the guard then refuses the whole file.
+    fs::write(
+        f.work.path().join("pkg.lock"),
+        "[scoop.broken]\nbucket = \"main\"\ncommit = \"main\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let before = fs::read_to_string(f.work.path().join("pkg.lock")).unwrap();
+
+    let out = f.run(&["update"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "refused, and pkg.lock was not touched: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("was NOT written"),
+        "`render_update` has already printed the diff, which reads as an \
+         accomplished fact -- say outright that it is not: {stderr}"
+    );
+    assert!(
+        stderr.contains("broken"),
+        "name the entry that blocked the write: {stderr}"
+    );
+    assert!(
+        stderr.contains("hex"),
+        "say what is wrong with it, not just that something is: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Run `dotpkg update`"),
+        "the advice must not be the command that just failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("[scoop.<name>]") || stderr.contains("dotpkg update <name>"),
+        "say what actually repairs it: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(f.work.path().join("pkg.lock")).unwrap(),
+        before,
+        "the refused write must leave pkg.lock exactly as it was"
+    );
+    assert!(
+        !f.work.path().join("pkg.lock.bak").exists(),
+        "a refused write must not displace the backup either"
+    );
+}
+
+#[test]
 fn update_refuses_a_package_pkg_toml_does_not_declare_and_writes_nothing() {
     // `update` re-resolves what pkg.toml asks for; it is not a way to add a
     // package. A refusal exits 2, not 1: the machine was not touched.

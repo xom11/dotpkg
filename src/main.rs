@@ -454,7 +454,44 @@ fn main() -> Result<()> {
             std::io::stdout().flush().ok();
 
             if u.wrote_anything() {
-                dotpkg::lock::save(&u.lock, &lock)?;
+                if let Err(e) = dotpkg::lock::save(&u.lock, &lock) {
+                    // `render_update` has already printed the diff, which
+                    // reads as an accomplished fact. It is not one.
+                    eprintln!(
+                        "\npkg.lock was NOT written. The diff above is what this run \
+                         resolved, not what is on disk -- {} still holds what it held \
+                         before.",
+                        lock.display()
+                    );
+                    // `lock::save` refuses a lock `apply` would reject, and
+                    // `update` carries an entry it could not re-resolve
+                    // forward unchanged -- so one malformed entry anywhere
+                    // blocks the whole write and discards every other
+                    // package's resolution. `apply.rs`'s "Run `dotpkg update`
+                    // to rewrite it" is right for `apply` and `status` and is
+                    // nonsense here, so this names the blocking entries and
+                    // what actually repairs them instead.
+                    let blocking = dotpkg::apply::incoherent_entries(&u.lock);
+                    if blocking.is_empty() {
+                        eprintln!("{e:#}");
+                        std::process::exit(1);
+                    }
+                    // The reason names its own package already -- every check
+                    // behind `incoherent_entries` prefixes it -- so printing
+                    // the key as well would say "broken: broken: ...".
+                    for (_, why) in &blocking {
+                        eprintln!("  {why}");
+                    }
+                    eprintln!(
+                        "\n`update` only rewrites an entry it could re-resolve, so a \
+                         malformed one survives every run until it is repaired. Either \
+                         delete its `[scoop.<name>]` block from {} and run again -- the \
+                         next run writes it fresh -- or run `dotpkg update <name>` for \
+                         it, which replaces the entry when that package resolves.",
+                        lock.display()
+                    );
+                    std::process::exit(2);
+                }
             }
             if u.failed_count() > 0 {
                 std::process::exit(1);

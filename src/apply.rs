@@ -63,32 +63,49 @@ pub fn mass_prune_guard(declared: &Config, state: &State) -> Result<()> {
 /// including the prune that would otherwise clear it.
 pub fn lock_coherence_guard(lock: &Lock) -> Result<()> {
     for (name, pin) in &lock.scoop {
-        let Pin::ScoopCommit {
-            bucket,
-            commit,
-            version,
-        } = pin
-        else {
-            anyhow::bail!(
-                "pkg.lock [scoop.{name}] holds a winget pin. Run `dotpkg update` to rewrite it."
-            );
-        };
-        crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "bucket", bucket)
-            .and_then(|()| {
-                crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)
-            })
-            .and_then(|()| {
-                crate::backend::scoop::ensure_plain_component(
-                    name,
-                    "pkg.lock",
-                    "package name",
-                    name.key(),
-                )
-            })
-            .and_then(|()| crate::backend::scoop::ensure_commit_hash(name, commit))
+        entry_coherence(name, pin)
             .map_err(|e| e.context("pkg.lock is not usable. Run `dotpkg update` to rewrite it."))?;
     }
     Ok(())
+}
+
+/// One entry's share of the guard, with **no advice attached**.
+///
+/// Split out so that `update` -- which is itself the command "Run `dotpkg
+/// update`" points at -- can name the blocking entries without repeating that
+/// advice back at the user who is already running it. The rules live here
+/// once; the two callers differ only in what they say afterwards.
+fn entry_coherence(name: &Name, pin: &Pin) -> Result<()> {
+    let Pin::ScoopCommit {
+        bucket,
+        commit,
+        version,
+    } = pin
+    else {
+        anyhow::bail!("pkg.lock [scoop.{name}] holds a winget pin");
+    };
+    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "bucket", bucket)?;
+    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "version", version)?;
+    crate::backend::scoop::ensure_plain_component(name, "pkg.lock", "package name", name.key())?;
+    crate::backend::scoop::ensure_commit_hash(name, commit)?;
+    Ok(())
+}
+
+/// Every entry `lock_coherence_guard` would reject, with its reason.
+///
+/// The guard stops at the first, which is right for a guard: its product is
+/// "refuse or don't". `update`'s failure message has a different product --
+/// the user needs to know which entries to repair, and stopping at the first
+/// turns one repair into N runs.
+pub fn incoherent_entries(lock: &Lock) -> Vec<(Name, String)> {
+    lock.scoop
+        .iter()
+        .filter_map(|(name, pin)| {
+            entry_coherence(name, pin)
+                .err()
+                .map(|e| (name.clone(), format!("{e:#}")))
+        })
+        .collect()
 }
 
 /// `%LOCALAPPDATA%\dotpkg\manifests`, beside state.json.

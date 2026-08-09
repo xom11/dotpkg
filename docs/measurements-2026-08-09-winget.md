@@ -377,6 +377,45 @@ for `winget-font`, which `source list` shows as `explicit=true` and which bare
 avoids the MSIX install was not verified** — the before/after diff was not
 repeated for the scoped form.
 
+**Repeated, scoped — 2026-08-10.** `winget list` was captured immediately
+before and after `winget source update --name winget --disable-interactivity`,
+parsed and compared the same way as the bare-form probe above. This run
+happened after the bare-form probe had already run once on this machine, so
+`winget-font`'s MSIX was already part of the installed set going in, and the
+"before" row count reflects that:
+
+```
+exit=0
+rows before 141      rows after 141
+(Name,Id,Version,Source) multiset identical:  True
+Available-column changes: 0
+rows lost: 0        rows gained: 0
+```
+
+**`winget source update --name winget` changed nothing on this machine.** 141
+rows in, 141 rows out, the multiset identical, zero `Available`-column moves,
+stdout only `Updating source: winget...` / `Done`, stderr empty. The
+`winget-font` MSIX row is present exactly once in both captures, unchanged
+(`grep -c "Fonts.Source"` = 1 on each) — so the scoped form neither duplicated
+it nor removed it.
+
+**What that does and does not establish.** Measured: on a machine already
+holding the `winget-font` MSIX, the scoped update touches no installed
+package. **Inferred, not measured:** that the scoped form would also avoid
+*installing* that MSIX on a machine lacking it. The inference is that
+`--name winget` never processes the `winget-font` source at all, which is
+consistent with the stdout naming only one source — but the discriminating
+experiment (running the scoped form first, on a machine where the MSIX is
+absent) cannot be run again here without uninstalling it, which this phase
+forbids. Recorded as an inference on purpose: this document's own section on
+method notes that reasoning about an external tool's behaviour has been wrong
+about half the time in this project.
+
+For Phase 4 that distinction does not bite — `dotpkg update` may run
+`winget source update --name winget` unconditionally, because the measured
+result is what a dotpkg run would produce on this machine and any machine
+that has already been through one.
+
 ---
 
 ## What was deliberately not measured

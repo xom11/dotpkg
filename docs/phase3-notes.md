@@ -938,8 +938,20 @@ Accepted, with reasons:
 
   The other two items filed here — a lock or opt naming a bucket `pkg.toml`
   does not declare, and a declared bucket without `.git` being skipped — were
-  not coverage gaps at all. See the closed entry below: the second of them was
-  a defect, and the first is now tested alongside its fix.
+  not coverage gaps at all: both are defects. **Correction, entered by the
+  scoped re-review of the final fix wave:** this bullet originally closed the
+  first one too, claiming it "is now tested alongside its fix." Both halves of
+  that were false. The fix wave's `choose_bucket` rewrite touched the
+  `stated` branch to add the `.git` check described in the closed entry below,
+  but left its `!declared_names.contains(&stated)` arm returning `NotFound {
+  searched: vec![stated], missing: [] }` exactly as before — routing the
+  branch through the new helper without addressing it, not fixing it, and
+  nothing in the branch's tests reached it either, since every `choose_bucket`
+  test up to that point declared the bucket it stated. The re-review caught
+  it; see "Closed by the scoped re-review of the final fix wave" below for the
+  actual fix, its tests, and its negative controls. The second item — a
+  declared bucket without `.git` being skipped — was fixed as this bullet
+  originally described; see the closed entry below.
 - **The no-`.git` fetch-loop guard (`src/update.rs:238-240`) has no direct
   test.** Also not a coverage gap: the guard was silent, and that was the
   defect. See the closed entry below.
@@ -1049,3 +1061,75 @@ counts line immediately above (`N changed, N unchanged, N could not be
 resolved.`) was checked in the same state and found already accurate: it
 correctly reports `0 changed, 0 unchanged, 1 could not be resolved.` in the
 dogfood's case, so it needed no change.
+
+## Closed by the scoped re-review of the final fix wave
+
+**`choose_bucket`'s fourth exit still printed the defect the final fix wave
+existed to kill, and this file falsely claimed it had been fixed.** See the
+correction entered above, in the Task 6 "Accepted, with reasons" bullet, for
+the false claim itself. What follows is the actual history.
+
+The final fix wave (closed entry above, "A declared bucket that is not on
+disk was skipped in silence...") added the `.git` check to `choose_bucket`'s
+`stated` branch — the bucket named by the lock or by `[scoop.opts] bucket`
+— but that branch has an earlier exit above the `.git` check: `if
+!declared_names.contains(&stated)`, for when `pkg.toml` does not declare the
+named bucket at all. That exit was left returning `BucketChoice::NotFound {
+searched: vec![stated], missing: [] }`, unchanged from before the wave.
+`not_found_why`'s `(false, true)` arm (`searched` non-empty, `missing`
+empty) rendered that as `no declared bucket has <pkg> (searched: <bucket>)`
+— naming the undeclared bucket as searched, when it was neither declared nor
+searched. `apply` was already accurate about the identical state
+(`src/apply.rs`'s `bucket_is_declared` check: `bucket "extras" is not
+declared in pkg.toml -- add it to [scoop] buckets`), so `update` and `adopt`
+disagreed with `apply` about the same machine — the same shape as the defect
+the wave was closing.
+
+Not exotic: `adopt` passes `install.json`'s `bucket` as its hint
+(`src/adopt.rs`'s `hint = already.or(inst.bucket.as_deref())`), so adopting
+any package scoop installed from a bucket the user has not declared — the
+ordinary reason `adopt` fails on a real machine — hit this. For `update`,
+dropping a bucket line from `pkg.toml` while its pin survives in `pkg.lock`
+does the same.
+
+**Why it survived the wave's own tests.** Every `choose_bucket` call in
+`tests/bucket.rs` before this fix declared the bucket it stated — the same
+shape of gap the wave's own "Closed" entry above notes about
+`a_package_no_declared_bucket_has_names_what_was_searched`. No test in the
+branch reached this branch of the `if`.
+
+**Closed:** `BucketChoice` gained a third, distinct exit,
+`Undeclared { name: Name }`, alongside `NotCloned` — a separate variant
+rather than a `NotFound` with a one-element `searched`, for the same reason
+`NotCloned` is separate from `NotFound`: "not declared at all" is a
+different fact from "a search happened and found nothing," and only one of
+them is about a bucket's contents. `bucket::not_declared_why` renders it,
+shared by `update` and `adopt` for the same reason `not_found_why` and
+`not_cloned_why` are — pointing at `[scoop] buckets`, not at
+`--clone-missing-buckets`, which clones a bucket `pkg.toml` already declares
+and is the wrong fix for a bucket that was never declared to begin with.
+
+Tests: `tests/bucket.rs`'s
+`a_bucket_named_by_the_lock_or_by_an_opt_that_pkg_toml_does_not_declare_is_reported_as_undeclared`
+covers both entry points — the lock and `[scoop.opts]` — at the unit level,
+with the bucket cloned on disk in both cases so the test cannot be satisfied
+by `NotCloned` instead. `tests/update.rs`'s
+`a_locked_bucket_that_pkg_toml_does_not_declare_is_named_and_told_to_declare_it`
+and `tests/adopt.rs`'s
+`install_json_naming_a_bucket_pkg_toml_does_not_declare_is_named_and_told_to_declare_it`
+cover the same shape end to end through each command.
+
+Negative control fired, with the assertion each site hit: reverting
+`choose_bucket`'s `stated`-and-undeclared arm to
+`BucketChoice::NotFound { searched: vec![stated], missing: Vec::new() }` —
+
+- `tests/bucket.rs:645` — the match's catch-all `other => panic!(...)`, got
+  `NotFound { searched: [Name { display: "extras", key: "extras" }], missing:
+  [] }`.
+- `tests/update.rs:286` — `assert!(!why.contains("searched"), ...)`,
+  reproducing `no declared bucket has it (searched: extras)` verbatim.
+- `tests/adopt.rs:530` — `assert!(why.contains("does not declare"), ...)`.
+  Not the first assertion in that test: `why.contains("extras")` (line 529)
+  still passes against the old wording, because `extras` names the bucket in
+  both the old and the new message and cannot by itself tell them apart. The
+  assertion that discriminates is the one that fired.

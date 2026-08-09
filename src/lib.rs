@@ -1,3 +1,4 @@
+pub mod adopt;
 pub mod apply;
 pub mod backend;
 pub mod bucket;

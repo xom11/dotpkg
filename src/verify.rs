@@ -104,7 +104,12 @@ fn app_dir(root: &Path, app: &Name) -> Result<Option<PathBuf>, String> {
 /// `{"a":1}\n\n\n` lands here too -- and that is still safe: neither
 /// transformation can change a url or a hash, which is what the byte
 /// comparison exists to protect.
-fn normalise(b: &[u8]) -> Vec<u8> {
+///
+/// `adopt` is the second consumer as of Phase 3, and needs exactly this
+/// function rather than one of its own: measured, comparing an installed
+/// manifest against a bucket blob raw matches nothing at all, because scoop
+/// rewrites line endings when it copies the file into `apps/<app>/current`.
+pub(crate) fn normalise(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {

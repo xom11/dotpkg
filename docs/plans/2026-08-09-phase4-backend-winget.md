@@ -1494,6 +1494,31 @@ git commit -m "Move resolve onto the Backend trait and add winget's two resolver
 - `SkipReason::BackendNotImplemented` is **deleted** — 13 sites across `src/`
   and `tests/`.
 
+**This task also wires the winget backend into the binary, which no other task
+in this plan does.** Added 2026-08-10, after Task 11's review found that nothing
+outside `src/backend/winget.rs` constructs a winget backend at all — as of Task
+11 the entire backend is unreachable from `dotpkg`, and the plan as originally
+written never said who connects it.
+
+So `src/main.rs` must construct `Winget::new(RealWinget)` and feed its `scan`
+into the same places `Scoop::discover()`'s scan already goes: the `status` path
+(`main.rs:137-145`), the `apply` path (via `apply::prepare`'s driver at
+`apply.rs:552`), and anywhere else a `Scan` reaches `plan()`. Both scans'
+`installed`, `opaque` and `warnings` are concatenated — `plan()` already
+filters `installed` by `backend`, and `Scan::opaque` and `warnings` are
+backend-agnostic by construction.
+
+Two consequences to get right rather than discover later:
+- **Every command that scans must print what the scan could not read.** That is
+  the rule `docs/phase3-notes.md` extracted from the Phase 3 dogfood, where
+  `adopt` was the one command that discarded `scan.warnings` and told a user a
+  package was "not installed" when the scan simply could not traverse it.
+  A second backend doubles the number of places this can go wrong.
+- **A machine with no winget must stay silent about it beyond one warning.**
+  `Winget::scan` already returns an empty `Scan` plus one warning when the
+  binary is absent, matching `Scoop::scan`'s missing-root behaviour; do not add
+  a second message on top at the call site.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```rust

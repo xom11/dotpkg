@@ -40,6 +40,13 @@ subprocess behind a trait so no test spawns `winget.exe`.
 - **No `unwrap_err()` before a test's other assertions.** Write
   `let r = ...; assert!(r.is_err(), "...");` and put side-effect assertions
   above the point the error is consumed.
+- **A test command that selects nothing prints `ok. 0 passed` and reads as
+  success.** `-- --exact` requires the filter to equal the whole test name, so
+  a prefix selects zero tests and looks green. Every `cargo test` command in
+  this plan was checked against its test's full name after Task 2's
+  implementer found four that matched nothing. **Whenever you run a focused
+  test, confirm the reported count is the number you expected** — `1 passed`,
+  not `0 passed; N filtered out`.
 - **Every refusal assertion is paired** — with a count of files written (which
   must be zero) or with a positive sibling that must stay green.
 - **Windows suite run twice**: once before the dogfood, once at the end of the
@@ -168,7 +175,7 @@ fn the_backend_reports_the_name_every_map_and_guard_is_keyed_by() {
 
 - [ ] **Step 2: Run it and confirm it passes, then confirm it discriminates**
 
-Run: `cargo test --test scoop_scan the_backend_reports_the_name -- --exact`
+Run: `cargo test --test scoop_scan the_backend_reports_the_name_every_map_and_guard_is_keyed_by -- --exact`
 Expected: PASS. Then **hand-apply the mutation** — change `fn name` to return
 `"xyzzy"` — rerun, and record that this test is the one that fires. Restore.
 
@@ -197,21 +204,45 @@ guard and its return value), `:699`/`:712` (`download_verdict`'s `&&`),
 open) is **not** in scope here — `verify.rs:146` is Still-open item 4 and the
 spec's non-goals leave it.
 
-For `resolve_root`'s `b.len() == s.len()`, the discriminating input is a path
-that `canonicalize` does **not** prefix, so nothing is stripped:
+**`resolve_root`'s `b.len() == s.len()` — CORRECTED 2026-08-09, after the plan's
+original test was measured and could not discriminate.**
+
+This plan first specified a test that called `resolve_root(tempdir())` and
+asserted the result equalled `canonicalize`'s. Measured with
+`cargo mutants -f src/backend/scoop.rs -F resolve_root`, it killed **none** of
+the three mutants, and the root cause is structural rather than fixable by a
+better assertion: on every POSIX platform `std::fs::canonicalize` returns a
+path beginning with `/`, and `strip_extended_prefix`'s two "something was
+stripped" arms both require the string to literally begin with `\\?\`. Through
+`resolve_root`'s real call chain those arms are unreachable on any platform
+this suite runs on — killing the `true` mutant needs a genuine Windows
+canonicalize result, and killing `false` needs a non-UTF-8 path, which would
+mean a `#[cfg(unix)]` test, the exact coverage hole this project has been bitten
+by before.
+
+So take the seam move this crate already makes three times (`write_in_order`,
+`parse_batch`, `floor_exit_code`): lift the decision out of the filesystem into
+a pure function over `&str`, and test it directly.
 
 ```rust
-#[test]
-fn a_root_that_needs_no_prefix_stripping_is_kept_as_canonicalize_returned_it() {
-    // The `b.len() == s.len()` arm means "nothing was stripped, keep `canon`
-    // itself rather than rebuilding it from a lossy string". Three mutants
-    // survived because no test ever took that arm with a real path.
-    let d = tempfile::tempdir().unwrap();
-    let got = resolve_root(d.path().to_path_buf());
-    assert_eq!(got, std::fs::canonicalize(d.path()).unwrap_or_else(|_| d.path().to_path_buf()));
-    assert!(!got.to_string_lossy().starts_with(r"\\?\"), "got {got:?}");
+/// The rewritten path string, or `None` to keep the original `PathBuf`.
+///
+/// Split out of `resolve_root` so the decision is observed rather than
+/// inferred. Through `resolve_root` this guard is unreachable from any test
+/// that can run here: `canonicalize` on POSIX always yields a `/`-rooted
+/// string, and both "something was stripped" arms need a literal `\\?\`
+/// prefix. All three of its mutants survived until it moved here.
+fn rewritten(s: &str) -> Option<String> {
+    match strip_extended_prefix(s) {
+        Cow::Borrowed(b) if b.len() == s.len() => None,
+        other => Some(other.into_owned()),
+    }
 }
 ```
+
+with `resolve_root` calling it, and direct tests for a `\\?\C:\…` input, a
+`\\?\UNC\…` input, and an ordinary unprefixed input. That kills all three on
+every platform with no `#[cfg]`.
 
 - [ ] **Step 5: Verify the kills**
 
@@ -551,7 +582,7 @@ fn two_installed_entries_for_one_package_do_not_produce_two_prunes() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test --test planner two_installed_entries -- --exact`
+Run: `cargo test --test planner two_installed_entries_for_one_package_do_not_produce_two_prunes -- --exact`
 Expected: FAIL, `left: 2, right: 1`.
 
 - [ ] **Step 3: Introduce the view and the invariant**
@@ -750,7 +781,7 @@ fn a_winget_resolution_cannot_carry_a_commit() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test --test update a_winget_resolution -- --exact`
+Run: `cargo test --test update a_winget_resolution_cannot_carry_a_commit -- --exact`
 Expected: FAIL to compile — `Resolution::Resolved` has no field `pin`.
 
 - [ ] **Step 3: Change the variant and every construction site**
@@ -839,7 +870,7 @@ fn a_commit_the_bucket_does_not_have_names_the_fetch_that_would_get_it() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test --test prepare a_commit_the_bucket_does_not_have -- --exact`
+Run: `cargo test --test prepare a_commit_the_bucket_does_not_have_names_the_fetch_that_would_get_it -- --exact`
 Expected: FAIL on `msg.contains("git -C")`.
 
 - [ ] **Step 3: Extend the message**

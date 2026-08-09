@@ -408,7 +408,7 @@ impl Scoop {
             bucket_dir.display()
         );
         anyhow::ensure!(
-            git_ok(
+            crate::bucket::git_ok(
                 &bucket_dir,
                 &["cat-file", "-e", &format!("{commit}^{{commit}}")]
             ),
@@ -424,7 +424,7 @@ impl Scoop {
             }
             tried.push(spelling.clone());
             let in_repo = format!("bucket/{spelling}.json");
-            let Some(text) = git_show(&bucket_dir, commit, &in_repo)? else {
+            let Some(text) = crate::bucket::git_show(&bucket_dir, commit, &in_repo)? else {
                 continue;
             };
             return stage_text(
@@ -439,37 +439,14 @@ impl Scoop {
         }
         // Neither guess is what the bucket calls it. One tree listing finds
         // the real name -- and uses it, rather than only reporting it.
-        if let Some(real) = resolve_spelling(&bucket_dir, commit, app.key()) {
+        if let Some(real) = crate::bucket::resolve_spelling(&bucket_dir, commit, app.key()) {
             let in_repo = format!("bucket/{real}");
-            if let Some(text) = git_show(&bucket_dir, commit, &in_repo)? {
+            if let Some(text) = crate::bucket::git_show(&bucket_dir, commit, &in_repo)? {
                 return stage_text(staging_root, app, version, &real, &in_repo, commit, &text);
             }
         }
         anyhow::bail!("{app}: bucket {bucket:?} at {commit} has no manifest for {tried:?}");
     }
-}
-
-fn git_ok(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// `Ok(None)` when the path is absent from that commit; `Err` only when git
-/// itself could not be run.
-fn git_show(dir: &Path, commit: &str, path_in_repo: &str) -> Result<Option<String>> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(["show", &format!("{commit}:{path_in_repo}")])
-        .output()
-        .with_context(|| format!("cannot run git in {}", dir.display()))?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
 /// Validate a recovered manifest against the lock and write it out. Shared by
@@ -495,29 +472,6 @@ fn stage_text(
     let out = dir.join(filename);
     std::fs::write(&out, text).with_context(|| format!("cannot write {}", out.display()))?;
     Ok(out)
-}
-
-/// The bucket's own filename for this app, found case-insensitively.
-///
-/// Costs one tree listing, and only after the two cheap guesses have missed.
-/// Returning the real spelling rather than only naming it is what lets
-/// `pkg.toml` say `TOOL` while the bucket file is `Tool.json` — without this,
-/// the two guesses only work when the user's casing happens to match.
-fn resolve_spelling(dir: &Path, commit: &str, app_key: &str) -> Option<String> {
-    let listing = Command::new("git")
-        .current_dir(dir)
-        .args(["ls-tree", "--name-only", commit, "bucket/"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    let wanted = format!("{app_key}.json");
-    listing
-        .lines()
-        .map(|l| l.rsplit('/').next().unwrap_or(l))
-        .find(|f| f.to_ascii_lowercase() == wanted)
-        .map(str::to_string)
 }
 
 /// The exact argv for prefetching a staged manifest.
@@ -1147,11 +1101,6 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
         // construction site per command. An inline scoop invocation would
         // slip past all of them.
         //
-        // `git` argv are exempt: they are built inline on purpose in
-        // `git_show` and `resolve_spelling`, and neither is a scoop
-        // invocation. Verified at plan time: exactly two such sites exist
-        // (`git_ok` takes a slice variable, so it does not match).
-        //
         // Assembled rather than written out, so this test's own source does
         // not contain the needle and inflate the count. Patching the expected
         // number instead of the mechanism was tried first and is fragile: any
@@ -1161,9 +1110,10 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
         let src = include_str!("scoop.rs");
         let inline = src.matches(needle.as_str()).count();
         assert_eq!(
-            inline, 2,
-            "the two inline argv belong to git (git_show, resolve_spelling); \
-             build every SCOOP argv in a *_argv function so the argv tests cover it"
+            inline, 0,
+            "every git argv moved to src/bucket.rs in Phase 3, so scoop.rs now \
+             has none; build every SCOOP argv in a *_argv function so the argv \
+             tests cover it"
         );
     }
 }

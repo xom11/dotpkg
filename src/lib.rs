@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod backend;
+pub mod bucket;
 pub mod config;
 pub mod execute;
 pub mod lock;

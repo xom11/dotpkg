@@ -120,6 +120,44 @@ end of the change as well as before the dogfood.** "Run Windows first" is not
 the same instruction as "run Windows on what you ship", and this task needed
 both.
 
+### And a fourth time, after the final review's fix wave — this is the tree that ships
+
+The final review's own fix wave (`0a4b7f9`, "Move what the final fix wave
+closed into the closed list") added tests after the run above, including six
+in `tests/cli.rs`/`tests/update.rs`/`tests/adopt.rs` that build git buckets
+and compare rendered paths — the fix wave's own report flagged
+`tests/update.rs`'s `a_declared_bucket_that_is_not_on_this_machine_is_warned_
+about_by_name_and_path`, whose assertion contains
+`scoop_root().join("buckets").join("extras").display()`, as exactly the
+rendered-path shape this document lists as a predicted failure class. Shipping
+on the run above, which predates that wave, would have repeated the same
+mistake this document already named once. So the suite was rebuilt from a
+fresh tarball (`Cargo.toml`, `Cargo.lock`, `src/`, `tests/`; no `target/`, no
+`.git/`) and rerun on a14 at `0a4b7f970916227af103cd7dd4e767438d34d5b5`.
+
+**Result: 375 passed, 0 failed, 0 ignored, `cargo test --no-fail-fast` exit
+code 0, across all 10 build targets (11 `test result:` lines including an
+empty doc-tests run).** macOS at the same commit: 377. Confirmed target by
+target, not by subtracting totals: every target matches count-for-count
+except `tests/adopt.rs` (19 → 18) and `tests/scoop_scan.rs` (27 → 26), and a
+full test-name diff (not just a count diff) on both of those two targets shows
+the missing name is exactly one test each —
+`a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about` and
+`a_root_reached_through_a_symlink_still_matches_running_processes`, the same
+two `#[cfg(unix)]` tests named above and nowhere else. Every other target
+(`lib` unittests 192, `bucket.rs` 22, `cli.rs` 26, `execute.rs` 26 — including
+its one `#[should_panic]` test, which fired identically on both platforms
+since this is a `test`-profile build and `debug_assert!` was never compiled
+out — `planner.rs` 33, `prepare.rs` 22, `update.rs` 10) is identical name-for-
+name, not merely count-for-count.
+
+The flagged rendered-path test passed, so the fix wave's own concern is
+falsified the same way the four predictions below were: `/x/` vs `/x\` did not
+occur. **Nothing was changed to make this run pass** — no fixture edits, no
+production code touched — so this entry closes the "no Windows run" concern
+the fix wave's report recorded against itself, on the exact tree it ships,
+satisfying the rule stated just above.
+
 ### Four predicted Windows failures, all four falsified
 
 The plan named four failure classes to expect, all seen in earlier phases. **None

@@ -398,15 +398,29 @@ mod tests {
         // state.json, wrong the moment one doesn't, and silent either way
         // because `with_file_name` still lands in the right directory and
         // the later rename still succeeds.
+        // Asserted on `file_name()` and `parent()`, not on the rendered
+        // whole path. Windows renders `Path::new("/x").with_file_name(..)`
+        // as `/x\name`, so a `starts_with("/x/…")` assertion passes on macOS
+        // and Linux and fails on Windows -- which is the one platform this
+        // tool actually runs on. Found by building this branch on the
+        // dogfood machine, not by CI.
         let a = temp_path_for(Path::new("/x/state.json"));
         let b = temp_path_for(Path::new("/x/custom-name.json"));
+
+        let name_of = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            a.to_string_lossy().starts_with("/x/state.json.tmp"),
-            "{a:?}"
+            name_of(&a).starts_with("state.json.tmp"),
+            "the temp name must derive from the target's own file name: {a:?}"
         );
         assert!(
-            b.to_string_lossy().starts_with("/x/custom-name.json.tmp"),
-            "{b:?}"
+            name_of(&b).starts_with("custom-name.json.tmp"),
+            "the temp name must derive from the target's own file name: {b:?}"
+        );
+        assert_eq!(
+            a.parent(),
+            Path::new("/x/state.json").parent(),
+            "the temp file must stay in the destination directory -- rename is \
+             only atomic within one filesystem: {a:?}"
         );
         assert_ne!(
             a, b,

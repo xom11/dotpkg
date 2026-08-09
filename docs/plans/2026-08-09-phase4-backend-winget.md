@@ -7,9 +7,10 @@
 **Goal:** Make `Backend` a real seam, then add a winget backend that scans,
 resolves, locks and reports — but never acts.
 
-**Architecture:** Half A (Tasks 2–10) turns three hardcoded scoop pipelines into
-one backend-parameterised one and closes five carried debts that each get harder
-once a second backend exists. Half B (Tasks 11–18) adds `src/backend/winget.rs`,
+**Architecture:** Task 1 is a measurement. Half A (Tasks 2–8) turns three
+hardcoded scoop pipelines into one backend-parameterised one and closes five
+carried debts that each get harder once a second backend exists. Half B (Tasks
+9–15) adds `src/backend/winget.rs`, and Task 16 verifies the whole thing,
 split at a pure-text seam (`parse_list`, `parse_show`) so the whole thing is
 testable on macOS against **bytes captured from a real winget**, with the
 subprocess behind a trait so no test spawns `winget.exe`.
@@ -240,7 +241,9 @@ and `parse_batch`.
 
 **Interfaces:**
 - Produces: `fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> i32`.
-  Task 18 adds a fourth parameter; do not add it here.
+  **Task 14** adds a fourth parameter (`has_reported_only`) and updates these
+  tests to the new arity; do not add it here — a parameter with one reachable
+  value is untestable, and this task must change no behaviour.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -887,9 +890,9 @@ every number below is measured, not invented.
 use dotpkg::backend::winget::{parse_list, WingetRow};
 
 fn fixture(name: &str) -> String {
-    // include_str! keeps the CRLF the fixture was captured with. Reading with
-    // std::fs would too, but include_str! also fails the BUILD if a fixture is
-    // renamed, which a runtime read would only fail at test time.
+    // Rust does no newline translation, so this keeps the CRLF the fixture was
+    // captured with -- which is the point: a parser tested only against \n
+    // passes here and fails on the one platform this tool runs on.
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/winget")

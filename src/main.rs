@@ -309,31 +309,58 @@ fn reconcile_ghosts(
     winget_scan: &ScanOutcome,
 ) -> Result<Vec<(String, Name)>> {
     let after_scoop = <Scoop as Backend>::scan(scoop)?;
-    let present: Vec<_> = after_scoop
-        .installed
-        .iter()
-        .map(|i| i.name.clone())
-        .collect();
     let mut dropped: Vec<(String, Name)> = state
-        .reconcile(dotpkg::model::SCOOP, &present)
+        .reconcile(dotpkg::model::SCOOP, &present_after(&after_scoop))
         .into_iter()
         .map(|n| (dotpkg::model::SCOOP.to_string(), n))
         .collect();
 
     if let ScanOutcome::Scanned(after_winget) = winget_scan {
-        let present: Vec<_> = after_winget
-            .installed
-            .iter()
-            .map(|i| i.name.clone())
-            .collect();
         dropped.extend(
             state
-                .reconcile(dotpkg::model::WINGET, &present)
+                .reconcile(dotpkg::model::WINGET, &present_after(after_winget))
                 .into_iter()
                 .map(|n| (dotpkg::model::WINGET.to_string(), n)),
         );
     }
     Ok(dropped)
+}
+
+/// Every name a scan says is **on the machine** -- `installed` and `opaque`
+/// together, which is the whole reason this is a function rather than two
+/// inline `map`s.
+///
+/// `Scan::opaque` means *"installed, but this backend could not establish its
+/// state"* -- its own doc comment's first line, and `plan()` is already built
+/// around not reading a name's absence from `installed` as "not installed".
+/// `reconcile_ghosts` is the other direction of that same rule, and it is the
+/// direction where getting it wrong **destroys data**: a ghost's record is
+/// deleted, so an owned package that lands in `opaque` loses the ownership
+/// dotpkg needs in order to prune it later, and `render_execution` prints
+/// "ownership record dropped: nothing by that name is installed" about a
+/// package that is installed.
+///
+/// **For winget, `opaque` is the ordinary shape, not an edge case.** Measured on
+/// a14: 84 of 126 ids sourceless, plus a `"> "`-prefixed pair and three ids
+/// whose rows disagreed on version. A side-by-side second version or a rotated
+/// source registration is enough. Three costs, all silent: `owned_count(WINGET)`
+/// shrinks, which is the number `mass_prune_guard` reads; an
+/// `Ownership::Adopted` record is unrecoverable, since a later dotpkg install
+/// writes `Installed` rather than `Adopted`; and an adopted-then-undeclared
+/// package becomes permanently `Unmanaged`.
+///
+/// **Applied to scoop too, deliberately and not silently.** The scoop half
+/// carried the identical defect at this branch's base -- an app whose
+/// `manifest.json` cannot be read or has no `version` goes to `opaque` -- and
+/// leaving one backend fixed and the other not would put two rules in one
+/// function for no reason a reader could find. It is the same one-line rule for
+/// both, so both get it.
+fn present_after(scan: &Scan) -> Vec<Name> {
+    scan.installed
+        .iter()
+        .map(|i| i.name.clone())
+        .chain(scan.opaque.iter().cloned())
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -1197,6 +1224,95 @@ mod tests {
         assert!(
             !state.owns(WINGET, &Name::new("winget-ghost")),
             "winget's ghost must be gone"
+        );
+    }
+
+    #[test]
+    fn an_installed_but_opaque_package_is_present_and_keeps_its_ownership_record() {
+        // **`opaque` is not "absent". It is the ORDINARY shape of a winget
+        // machine**: measured on a14, 84 of 126 ids came back with no Source at
+        // all, plus a `"> "`-prefixed pair and three ids whose two rows disagreed
+        // on version. A second side-by-side version, or a rotated source
+        // registration, puts an owned package there while it sits installed on
+        // the machine -- and `present` built from `installed` alone then reads
+        // that as a ghost, deletes the ownership record, and makes
+        // `render_execution` print "ownership record dropped: nothing by that
+        // name is installed" about a package that IS installed.
+        //
+        // Three separate costs, which is why this is not cosmetic: it shrinks
+        // `owned_count(WINGET)` -- the number `mass_prune_guard` reads -- it
+        // destroys an `Ownership::Adopted` record that no reinstall recreates,
+        // and it can leave an adopted-then-undeclared package permanently
+        // `Unmanaged`, unprunable by the tool that adopted it.
+        //
+        // The pre-existing test above constructs `opaque: Vec::new()`, which is
+        // exactly why nothing caught this. `opaque` is non-empty here in BOTH
+        // halves: the scoop half had the identical defect at this branch's base
+        // and is fixed in the same commit rather than left as a known one.
+        let tmp = tempfile::tempdir().unwrap();
+        // A real ghost for each backend, so `State::reconcile`'s own
+        // refuse-to-drop-everything guard is not what makes this pass -- and so
+        // a mutant that stops reconciling altogether goes red here too.
+        scoop_root_with(tmp.path(), "fzf", "1.0.0");
+        // `manifest.json` with no `version` key: `Scoop::scan` puts this in
+        // `opaque`, not `installed` (src/backend/scoop.rs:299-303).
+        let opaque_cur = tmp.path().join("apps").join("busybox").join("current");
+        std::fs::create_dir_all(&opaque_cur).unwrap();
+        std::fs::write(opaque_cur.join("manifest.json"), "{}").unwrap();
+        let scoop = Scoop::new(tmp.path().to_path_buf());
+
+        let mut state = State::default();
+        for (backend, name) in [
+            (dotpkg::model::SCOOP, "fzf"),
+            (dotpkg::model::SCOOP, "busybox"),
+            (dotpkg::model::SCOOP, "scoop-ghost"),
+            (WINGET, "Git.Git"),
+            (WINGET, "Brave.Brave"),
+            (WINGET, "winget-ghost"),
+        ] {
+            state.set(
+                backend,
+                &Name::new(name),
+                dotpkg::state::Ownership::Installed,
+            );
+        }
+        // And one adopted record in `opaque`, because that is the record whose
+        // loss is unrecoverable: a reinstall by dotpkg would write
+        // `Ownership::Installed` back, never `Adopted`.
+        state.set(
+            WINGET,
+            &Name::new("Obsidian.Obsidian"),
+            dotpkg::state::Ownership::Adopted,
+        );
+
+        let winget_scan = ScanOutcome::Scanned(Scan {
+            installed: vec![installed(WINGET, "Git.Git")],
+            opaque: vec![Name::new("Brave.Brave"), Name::new("Obsidian.Obsidian")],
+            warnings: Vec::new(),
+        });
+
+        let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
+
+        assert_eq!(
+            dropped,
+            vec![
+                (dotpkg::model::SCOOP.to_string(), Name::new("scoop-ghost")),
+                (WINGET.to_string(), Name::new("winget-ghost")),
+            ],
+            "only the two real ghosts -- an opaque package is installed: {dropped:?}"
+        );
+        assert!(
+            state.owns(WINGET, &Name::new("Brave.Brave")),
+            "an installed-but-opaque winget package must keep its record"
+        );
+        assert_eq!(
+            state.ownership(WINGET, &Name::new("Obsidian.Obsidian")),
+            Some(dotpkg::state::Ownership::Adopted),
+            "and an Adopted record must survive as Adopted, not merely survive"
+        );
+        assert!(
+            state.owns(dotpkg::model::SCOOP, &Name::new("busybox")),
+            "scoop's opaque half is fixed in the same commit, not left standing"
         );
     }
 

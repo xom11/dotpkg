@@ -3,52 +3,98 @@
 Declarative package management for Windows: winget and scoop from one dotfile,
 with a real lock file and prune.
 
-## Status
+## `status`
 
-Phase 1: `dotpkg status` works, for scoop, and it is **read-only**. It prints
-the plan it would execute and changes nothing — no install, no uninstall, no
-subprocess, no network.
+`dotpkg status` prints the plan it would execute and changes nothing — no
+install, no uninstall, no network. It covers **both backends**: scoop from
+`apps/*/current/manifest.json` on disk, winget from `winget list`.
 
 ```console
 $ dotpkg status
   + scoop  ripgrep        14.1.0                   (install)
   v scoop  fzf            0.74.2 -> 0.74.1         (downgrade, from lock)
   ! scoop  kanata         running -- stop it first
-  ! winget Git.Git        winget backend not implemented until phase 4
+  ^ winget Git.Git        2.51.0 -> 2.52.0         (upgrade)
   - scoop  aichat         0.30.0                   (prune, owned)
   ? scoop  antigravity    2.0.6                    (unmanaged -- no action)
 
-  3 change(s), 2 skipped
+  4 change(s), 1 skipped
 ```
 
 It reads `pkg.toml` (what you declared), `pkg.lock` (what those declarations
 resolved to), `state.json` (what dotpkg installed, so prune can never reach a
-package it did not put there), and scoop's own `apps/*/current/manifest.json`
-on disk.
+package it did not put there), scoop's own `apps/*/current/manifest.json` on
+disk, and `winget list`.
+
+`status` is the one command that never refuses over an unreadable lock: it
+warns and prints the plan anyway, because that plan is the information you need
+in order to fix the lock.
 
 ## `apply`
 
-Brings the machine to what `pkg.toml` and `pkg.lock` describe: installs what
-is missing, replaces a version change (always uninstall + install, in either
-direction), and removes what is no longer declared and that dotpkg owns.
+Brings the machine to what `pkg.toml` and `pkg.lock` describe, for **both
+backends**: installs what is missing, changes the version of what disagrees
+with the lock, and removes what is no longer declared and that dotpkg owns.
 Prints the plan, stages and fetches everything a mutation needs, asks once,
-then mutates — verifying every result against the filesystem afterward,
-because scoop's own exit code cannot be trusted to say whether anything
-actually happened (see
-[the exit-code measurements](docs/measurements-2026-08-08-scoop-exit-codes.md)).
+then mutates — verifying every result afterward rather than believing the
+package manager's exit code, because neither manager's exit code says whether
+anything happened. For scoop that verification reads the installed manifest's
+bytes off disk (see
+[the exit-code measurements](docs/measurements-2026-08-08-scoop-exit-codes.md));
+for winget it re-runs `winget list` for the one package, because winget returns
+the same exit code for "already exactly where you asked" and "I declined" (see
+[the write-path measurements](docs/measurements-2026-08-10-winget-write-path.md)).
+
+**A version change is not the same operation on the two backends.** scoop
+cannot change a version any other way than uninstall-then-install — `install`
+over an installed app is a measured no-op — so a scoop version change opens a
+window in which the package is absent. A winget version change is one
+`install --version <pin>` call and opens no such window. The confirmation
+prompt says so, and only when a scoop replacement is actually in the run.
 
 ```console
 $ dotpkg apply
   + scoop  ripgrep        14.1.0                   (install)
   v scoop  fzf            0.74.2 -> 0.74.1         (downgrade, from lock)
 
-  1 package(s) will be uninstalled and reinstalled, 1 installed, 0 removed.
-  Every version change is an uninstall followed by an install, in both
+  1 package(s) will be uninstalled and reinstalled, 1 installed, 0 removed. A
+  scoop version change is an uninstall followed by an install, in both
   directions. Continue? [y/N] y
 ```
 
 `--prepare` stops before the question, after staging and fetching, and
-changes nothing either way.
+changes nothing either way. For a winget package there is nothing to stage —
+winget holds the manifest, not dotpkg — so `--prepare` instead confirms with
+`winget show` that the pinned version is still in winget's index.
+
+### winget: what `apply` will and will not do
+
+- **It will install, upgrade and remove.** One measured argv each, all through
+  one seam, with the pinned version passed on both the install and the removal
+  so a version dotpkg did not expect fails closed rather than removing the
+  wrong one.
+- **It will never downgrade.** Decided, not deferred: measured, `winget
+  install --version <older>` cannot do it, and the alternative — uninstall then
+  install — would put a nightly uninstall-and-reinstall loop on every
+  self-updating application. A package installed *ahead* of its pin is printed
+  as the refusal it will be, is not counted among the changes, and tells you to
+  run `dotpkg update` to move the pin forward:
+
+  ```console
+  ! winget Brave.Brave    151.1.93.134 -> 151.1.93.132 (dotpkg will not downgrade a winget package -- run `dotpkg update`)
+  ```
+
+- **It refuses an elevated removal of a user-scope package before anything
+  runs.** Measured: winget will not uninstall a user-scope package from an
+  elevated process, and it says so with its own exit code. dotpkg checks
+  before the run rather than only translating the failure after — and re-running
+  without elevation is the fix.
+- **A declared winget package with no `pkg.lock` entry fails the whole run**
+  (exit 2), exactly as a scoop one does. It used to be a harmless report line;
+  that exemption only ever existed because `apply` could not act on winget at
+  all. Run `dotpkg update` first.
+- **`dotpkg add` still does not exist for either backend.** Declaring a winget
+  package is `pkg.toml`, then `dotpkg update <pkg>`, then `dotpkg apply`.
 
 ### Flags
 
@@ -90,10 +136,17 @@ Defined by what the operator must do next, not by what happened internally.
 
 ## `update`
 
-Re-resolves `pkg.toml` against the buckets on disk and rewrites `pkg.lock`.
-The only command that asks what is newest, and the only one that fetches.
-Never touches the machine — no install, no uninstall, no subprocess besides
-`git`.
+Re-resolves `pkg.toml` and rewrites `pkg.lock` — scoop against the buckets on
+disk, winget against winget's own index. The only command that asks what is
+newest, and the only one that fetches. Never touches the machine: no install,
+no uninstall, and the only subprocesses are `git` and the two read-only winget
+calls (`winget source update --name winget`, measured to change nothing on the
+machine it was run against twice, and `winget show`).
+
+For winget, `pkg.lock`'s key is the **canonical id winget itself echoed back**,
+not the spelling in `pkg.toml`. If the two differ in case, `update` warns and
+leaves `pkg.toml` as you wrote it — that spelling is yours, and only the lock's
+goes on a winget command line.
 
 ```console
 $ dotpkg update
@@ -139,12 +192,13 @@ also drops the pin for anything no longer declared.
 ## `adopt`
 
 Brings an already-installed package under dotpkg's management, without
-installing, removing, or otherwise touching anything scoop has on disk.
-Finds the commit whose manifest is the one actually running — matched by
-exact content across the bucket's whole history where possible, by version
-only where it is not — and writes `pkg.lock`, `pkg.toml` and `state.json`.
-There is deliberately no "adopt everything": at least one package must be
-named.
+installing, removing, or otherwise touching anything either backend has on the
+machine. For scoop it finds the commit whose manifest is the one actually
+running — matched by exact content across the bucket's whole history where
+possible, by version only where it is not. For winget (`--backend winget`) it
+pins the installed version. Either way it writes `pkg.lock`, `pkg.toml` and
+`state.json`. There is deliberately no "adopt everything": at least one package
+must be named.
 
 ```console
 $ dotpkg adopt aichat
@@ -162,6 +216,8 @@ fails, say) is reported as what really changed on disk versus what did not
 
 ### Flags
 
+- `--backend <scoop|winget>` — Which backend to adopt from. Defaults to
+  `scoop`, unchanged from before winget adoption existed.
 - `--state <path>` — Where dotpkg records what it owns. Must be an absolute
   path if given.
 - `--config <path>`, `--lock <path>` — same as `status` and `apply`.
@@ -179,10 +235,17 @@ fails, say) is reported as what really changed on disk versus what did not
 
 - **`add`.** Install a new package, add it to `pkg.toml`, and record it in
   `pkg.lock` — the other direction from `adopt`, which is for a package
-  already on the machine.
-- **The winget backend.** `pkg.toml` and `pkg.lock` accept `[winget]` and the
-  planner reports every package declared there, but it cannot scan or act on
-  them. They print as skipped, not as nothing.
+  already on the machine. `pkg.toml` plus `dotpkg update <pkg>` plus `dotpkg
+  apply` composes to the same thing today, for either backend.
+- **Downgrading a winget package.** Decided against, not deferred — see the
+  `apply` section above.
+- **Dependency handling.** A winget manifest can declare dependencies, and
+  five of twelve packages surveyed on a real machine declare
+  `Microsoft.VCRedist.2015+.x64`. An install that also installs a second
+  package leaves that package with no lock entry, no ownership record and no
+  declaration, so the next `status` reports it as unmanaged. Unmeasured and out
+  of scope; a real gap, not a closed question.
+- **Chocolatey.** Nothing beyond the two backends.
 
 ## Documentation
 
@@ -193,10 +256,22 @@ fails, say) is reported as what really changed on disk versus what did not
   scoop's exit code cannot be trusted.
 - [Scoop exit-code measurements](docs/measurements-2026-08-08-scoop-exit-codes.md)
   — the raw commands and output behind that design.
+- [winget backend design](docs/specs/2026-08-09-phase4-backend-winget-design.md)
+  — how winget is scanned, why `pkg.lock` holds the canonical id winget echoed
+  back, and why `winget export` was measured and rejected.
+- [winget executor design](docs/specs/2026-08-10-phase4b-winget-executor-design.md)
+  — how `apply` installs, upgrades and removes a winget package, and why it
+  never downgrades one.
+- [winget write-path measurements](docs/measurements-2026-08-10-winget-write-path.md)
+  — the 27 write-verb invocations that design rests on, exit codes and stdout
+  included.
 - [Phase 1 plan](docs/plans/2026-08-08-phase1-status-scoop.md) — the task
-  breakdown this phase was built from.
+  breakdown the first phase was built from.
 - [Dogfood notes](docs/dogfood-2026-08-08.md) — the first run against a real
   machine.
+- [Carried forward out of Phase 4](docs/phase4-notes.md) and
+  [out of Phase 4b](docs/phase4b-notes.md) — what each phase measured, what it
+  only reasoned about, and what it left open.
 
 ## Build
 

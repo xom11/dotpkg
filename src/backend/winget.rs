@@ -617,12 +617,12 @@ pub const NO_APPLICATIONS_FOUND: i32 = -1978335212;
 /// `NO_APPLICATIONS_FOUND` above: one says the package itself is gone, this
 /// one says a specific version of a package that still exists is gone.
 ///
-/// **Not used by this task.** Task 13's pin-liveness check
-/// (`Winget::resolve_installed`) is the caller: it runs `show ... -v <the
-/// version pkg.lock pins>` and needs to tell "this exact version fell out of
-/// the index" (this code) apart from "the package itself is no longer in any
-/// index at all" (`NO_APPLICATIONS_FOUND`), because the two lead to different
-/// advice for the user.
+/// `version_liveness` below is the one place it is read, on behalf of both
+/// callers that ask whether a version is still in the index: it needs to tell
+/// "this exact version fell out of the index" (this code) apart from "the
+/// package itself is no longer in any index at all"
+/// (`NO_APPLICATIONS_FOUND`), because the two lead to different advice for
+/// the user.
 pub const NO_VERSION_FOUND: i32 = -1978335209;
 
 /// One package manager, `winget`, behind the `WingetCmd` seam -- generic so
@@ -768,17 +768,12 @@ impl<C: WingetCmd> Backend for Winget<C> {
     /// cannot determine -- pinning it would write a lock entry that can never
     /// match.
     ///
-    /// Otherwise `["show", "--id", <name>, "-v", <version>,
-    /// "--disable-interactivity"]` -- again no `--exact`, for the same reason
-    /// as `resolve_latest`. `NO_VERSION_FOUND` means the package is still in
-    /// the index but this exact version is not: a second call to `--versions`
-    /// answers how deep that index goes, because retention is a publisher
-    /// policy that spans three orders of magnitude (8 for
-    /// `BurntSushi.ripgrep.MSVC`, 828 for `JanDeDobbeleer.OhMyPosh`) and "this
-    /// publisher keeps N releases" is more help than "the manifest is gone".
-    /// `NO_APPLICATIONS_FOUND` means the package itself is gone -- a
-    /// different fact, so a different message, never conflated with the
-    /// version-only one above.
+    /// Otherwise the whole question is `version_liveness`'s -- see its own doc
+    /// comment for the argv, for why it carries no `--exact`, and for how it
+    /// tells "this version is gone" apart from "this package is gone". The
+    /// only thing this method adds on top is what to do with the answer: the
+    /// `Found` becomes the pin, and the canonical id it read becomes
+    /// `ctx.canonical`.
     fn resolve_installed(&self, inst: &Installed, ctx: &ResolveCtx) -> Resolution {
         if inst.version.starts_with("> ") {
             return Resolution::Failed {
@@ -791,71 +786,7 @@ impl<C: WingetCmd> Backend for Winget<C> {
             };
         }
 
-        let id = inst.name.to_string();
-        let out = match self.cmd.run(&[
-            "show",
-            "--id",
-            &id,
-            "-v",
-            &inst.version,
-            "--disable-interactivity",
-        ]) {
-            Ok(out) => out,
-            Err(e) => {
-                return Resolution::Failed {
-                    why: format!("winget show could not be run: {e:#}"),
-                }
-            }
-        };
-
-        if out.code == NO_VERSION_FOUND {
-            let depth =
-                match self
-                    .cmd
-                    .run(&["show", "--id", &id, "--versions", "--disable-interactivity"])
-                {
-                    Ok(versions_out) if versions_out.code == 0 => {
-                        parse_versions(&versions_out.stdout).ok()
-                    }
-                    _ => None,
-                };
-            let why = match depth {
-                Some((_, versions)) => format!(
-                    "{}: version {} is no longer in the winget index -- this publisher \
-                     currently keeps {} version(s) ({}..{})",
-                    inst.name,
-                    inst.version,
-                    versions.len(),
-                    versions.first().map(String::as_str).unwrap_or("?"),
-                    versions.last().map(String::as_str).unwrap_or("?"),
-                ),
-                None => format!(
-                    "{}: version {} is no longer in the winget index",
-                    inst.name, inst.version
-                ),
-            };
-            return Resolution::Failed { why };
-        }
-        if out.code == NO_APPLICATIONS_FOUND {
-            return Resolution::Failed {
-                why: format!(
-                    "{}: no longer in the winget index ({})",
-                    inst.name,
-                    out.stdout.lines().next().unwrap_or("(no output)")
-                ),
-            };
-        }
-        if out.code != 0 {
-            return Resolution::Failed {
-                why: format!(
-                    "winget show {} exited {}: {}",
-                    inst.name,
-                    out.code,
-                    out.stdout.lines().next().unwrap_or("(no output)")
-                ),
-            };
-        }
-        match parse_show(&out.stdout) {
+        match version_liveness(&self.cmd, &inst.name, &inst.version) {
             Ok(found) => {
                 *ctx.canonical.borrow_mut() = Some(Name::new(found.id));
                 Resolution::Resolved {
@@ -864,11 +795,102 @@ impl<C: WingetCmd> Backend for Winget<C> {
                     },
                 }
             }
-            Err(e) => Resolution::Failed {
-                why: format!("{e:#}"),
-            },
+            Err(why) => Resolution::Failed { why },
         }
     }
+}
+
+/// Is `version` of `id` still in winget's index?
+///
+/// Shared body of the two questions that ask it, so the argv and every error
+/// sentence are decided once: `Winget::resolve_installed` above, which needs
+/// the `Found` back because the installed version *is* the pin it is about to
+/// write, and `apply::prepare`'s winget branch, which needs only to know that
+/// the version `pkg.lock` pins can still be installed before it lets a
+/// `WingetStep::Set` be built for it. A free function taking `&dyn WingetCmd`
+/// rather than a `Winget<C>` method, because `prepare` holds the seam, not a
+/// backend.
+///
+/// `["show", "--id", <id>, "-v", <version>, "--disable-interactivity"]` --
+/// **no `--exact`**, for the same measured reason as `resolve_latest`
+/// (`PROVENANCE.md`, `parse_show`'s own doc comment): `--exact` is what makes
+/// `--id` case-sensitive, so a folded or wrong-case spelling gets
+/// `NO_APPLICATIONS_FOUND` for a package that exists. Task 13's brief wrote
+/// this call as `show -e --id ... -v ...`; the `-e` is deliberately **not**
+/// here, because this is the argv shape the crate's exit-code trust was
+/// measured against and adding a flag no measurement covers would hide a
+/// case-sensitivity bug behind a liveness check.
+///
+/// `NO_VERSION_FOUND` means the package is still in the index but this exact
+/// version is not: a second call to `--versions` answers how deep that index
+/// goes, because retention is a publisher policy that spans three orders of
+/// magnitude (8 for `BurntSushi.ripgrep.MSVC`, 828 for
+/// `JanDeDobbeleer.OhMyPosh`) and "this publisher keeps N releases" is more
+/// help than "the manifest is gone". `NO_APPLICATIONS_FOUND` means the
+/// package itself is gone -- a different fact, so a different message, never
+/// conflated with the version-only one.
+///
+/// `Err` is already the whole sentence a user reads, and already names `id`
+/// where naming it helps: every caller puts it straight into a `Resolution`
+/// or an `Outcome` without adding to it.
+pub(crate) fn version_liveness(
+    cmd: &dyn WingetCmd,
+    id: &Name,
+    version: &str,
+) -> Result<Found, String> {
+    let id_arg = id.to_string();
+    let out = match cmd.run(&[
+        "show",
+        "--id",
+        &id_arg,
+        "-v",
+        version,
+        "--disable-interactivity",
+    ]) {
+        Ok(out) => out,
+        Err(e) => return Err(format!("winget show could not be run: {e:#}")),
+    };
+
+    if out.code == NO_VERSION_FOUND {
+        let depth = match cmd.run(&[
+            "show",
+            "--id",
+            &id_arg,
+            "--versions",
+            "--disable-interactivity",
+        ]) {
+            Ok(versions_out) if versions_out.code == 0 => parse_versions(&versions_out.stdout).ok(),
+            _ => None,
+        };
+        return Err(match depth {
+            Some((_, versions)) => format!(
+                "{}: version {} is no longer in the winget index -- this publisher \
+                 currently keeps {} version(s) ({}..{})",
+                id,
+                version,
+                versions.len(),
+                versions.first().map(String::as_str).unwrap_or("?"),
+                versions.last().map(String::as_str).unwrap_or("?"),
+            ),
+            None => format!("{id}: version {version} is no longer in the winget index"),
+        });
+    }
+    if out.code == NO_APPLICATIONS_FOUND {
+        return Err(format!(
+            "{}: no longer in the winget index ({})",
+            id,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        ));
+    }
+    if out.code != 0 {
+        return Err(format!(
+            "winget show {} exited {}: {}",
+            id,
+            out.code,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        ));
+    }
+    parse_show(&out.stdout).map_err(|e| format!("{e:#}"))
 }
 
 impl<C: WingetCmd> Winget<C> {

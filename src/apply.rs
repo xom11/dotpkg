@@ -1,18 +1,12 @@
 use crate::backend::scoop::Scoop;
+use crate::backend::winget::WingetCmd;
 use crate::backend::Backend;
 use crate::config::Config;
-use crate::execute::{ScoopStep, Step};
+use crate::execute::{ScoopStep, Step, WingetStep};
 use crate::lock::Lock;
 use crate::lock::Pin;
-use crate::model::{Name, SCOOP, WINGET};
+use crate::model::{Installed, Name, SCOOP, WINGET};
 use crate::plan::{Action, Plan, SkipReason};
-// Only this file's own tests name `Divergence` directly (`classify` matches
-// `SkipReason::ReportedOnly(divergence)` and calls `divergence.describe()`
-// without needing the type in scope), so the import is `cfg(test)`-gated --
-// otherwise it is unused in a normal build and the crate would no longer be
-// warning-free.
-#[cfg(test)]
-use crate::plan::Divergence;
 use crate::state::State;
 use anyhow::Result;
 use std::io::{BufRead, Write};
@@ -201,6 +195,17 @@ pub fn default_staging_root() -> PathBuf {
 pub enum Intent {
     /// Needs a manifest staged and fetched.
     NeedsArtifact,
+    /// Needs nothing staged, because winget has no local manifest to stage --
+    /// but the version `pkg.lock` pins still has to be *in winget's index*
+    /// before `apply` may promise to install it. What `--prepare` can check
+    /// for a winget action, and all it can check: `winget show --id <id> -v
+    /// <pin>` (`backend::winget::version_liveness`).
+    ///
+    /// Its own `Intent` rather than a second reading of `NeedsArtifact`: the
+    /// two do different work, produce different `Outcome`s, and a caller that
+    /// confused them would ask `Scoop::stage` for a manifest that does not
+    /// exist.
+    NeedsLiveness,
     /// A removal: nothing to prepare, ready by definition.
     NoArtifactNeeded,
     /// Benign; does not fail the run.
@@ -215,21 +220,30 @@ pub enum Intent {
 /// plumbing that acts on what this function decided.
 pub fn classify(action: &Action) -> Intent {
     match action {
-        Action::Install { .. } | Action::Upgrade { .. } | Action::Downgrade { .. } => {
-            Intent::NeedsArtifact
+        // The one place the two backends' preparations part company, and it
+        // is a fact about what each backend *has*, not about what dotpkg may
+        // do to it: scoop pins a manifest in a bucket, so preparing means
+        // staging and fetching that manifest and hash-verifying it; winget
+        // holds the manifest itself and hands out nothing, so there is
+        // nothing to stage and the only thing `--prepare` can establish is
+        // that the pinned version is still in winget's index.
+        //
+        // A third backend falls to `NeedsArtifact` and then to
+        // `stage_and_fetch`'s `backend != SCOOP` guard, which reports it as a
+        // per-package failure rather than staging something meaningless.
+        Action::Install { backend, .. }
+        | Action::Upgrade { backend, .. }
+        | Action::Downgrade { backend, .. } => {
+            if backend == WINGET {
+                Intent::NeedsLiveness
+            } else {
+                Intent::NeedsArtifact
+            }
         }
         Action::Prune { .. } => Intent::NoArtifactNeeded,
         Action::Skip { reason, .. } => match reason {
             SkipReason::NotLocked => Intent::NotLocked,
             SkipReason::Running => Intent::Skip("running -- stop it first".to_string()),
-            // Unlike the old `BackendNotImplemented` arm this replaced, this
-            // reads no `backend` field itself -- `Divergence::describe()`
-            // already names "winget" in its own text, since every
-            // `Capability::ReportsOnly` backend today is winget. That is a
-            // known simplification (ledgered, not fixed here): if a second
-            // `ReportsOnly` backend ever existed, `describe()` would need to
-            // stop hardcoding the name and start reading it from somewhere.
-            SkipReason::ReportedOnly(divergence) => Intent::Skip(divergence.describe()),
             // Same shape as Running: dotpkg cannot act on a state it could not
             // establish, and installing over it is exactly the mistake this
             // variant exists to prevent. The user fixes the read (usually by
@@ -271,6 +285,19 @@ pub enum Outcome {
     ReadyToFetch { manifest: PathBuf },
     /// A removal: ready by definition, because there is nothing to fetch.
     ReadyToRemove,
+    /// Ready, and nothing was fetched: winget has no local manifest to stage.
+    /// The pinned version was confirmed still present in winget's index.
+    ///
+    /// A separate variant rather than `ReadyToFetch { manifest: None }`, for
+    /// the reason `ReadyToFetch` and `ReadyToRemove` were split from one
+    /// another in Phase 2b-2: as one variant, "no manifest" would mean "this
+    /// is a winget action" only for values `prepare` itself produced, and an
+    /// executor branching on `manifest.is_none()` would be right by luck.
+    ///
+    /// Carries the version so `plan_to_steps` builds `WingetStep::Set` from
+    /// the version preparation actually confirmed, not from a second reading
+    /// of the action or the lock.
+    ReadyToSet { version: String },
     /// A per-package failure. Reported; never stops the run.
     Failed { why: String },
     /// Benign: the user can fix this (usually by closing an app) and run
@@ -315,16 +342,24 @@ pub struct Preparation {
 }
 
 impl Preparation {
-    /// Both ready shapes: an install with its manifest fetched, and a removal
-    /// that needed nothing fetched. Counted together because the user-facing
-    /// number is "how much of this plan can go ahead".
+    /// Every ready shape: a scoop install with its manifest fetched, a removal
+    /// that needed nothing fetched, and a winget `Set` whose pinned version
+    /// was confirmed still in winget's index. Counted together because the
+    /// user-facing number is "how much of this plan can go ahead".
+    ///
+    /// Also the left-hand side of the invariant `main.rs` checks after
+    /// routing: every ready outcome must become exactly one `Step`, so
+    /// `ready_count()` and `steps + held` agreeing is what says no ready
+    /// action was silently dropped by a missing `plan_to_steps` arm.
     pub fn ready_count(&self) -> usize {
         self.prepared
             .iter()
             .filter(|p| {
                 matches!(
                     p.outcome,
-                    Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove
+                    Outcome::ReadyToFetch { .. }
+                        | Outcome::ReadyToRemove
+                        | Outcome::ReadyToSet { .. }
                 )
             })
             .count()
@@ -358,6 +393,23 @@ impl Preparation {
         self.failed_count() == 0 && self.not_locked_count() == 0
     }
 
+    /// How many packages **could not be prepared** -- exactly the set that
+    /// makes `is_ok()` false, and exactly the number `main.rs` prints in "N
+    /// package(s) could not be prepared, so nothing has been changed".
+    ///
+    /// Its own method because that sentence used to be printed with
+    /// `plan_to_steps`'s `unusable.len()`, which is a different and wider set:
+    /// `unusable` is every package that did not become a step, so it also
+    /// counts every benign `Outcome::Skipped` (a running app the user can
+    /// close, which does not fail the run) and, in principle, a routing bug (an
+    /// action that WAS prepared, and so certainly not one that could not be).
+    /// One real failure alongside two running apps printed "3 package(s) could
+    /// not be prepared" -- a false number in a refusal message, which is the
+    /// same defect class as a false number in the confirmation prompt.
+    pub fn unpreparable_count(&self) -> usize {
+        self.failed_count() + self.not_locked_count()
+    }
+
     /// Every skip that is a fact about *this run* and could be different on
     /// the next one, by name and reason -- not because `is_ok()` needs
     /// widening (it does not: none of these gate removals or refuse the
@@ -370,16 +422,16 @@ impl Preparation {
     /// `NotLocked` -- the one `SkipReason` `is_outstanding` returns `false`
     /// for -- never reaches `Outcome::Skipped` at all (`classify` sends it to
     /// `Intent::NotLocked`, which becomes `Outcome::NotLocked`, and that
-    /// already fails `is_ok()` on its own). `SkipReason::BackendNotImplemented`
-    /// used to be the reason these two counts differed -- permanent and
-    /// structural, reported identically on every run, and the one variant
-    /// that was `Skipped` yet not outstanding -- and it was deleted along
-    /// with the stub loop it existed for once Task 14 gave winget a real
-    /// `Capability::ReportsOnly` view. Nothing has taken its place. The match
-    /// in `is_outstanding` stays exhaustive with no wildcard for exactly this
-    /// reason: the day a `Skipped`-but-not-outstanding `SkipReason` exists
-    /// again, this narrows correctly without anyone having to remember to
-    /// widen it back.
+    /// already fails `is_ok()` on its own). Two variants have been the reason
+    /// these counts differed and both are gone:
+    /// `SkipReason::BackendNotImplemented` (deleted with the stub loop it
+    /// existed for when Task 14 gave winget a real planner view) and
+    /// `SkipReason::ReportedOnly` (deleted by Task 13 when winget got an
+    /// executor and stopped having anything to report-only about). Nothing has
+    /// taken their place. The match in `is_outstanding` stays exhaustive with
+    /// no wildcard for exactly this reason: the day a
+    /// `Skipped`-but-not-outstanding `SkipReason` exists again, this narrows
+    /// correctly without anyone having to remember to widen it back.
     ///
     /// Named for what the query answers, not for the first variant it
     /// recognised (`running_skips`, before review caught that `Opaque` had
@@ -408,19 +460,16 @@ impl Preparation {
 ///
 /// Exhaustive on purpose, with no wildcard arm: a `SkipReason` this match
 /// does not name is a compile error, not a silent "does not float" default.
-/// Task 14 adds `SkipReason::ReportedOnly` (a winget package that differs
-/// from the lock) to this enum, and its own floor-or-not answer must be a
-/// decision made here, not an oversight this match's shape would let slip
-/// through.
+/// That shape has already earned itself twice -- `SkipReason::ReportedOnly`
+/// arrived (Task 14) and was deleted again (Task 13, when winget got an
+/// executor), and on both days the floor-or-not answer had to be a decision
+/// made here rather than an oversight the match would have let slip through.
 fn is_outstanding(reason: &SkipReason) -> bool {
     match reason {
-        // A winget package that differs from the lock is outstanding work
-        // the user asked for and did not get, exactly like a running process
-        // or an unreadable state: dotpkg reports it and, next run, might not
-        // have to -- the package could converge, or the lock could change.
-        // Unlike its predecessor `BackendNotImplemented`, this is not
-        // permanent: it depends on the machine, not on what phase dotpkg is.
-        SkipReason::Running | SkipReason::Opaque | SkipReason::ReportedOnly(_) => true,
+        // Both are facts about this run that could differ on the next one:
+        // the process could be closed, the unreadable state could become
+        // readable. Outstanding work the user asked for and did not get.
+        SkipReason::Running | SkipReason::Opaque => true,
         SkipReason::NotLocked => false,
         // A scan failure is a fact about this run, not a permanent property
         // of the machine: the next run's `winget.exe` might not be
@@ -431,23 +480,31 @@ fn is_outstanding(reason: &SkipReason) -> bool {
     }
 }
 
-/// Walk the plan and try to make every `NeedsArtifact` action ready: recover
-/// its pinned manifest, stage it under `staging_root`, then fetch and
-/// hash-verify it. This is the entire phase: nothing here installs,
+/// Walk the plan and try to make every action that needs preparing ready:
+/// for scoop, recover its pinned manifest, stage it under `staging_root`,
+/// then fetch and hash-verify it; for winget, confirm the pinned version is
+/// still in winget's index. This is the entire phase: nothing here installs,
 /// uninstalls, or otherwise changes anything already on the machine. The only
-/// filesystem writes are inside `staging_root`, and the only command ever run
-/// is `scoop download`, which never mutates installed software.
+/// filesystem writes are inside `staging_root`, and the only commands ever
+/// run are `scoop download` and `winget show`, neither of which mutates
+/// installed software.
 ///
 /// A per-package failure is recorded in that package's `Outcome` and the walk
 /// continues -- one bad package must never hide, or stop, the others.
 ///
 /// `declared` is `pkg.toml`, parsed: `stage_and_fetch` uses it to check a
 /// pin's bucket against `[scoop] buckets` before ever touching the disk.
+///
+/// `winget` is the read-only half of winget's seam (`WingetCmd`, not
+/// `WingetMutator`): the type alone says this function cannot install or
+/// remove a winget package even by mistake, which is the same argument
+/// `Step`/`ScoopStep` makes for `execute`.
 pub fn prepare(
     plan: &Plan,
     lock: &Lock,
     scoop: &Scoop,
     mutator: &dyn crate::execute::Mutator,
+    winget: &dyn WingetCmd,
     staging_root: &Path,
     declared: &Config,
 ) -> Preparation {
@@ -460,6 +517,7 @@ pub fn prepare(
                 Intent::NeedsArtifact => {
                     stage_and_fetch(action, lock, scoop, mutator, staging_root, declared)
                 }
+                Intent::NeedsLiveness => check_pin_is_live(action, winget),
                 Intent::NoArtifactNeeded => Outcome::ReadyToRemove,
                 Intent::Skip(why) => Outcome::Skipped { why },
                 Intent::NotLocked => Outcome::NotLocked,
@@ -468,6 +526,54 @@ pub fn prepare(
         })
         .collect();
     Preparation { prepared }
+}
+
+/// The `NeedsLiveness` half of `prepare`: winget's whole preparation.
+///
+/// The version asked about is the one the **plan** resolved from `pkg.lock`
+/// (`Install`'s `version`, `Upgrade`/`Downgrade`'s `to`), not a second read of
+/// the lock -- the plan is the thing the user is shown and says yes to, so it
+/// is the thing preparation must confirm.
+///
+/// **A missing `winget.exe` lands here, and lands as `Failed` -- deliberately,
+/// and this is the whole answer to it.** `Winget::scan` routes
+/// `CmdError::NotFound` to an empty `Scan` plus a warning, because a machine
+/// with no winget is a legitimate machine; the cost is that "winget is not
+/// installed" and "winget found nothing installed" are spelled the same way in
+/// `installed`, so a declared *and locked* winget package on such a machine
+/// plans as an `Install`. While winget only reported, that `Install` was a
+/// report line. Now that winget acts it would be a real `winget install`
+/// against a binary that is not there -- except that it never gets that far:
+/// this liveness check runs `winget show` first, `WingetCmd::run` returns
+/// `CmdError::NotFound`, and the package becomes `Outcome::Failed` ("winget
+/// show could not be run: winget.exe is not on PATH"). It therefore never
+/// becomes a `Step`, it fails `Preparation::is_ok`, and by default the whole
+/// run refuses before `execute` is ever called -- `--keep-going` does not
+/// change that for this package either, since a `Failed` outcome produces no
+/// step to keep going with. Reported per package rather than as one
+/// whole-backend error because that is what the rest of this function already
+/// is, and because the same run's scoop half is none of winget's business.
+fn check_pin_is_live(action: &Action, winget: &dyn WingetCmd) -> Outcome {
+    let (name, version) = match action {
+        Action::Install { name, version, .. } => (name, version),
+        Action::Upgrade { name, to, .. } | Action::Downgrade { name, to, .. } => (name, to),
+        // `classify` returns `Intent::NeedsLiveness` only for the three
+        // variants above. Kept as a `Failed` outcome, not a panic, for the
+        // same reason `stage_and_fetch`'s own version of this arm is: a
+        // future mismatch between the two functions must be a reported
+        // failure, not a crashed run.
+        _ => {
+            return Outcome::Failed {
+                why: format!("{action:?} needs a liveness check but names no version"),
+            }
+        }
+    };
+    match crate::backend::winget::version_liveness(winget, name, version) {
+        Ok(_) => Outcome::ReadyToSet {
+            version: version.clone(),
+        },
+        Err(why) => Outcome::Failed { why },
+    }
 }
 
 /// Whether `bucket`, spelled as a lock's pin has it, names a bucket
@@ -522,9 +628,15 @@ fn stage_and_fetch(
             why: format!("{action:?} was classified as needing an artifact but names none"),
         };
     };
+    // Winget no longer reaches here at all -- `classify` sends it to
+    // `Intent::NeedsLiveness`, because it has no manifest to stage rather than
+    // because dotpkg may not act on it. So this now guards exactly one thing:
+    // a *third* backend, added without a preparation of its own, must be
+    // reported rather than handed to `Scoop::stage`, which would look its name
+    // up in a scoop bucket and fail with a sentence about buckets.
     if backend != SCOOP {
         return Outcome::Failed {
-            why: format!("{backend}: no backend implementation can stage an artifact yet"),
+            why: format!("{backend}: dotpkg has no way to prepare a {backend} package"),
         };
     }
     let Some(pin) = lock.scoop.get(name) else {
@@ -577,16 +689,19 @@ fn stage_and_fetch(
 /// separate count of which of them refuse the whole run, so `unusable` does
 /// not need to repeat that distinction to be useful to a caller that just
 /// wants to report what didn't become a step and why.
-pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
+pub fn plan_to_steps(
+    prep: &Preparation,
+    installed: &[Installed],
+) -> (Vec<Step>, Vec<(Name, String)>) {
     let mut steps = Vec::new();
     let mut unusable = Vec::new();
     for p in &prep.prepared {
         // Branch on the ACTION, never on the outcome: `Outcome::ReadyToRemove`
         // is still attachable to an `Install`, and nothing in the type system
-        // binds the two. Every ready arm also checks `backend`, so a winget
-        // action ready to fetch or remove routes to neither scoop arm and
-        // instead falls to the routing-bug arm below -- Task 13 gives it its
-        // own arms.
+        // binds the two. Every ready arm also checks `backend`, so a ready
+        // outcome paired with the wrong backend routes to no arm at all and
+        // falls to the routing-bug arm below rather than being executed by the
+        // wrong package manager.
         match (&p.action, &p.outcome) {
             (
                 Action::Install {
@@ -623,22 +738,61 @@ pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
             (Action::Prune { backend, name, .. }, Outcome::ReadyToRemove) if backend == SCOOP => {
                 steps.push(Step::Scoop(ScoopStep::Remove { app: name.clone() }))
             }
+            // One `Set` for all three, because a winget version change is one
+            // `install --version` call in either direction -- see
+            // `WingetStep`'s own doc comment for the measurement, and note
+            // that dotpkg does not decide the direction: winget's own refusal
+            // of a downgrade is translated where it is measured, not
+            // pre-judged here.
+            (
+                Action::Install { backend, name, .. }
+                | Action::Upgrade { backend, name, .. }
+                | Action::Downgrade { backend, name, .. },
+                Outcome::ReadyToSet { version },
+            ) if backend == WINGET => steps.push(Step::Winget(WingetStep::Set {
+                id: name.clone(),
+                version: version.clone(),
+                guard: guard_for(name, installed),
+            })),
+            (
+                Action::Prune {
+                    backend,
+                    name,
+                    version,
+                },
+                Outcome::ReadyToRemove,
+            ) if backend == WINGET => steps.push(Step::Winget(WingetStep::Remove {
+                id: name.clone(),
+                version: version.clone(),
+                guard: guard_for(name, installed),
+            })),
             (a, Outcome::Failed { why }) => unusable.push((action_name(a), why.clone())),
             (a, Outcome::NotLocked) => unusable.push((
                 action_name(a),
                 "no lock entry -- run `dotpkg update`".to_string(),
             )),
             (a, Outcome::Skipped { why }) => unusable.push((action_name(a), why.clone())),
-            // A prepared action nobody routed. Reachable today only by a
-            // backend/outcome pairing no real `prepare()` call produces (a
-            // scoop action whose outcome does not match its own kind); once
-            // Task 13's staging layer stops refusing a winget artifact before
-            // it ever reaches `ReadyToFetch`, this is also how a winget
-            // action would land here if this match's own arms above ever
-            // forgot to claim it. Either way, loud beats silently dropped: a
-            // deleted step here is a package the plan promised and the
-            // machine never got, with nothing printed to say so.
-            (a, Outcome::ReadyToFetch { .. }) | (a, Outcome::ReadyToRemove) => unusable.push((
+            // A prepared action nobody routed. Reachable only by a
+            // backend/outcome pairing no real `prepare()` call produces -- an
+            // action whose outcome does not match its own kind, or either
+            // backend's action paired with the other's ready outcome. Loud
+            // beats silently dropped: a deleted step here is a package the
+            // plan promised and the machine never got.
+            //
+            // **This is not "could not be prepared", and `main.rs` does not
+            // count it as such.** A ready outcome does not raise
+            // `failed_count()` or `not_locked_count()`, so `is_ok()` stays
+            // true and the refusal path that prints "N package(s) could not be
+            // prepared" is not even reached by this on its own -- which is
+            // exactly why that sentence counts `failed_count() +
+            // not_locked_count()` and not `unusable.len()`. What makes this
+            // loud instead is `main.rs`'s own invariant check: every ready
+            // outcome must become exactly one step, so `ready_count()`
+            // exceeding `steps + held` is reported there as the routing bug
+            // this arm's text calls it.
+            (a, Outcome::ReadyToFetch { .. })
+            | (a, Outcome::ReadyToRemove)
+            | (a, Outcome::ReadyToSet { .. }) => unusable.push((
                 action_name(a),
                 format!(
                     "{}: prepared, but no executor claimed it -- this is a routing bug, \
@@ -650,6 +804,28 @@ pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
         }
     }
     (steps, unusable)
+}
+
+/// The names a live process might report for a winget package, for
+/// `execute`'s per-step re-sampler (`Step::guard_names`).
+///
+/// Read out of the scan's own `Installed.bins`, which
+/// `backend::winget::rows_to_scan` filled with `guard_names(id, display)` --
+/// the display Name column is only available at scan time, so re-deriving it
+/// here would silently drop the one guess that catches Google Chrome.
+///
+/// Falls back to `guard_names(name, name)` when nothing is installed under
+/// this name, which is every `Install`: there is no `Installed` to read a
+/// display name from, and a package that is not installed cannot be running,
+/// so the fallback's job is only to be defined rather than to be right --
+/// `execute` will sample it, find nothing, and proceed. Matched by `Name`, so
+/// a lock keyed `brave.brave` still finds a scan row spelled `Brave.Brave`.
+fn guard_for(name: &Name, installed: &[Installed]) -> Vec<String> {
+    installed
+        .iter()
+        .find(|i| i.backend == WINGET && &i.name == name)
+        .map(|i| i.bins.clone())
+        .unwrap_or_else(|| crate::backend::winget::guard_names(name.key(), name.key()))
 }
 
 /// Every `Action` variant names a backend and a package; mirrors
@@ -832,6 +1008,81 @@ mod tests {
         }
     }
 
+    /// A `WingetCmd` that answers every `show` with one canned `CmdOut`, and
+    /// records the argv it was asked with.
+    ///
+    /// The whole seam `prepare` now takes, faked: no test may spawn
+    /// `winget.exe`, and none of these has one to spawn anyway.
+    struct FakeWinget {
+        out: std::cell::RefCell<Vec<Result<crate::backend::winget::CmdOut, ()>>>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl FakeWinget {
+        /// `show -v` succeeds: the pinned version is still in the index.
+        fn live(version: &str) -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(vec![Ok(crate::backend::winget::CmdOut {
+                    code: 0,
+                    stdout: format!("Found Brave Browser [Brave.Brave]\r\nVersion: {version}\r\n"),
+                })]),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        /// `show -v` says this exact version has fallen out of the index, and
+        /// the follow-up `--versions` call cannot be answered either.
+        fn version_gone() -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(vec![
+                    Ok(crate::backend::winget::CmdOut {
+                        code: crate::backend::winget::NO_VERSION_FOUND,
+                        stdout: "No package found matching input criteria.\r\n".into(),
+                    }),
+                    Ok(crate::backend::winget::CmdOut {
+                        code: 1,
+                        stdout: String::new(),
+                    }),
+                ]),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        /// There is no `winget.exe` on this machine at all.
+        fn absent() -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(vec![Err(())]),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        /// Refuses every call: proof that a code path never asked winget
+        /// anything.
+        fn never_called() -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(Vec::new()),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl crate::backend::winget::WingetCmd for FakeWinget {
+        fn run(
+            &self,
+            args: &[&str],
+        ) -> Result<crate::backend::winget::CmdOut, crate::backend::winget::CmdError> {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            let mut out = self.out.borrow_mut();
+            assert!(
+                !out.is_empty(),
+                "winget was asked {args:?} and this fake has no answer left for it"
+            );
+            match out.remove(0) {
+                Ok(o) => Ok(o),
+                Err(()) => Err(crate::backend::winget::CmdError::NotFound),
+            }
+        }
+    }
+
     #[test]
     fn a_prune_needs_nothing_fetched() {
         assert!(matches!(
@@ -867,41 +1118,72 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_only_winget_package_does_not_fail_a_scoop_run() {
-        // Failing the run because dotpkg cannot act on winget yet would make
-        // apply unusable for anyone whose pkg.toml has a [winget] section,
-        // and the plan already prints a `!` line for it every single run.
-        assert!(matches!(
-            classify(&Action::Skip {
+    fn a_winget_version_change_needs_a_liveness_check_not_an_artifact() {
+        // The one place the two backends' preparations part company, and the
+        // reason it is a `classify` decision rather than a `stage_and_fetch`
+        // one: winget has no local manifest, so asking `Scoop::stage` for one
+        // is not "not implemented yet", it is meaningless. Before Task 13 this
+        // never came up -- a winget difference was a `Skip`.
+        for a in [
+            Action::Install {
                 backend: WINGET.into(),
                 name: Name::new("Brave.Brave"),
-                reason: SkipReason::ReportedOnly(Divergence::Change {
-                    from: "151.1.93.132".into(),
-                    to: "151.1.93.134".into(),
-                }),
+                version: "151.1.93.134".into(),
+                arch: None,
+            },
+            Action::Upgrade {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                from: "151.1.93.132".into(),
+                to: "151.1.93.134".into(),
+                arch: None,
+            },
+            Action::Downgrade {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                from: "151.1.93.134".into(),
+                to: "151.1.93.132".into(),
+                arch: None,
+            },
+        ] {
+            assert!(matches!(classify(&a), Intent::NeedsLiveness), "{a:?}");
+        }
+        // A winget prune is still ready by definition, like scoop's: there is
+        // nothing to check the liveness of, because nothing is being fetched
+        // OR installed.
+        assert!(matches!(
+            classify(&Action::Prune {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                version: "151.1.93.134".into(),
             }),
-            Intent::Skip(_)
+            Intent::NoArtifactNeeded
         ));
     }
 
     #[test]
-    fn a_declared_unlocked_winget_package_is_skip_not_notlocked_so_it_cannot_fail_the_run() {
-        // The regression this task's own review caught: `SkipReason::
-        // ReportedOnly(Divergence::NotLocked)` must classify to
-        // `Intent::Skip`, the same as every other ReportedOnly shape --
-        // NOT to `Intent::NotLocked`, which is what `SkipReason::NotLocked`
-        // itself gets a few lines above in this same match, and which fails
-        // the whole run. Getting this one wrong is exactly how a declared,
-        // unlocked winget package made `apply` refuse the entire plan --
-        // scoop actions included -- with "N package(s) could not be
-        // prepared, so nothing has been changed."
+    fn a_declared_unlocked_winget_package_now_fails_the_run_exactly_as_a_scoop_one_does() {
+        // **This reverses a test, on purpose.** Until Task 13 a declared,
+        // unlocked winget package was `SkipReason::ReportedOnly(Divergence::
+        // NotLocked)` and classified to `Intent::Skip`, deliberately: `apply`
+        // could not have acted on it even *with* a pin, so failing the whole
+        // run -- every unrelated scoop action included -- over a lock entry
+        // that did not exist helped nobody.
+        //
+        // That reasoning was entirely about winget not having an executor.
+        // It has one now, so the scoop rule applies unchanged: resolving a
+        // version is `update`'s job and not `apply`'s, `dotpkg update` really
+        // does resolve winget (Task 15), and a run that silently installed
+        // nothing for a package the user declared would be the "degrade
+        // silently" failure the spec forbids. The planner emits plain
+        // `SkipReason::NotLocked` for it now, and this is what that becomes.
         assert!(matches!(
             classify(&Action::Skip {
                 backend: WINGET.into(),
                 name: Name::new("Git.Git"),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                reason: SkipReason::NotLocked,
             }),
-            Intent::Skip(_)
+            Intent::NotLocked
         ));
     }
 
@@ -1130,7 +1412,15 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.failed_count(), 1);
         assert_eq!(prep.ready_count(), 1, "the prune must still go through");
@@ -1210,7 +1500,15 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.failed_count(), 1);
         assert_eq!(prep.ready_count(), 1, "the prune must still go through");
         assert!(!prep.is_ok());
@@ -1261,7 +1559,15 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
                 "expected Failed -- there is no real bucket on disk -- got {:?}",
@@ -1308,12 +1614,15 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refuses_to_stage_a_non_scoop_backend_defensively() {
-        // The planner never actually produces this today -- winget's view has
-        // `Capability::ReportsOnly`, so a version difference always comes
-        // through as Skip{ReportedOnly(..)}, never an Install -- but
-        // stage_and_fetch must not guess if that ever changes without
-        // prepare() being updated in lockstep.
+    fn prepare_refuses_to_stage_a_backend_it_has_no_preparation_for() {
+        // This test used `WINGET` as its unpreparable backend until Task 13,
+        // when winget got a preparation of its own (`Intent::NeedsLiveness`)
+        // and stopped being one. The guard it pins is unchanged and still
+        // needed, so the backend is now a third one that does not exist: a
+        // backend added to `Action` without a `classify` branch must be
+        // reported per package, not handed to `Scoop::stage`, which would look
+        // its name up in a scoop bucket and fail with a sentence about
+        // buckets.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -1322,21 +1631,36 @@ mod tests {
 
         let plan = Plan {
             actions: vec![Action::Install {
-                backend: WINGET.into(),
-                name: Name::new("Git.Git"),
+                backend: "chocolatey".into(),
+                name: Name::new("git"),
                 version: "2.55.0".into(),
                 arch: None,
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            // And it must not reach for winget either: an unknown backend is
+            // not winget's problem to answer for.
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
                 "expected a Failed outcome, got {:?}",
                 prep.prepared[0].outcome
             );
         };
-        assert!(why.contains("winget"), "name the backend: {why}");
+        assert!(why.contains("chocolatey"), "name the backend: {why}");
+        assert!(
+            !why.contains("bucket"),
+            "the diagnosis must be the missing preparation, not a scoop \
+             bucket lookup it should never have attempted: {why}"
+        );
         assert!(!prep.is_ok());
     }
 
@@ -1395,7 +1719,15 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.prepared.len(), 1);
         let Outcome::Failed { why } = &prep.prepared[0].outcome else {
             panic!(
@@ -1445,7 +1777,15 @@ mod tests {
             }],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.prepared[0].outcome, Outcome::ReadyToRemove);
         assert!(prep.is_ok());
     }
@@ -1472,7 +1812,15 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.skipped_count(), 1);
         assert_eq!(prep.not_locked_count(), 1);
         assert!(!prep.is_ok(), "a not-locked package must fail the run");
@@ -1484,113 +1832,221 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_unlocked_winget_package_does_not_fail_the_whole_preparation() {
-        // The end-to-end proof of the Critical fix, one level below the full
-        // `apply` CLI: before it, this exact plan -- a declared winget
-        // package with no lock entry, nothing else -- produced `Outcome::
-        // NotLocked`, `not_locked_count() == 1`, and `is_ok() == false`,
-        // which is what made `main.rs` print "N package(s) could not be
-        // prepared, so nothing has been changed" and exit 2 for a plan that
-        // has no scoop action in it at all, let alone a failing one.
+    fn a_declared_unlocked_winget_package_now_fails_the_whole_preparation_like_a_scoop_one() {
+        // **This reverses a test, on purpose**, and its old name said so:
+        // `a_declared_unlocked_winget_package_does_not_fail_the_whole_
+        // preparation`. That was correct while winget only reported -- `apply`
+        // could not have installed the package even with a pin, so refusing
+        // the run over a lock entry that did not exist punished every
+        // unrelated scoop action for nothing. Winget has an executor now, so
+        // the reason is gone and the scoop rule applies: `apply` may not
+        // resolve a version itself, `dotpkg update` can (Task 15 taught it
+        // winget), and the run must say so rather than quietly installing
+        // nothing.
+        //
+        // The scoop half stays as the symmetry check it always was -- except
+        // that it now asserts the two backends AGREE, where before it asserted
+        // they differed.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
         let lock = Lock::default();
         let declared = Config::default();
-        let plan = Plan {
-            actions: vec![Action::Skip {
-                backend: WINGET.into(),
-                name: Name::new("Git.Git"),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
-            }],
-        };
-
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
-        assert_eq!(
-            prep.not_locked_count(),
-            0,
-            "this must NOT be counted as a not-locked failure"
-        );
-        assert!(
-            prep.is_ok(),
-            "a backend that cannot act does not fail the run just because \
-             it also has no lock entry"
-        );
-        assert_eq!(prep.skipped_count(), 1);
-        let Outcome::Skipped { why } = &prep.prepared[0].outcome else {
-            panic!(
-                "expected Outcome::Skipped, got {:?} -- Outcome::NotLocked here is the \
-                 regression",
+        for backend in [WINGET, SCOOP] {
+            let plan = Plan {
+                actions: vec![Action::Skip {
+                    backend: backend.into(),
+                    name: Name::new("Git.Git"),
+                    reason: SkipReason::NotLocked,
+                }],
+            };
+            let prep = prepare(
+                &plan,
+                &lock,
+                &scoop,
+                &scoop,
+                // Nothing is asked of winget: a package with no pin has no
+                // version whose liveness could be checked.
+                &FakeWinget::never_called(),
+                stage_dir.path(),
+                &declared,
+            );
+            assert_eq!(prep.not_locked_count(), 1, "{backend}");
+            assert!(!prep.is_ok(), "{backend}: this must fail the run");
+            assert_eq!(prep.skipped_count(), 0, "{backend}: not a benign skip");
+            assert!(
+                matches!(prep.prepared[0].outcome, Outcome::NotLocked),
+                "{backend}: got {:?}",
                 prep.prepared[0].outcome
             );
-        };
-        assert!(why.contains("not in pkg.lock"), "got {why}");
-        // `dotpkg update` now does create a winget lock entry (Task 15,
-        // `update::run` resolving winget too) -- the reverse of what this
-        // assertion checked before that landed. Paired with the negative
-        // assertion below: resolving is no longer impossible, only
-        // installing still is, so the text must name the fix without
-        // reintroducing a "cannot resolve" claim.
-        assert!(
-            why.contains("dotpkg update"),
-            "dotpkg update can create a winget lock entry now, so the fix \
-             must be named: {why}"
-        );
-        assert!(
-            !why.contains("cannot resolve"),
-            "installing is still impossible, but resolving is not -- the \
-             text must not claim otherwise: {why}"
-        );
+        }
+    }
 
-        // The positive control: without it, a `prepare()` that always
-        // reported `is_ok()` regardless of input would pass the assertion
-        // above too.
-        let unlocked_scoop_plan = Plan {
-            actions: vec![Action::Skip {
-                backend: SCOOP.into(),
-                name: Name::new("zellij"),
-                reason: SkipReason::NotLocked,
+    #[test]
+    fn a_locked_winget_install_becomes_ready_to_set_and_asks_winget_for_exactly_one_liveness_check()
+    {
+        // The whole new preparation path, end to end at the `prepare()` level:
+        // no manifest is staged (winget has none), the pinned version is
+        // confirmed live, and the outcome carries that version forward so
+        // `plan_to_steps` does not have to re-derive it.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                version: "151.1.93.134".into(),
+                arch: None,
             }],
         };
-        let unlocked_scoop_prep = prepare(
-            &unlocked_scoop_plan,
-            &lock,
+        let winget = FakeWinget::live("151.1.93.134");
+        let prep = prepare(
+            &plan,
+            &Lock::default(),
             &scoop,
             &scoop,
+            &winget,
             stage_dir.path(),
-            &declared,
+            &Config::default(),
         );
-        assert!(
-            !unlocked_scoop_prep.is_ok(),
-            "a scoop package really is not-locked-and-fatal in the same shape -- \
-             the fix must not have widened NotLocked's meaning generally, only \
-             narrowed it for a ReportsOnly backend"
+        assert_eq!(
+            prep.prepared[0].outcome,
+            Outcome::ReadyToSet {
+                version: "151.1.93.134".into()
+            }
+        );
+        assert_eq!(prep.ready_count(), 1, "ReadyToSet is a ready shape");
+        assert!(prep.is_ok());
+        // The argv, pinned: `--exact` is deliberately absent (see
+        // `version_liveness`), and the version asked about is the one the PLAN
+        // resolved -- the thing the user was shown -- not a second read of the
+        // lock, which is empty here precisely so a lock read could not pass.
+        let calls = winget.calls.borrow();
+        assert_eq!(
+            *calls,
+            vec![vec![
+                "show".to_string(),
+                "--id".into(),
+                "Brave.Brave".into(),
+                "-v".into(),
+                "151.1.93.134".into(),
+                "--disable-interactivity".into(),
+            ]],
+            "exactly one `show`, with this argv"
         );
     }
 
     #[test]
-    fn is_outstanding_floors_running_opaque_reported_only_and_unscannable_but_not_not_locked() {
+    fn a_winget_pin_that_fell_out_of_the_index_is_a_failed_preparation_not_a_ready_one() {
+        // The negative control for the test above: without it, a
+        // `check_pin_is_live` that ignored winget's answer entirely would pass
+        // it. A pin winget can no longer serve is exactly the case `--prepare`
+        // exists to find before anything is installed.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Upgrade {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                from: "151.1.93.132".into(),
+                to: "151.1.93.134".into(),
+                arch: None,
+            }],
+        };
+        let prep = prepare(
+            &plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            &FakeWinget::version_gone(),
+            stage_dir.path(),
+            &Config::default(),
+        );
+        let Outcome::Failed { why } = &prep.prepared[0].outcome else {
+            panic!("expected Failed, got {:?}", prep.prepared[0].outcome);
+        };
+        assert!(
+            why.contains("151.1.93.134") && why.contains("no longer in the winget index"),
+            "name the version that is gone, not just that something failed: {why}"
+        );
+        assert!(!prep.is_ok(), "the run must refuse by default");
+        assert_eq!(prep.ready_count(), 0);
+    }
+
+    #[test]
+    fn a_machine_with_no_winget_exe_fails_preparation_instead_of_installing_into_thin_air() {
+        // The one hole the capability flip could have opened, closed here.
+        // `Winget::scan` answers `CmdError::NotFound` with an empty `Scan`
+        // plus a warning, because a machine with no winget is legitimate --
+        // which means "winget is not installed" and "winget found nothing" are
+        // spelled the same way in `installed`, so a declared AND LOCKED winget
+        // package on such a machine plans as an `Install`. While winget only
+        // reported, that `Install` was a report line; now it would be a real
+        // `winget install`.
+        //
+        // It never gets there: preparation asks `winget show` first, so the
+        // missing binary is found at prepare time, reported per package, and
+        // the package produces no step at all.
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Install {
+                backend: WINGET.into(),
+                name: Name::new("BurntSushi.ripgrep.MSVC"),
+                version: "15.2.0".into(),
+                arch: None,
+            }],
+        };
+        let prep = prepare(
+            &plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            &FakeWinget::absent(),
+            stage_dir.path(),
+            &Config::default(),
+        );
+        let Outcome::Failed { why } = &prep.prepared[0].outcome else {
+            panic!(
+                "an absent winget.exe must not be ready: {:?}",
+                prep.prepared[0].outcome
+            );
+        };
+        assert!(
+            why.contains("not on PATH"),
+            "say what is actually wrong with the machine: {why}"
+        );
+        assert!(
+            !prep.is_ok(),
+            "by default the whole run refuses before execute is reached"
+        );
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
+        assert!(
+            steps.is_empty(),
+            "no step may be built against a binary that does not exist: {steps:?}"
+        );
+        assert_eq!(unusable.len(), 1, "and it is reported, not dropped");
+    }
+
+    #[test]
+    fn is_outstanding_floors_running_and_opaque_and_unscannable_but_not_not_locked() {
         // `is_outstanding` is private, so this calls it directly rather than
         // routing through `prepare()` -- deliberately, for `NotLocked`: that
         // is the one `SkipReason` left in the `false` arm, and it can no
         // longer be exercised through `outstanding_skips()` at all, because
         // `classify` never turns it into `Outcome::Skipped` in the first
         // place (it becomes `Intent::NotLocked` -> `Outcome::NotLocked`,
-        // which fails `is_ok()` on its own). Until Task 14 deleted
-        // `BackendNotImplemented`, that variant played this same "Skipped but
-        // not outstanding" role and could be shown failing to float through
-        // `prepare()`'s real pipeline; nothing has taken its place, so this
-        // is now the only way to pin the `false` arm at all. The `true` arm
-        // is still also proven end-to-end, below, by
-        // `outstanding_skips_finds_running_opaque_reported_only_and_unscannable_skips_together`.
+        // which fails `is_ok()` on its own). Two variants have played the
+        // "Skipped but not outstanding" role and could be shown failing to
+        // float through `prepare()`'s real pipeline -- `BackendNotImplemented`
+        // (deleted by Task 14) and `ReportedOnly` (deleted by Task 13, when
+        // winget got an executor); nothing has taken their place, so this is
+        // now the only way to pin the `false` arm at all.
         assert!(is_outstanding(&SkipReason::Running));
         assert!(is_outstanding(&SkipReason::Opaque));
-        assert!(is_outstanding(&SkipReason::ReportedOnly(
-            Divergence::Change {
-                from: "1".into(),
-                to: "2".into(),
-            }
-        )));
         // Task 6's addition: a scan failure floors the same way, and for the
         // same reason -- outstanding work the user asked for and did not
         // get, that could differ on the next run. Nothing in this suite
@@ -1607,16 +2063,19 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_skips_finds_running_opaque_reported_only_and_unscannable_skips_together() {
-        // The end-to-end proof that all four outstanding `SkipReason`s
-        // really do carry through the whole pipeline -- `prepare()` ->
-        // `classify()` -> `Outcome::Skipped` -> `outstanding_skips()` -- not
-        // just that `is_outstanding` says so in isolation (see the direct
-        // unit test above). `Unscannable` (Task 6) is the fourth: this test
-        // used to prove only three, and its own comment said so, until the
-        // discrepancy became stale prose the moment a fourth `SkipReason`
-        // started floating -- exactly the failure class this project exists
-        // to catch.
+    fn outstanding_skips_finds_running_opaque_and_unscannable_skips_together() {
+        // The end-to-end proof that every outstanding `SkipReason` really does
+        // carry through the whole pipeline -- `prepare()` -> `classify()` ->
+        // `Outcome::Skipped` -> `outstanding_skips()` -- not just that
+        // `is_outstanding` says so in isolation (see the direct unit test
+        // above).
+        //
+        // Three, not four: `ReportedOnly` was the fourth until Task 13 deleted
+        // it along with the rest of winget's report-only path. The count lives
+        // in this comment and in the assertion below rather than only in the
+        // test's name, because a stale count in prose is exactly the failure
+        // class this project exists to catch -- this test's own history has it
+        // twice now, once when `Unscannable` was added and once here.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -1636,25 +2095,25 @@ mod tests {
                 },
                 Action::Skip {
                     backend: WINGET.into(),
-                    name: Name::new("Brave.Brave"),
-                    reason: SkipReason::ReportedOnly(Divergence::Change {
-                        from: "151.1.93.132".into(),
-                        to: "151.1.93.134".into(),
-                    }),
-                },
-                Action::Skip {
-                    backend: WINGET.into(),
                     name: Name::new("Discord.Discord"),
                     reason: SkipReason::Unscannable,
                 },
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(
             prep.skipped_count(),
-            4,
-            "the positive control: all four really are Skipped outcomes"
+            3,
+            "the positive control: all three really are Skipped outcomes"
         );
 
         let outstanding = prep.outstanding_skips();
@@ -1668,19 +2127,13 @@ mod tests {
                         .to_string()
                 ),
                 (
-                    Name::new("Brave.Brave"),
-                    "151.1.93.132 -> 151.1.93.134 -- reported only, dotpkg cannot install \
-                     or remove winget packages yet"
-                        .to_string()
-                ),
-                (
                     Name::new("Discord.Discord"),
                     "this backend could not be scanned -- see the warnings above; nothing \
                      was attempted for it"
                         .to_string()
                 ),
             ],
-            "all four must float -- none of them is permanent and structural"
+            "all three must float -- none of them is permanent and structural"
         );
     }
 
@@ -1878,7 +2331,15 @@ mod tests {
             ],
         };
 
-        let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
+        let prep = prepare(
+            &plan,
+            &lock,
+            &scoop,
+            &scoop,
+            &FakeWinget::never_called(),
+            stage_dir.path(),
+            &declared,
+        );
         assert_eq!(prep.prepared.len(), 2);
         assert_eq!(prep.ready_count(), 0);
         assert_eq!(prep.failed_count(), 0);
@@ -1947,7 +2408,7 @@ mod tests {
             ],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(unusable.is_empty(), "{unusable:?}");
         assert_eq!(
             steps,
@@ -2003,7 +2464,7 @@ mod tests {
             }],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert_eq!(
             unusable,
@@ -2033,7 +2494,7 @@ mod tests {
             }],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert_eq!(
             unusable,
@@ -2048,16 +2509,76 @@ mod tests {
     }
 
     #[test]
-    fn a_winget_prune_produces_no_scoop_step_and_is_reported_as_unrouted() {
-        // `backend == SCOOP` on the Prune arm (apply.rs:623) is a runtime
-        // value check the recent type split does not defend: `Step::Scoop(
-        // ScoopStep::Remove)` compiles perfectly well for a winget
-        // `Action::Prune`, and would reach `run_scoop_step` and invoke
-        // `scoop uninstall` against a winget package if this guard were
-        // ever deleted. Nothing upstream stops that: `classify` maps every
-        // `Prune` to `NoArtifactNeeded` -> `ReadyToRemove` with no backend
-        // check at all -- the only thing making this unreachable in
-        // production today is that winget is `Capability::ReportsOnly`.
+    fn could_not_be_prepared_counts_failures_not_every_package_that_became_no_step() {
+        // The number in "N package(s) could not be prepared" was
+        // `plan_to_steps`'s `unusable.len()`, and this input is where the two
+        // disagree: one package really could not be prepared, and two more
+        // simply have a live process the user can close. `unusable` carries all
+        // three, because none of them became a step; only one of them is what
+        // the sentence is about.
+        //
+        // Both numbers are asserted, so a "fix" that made them equal again by
+        // widening `unpreparable_count` would fail too.
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Install {
+                        backend: SCOOP.into(),
+                        name: Name::new("neovim"),
+                        version: "0.10.1".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::Failed {
+                        why: "download failed: hash mismatch".into(),
+                    },
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("kanata"),
+                        reason: SkipReason::Running,
+                    },
+                    outcome: Outcome::Skipped {
+                        why: "running -- stop it first".into(),
+                    },
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: WINGET.into(),
+                        name: Name::new("Brave.Brave"),
+                        reason: SkipReason::Running,
+                    },
+                    outcome: Outcome::Skipped {
+                        why: "running -- stop it first".into(),
+                    },
+                },
+            ],
+        };
+        let (_, unusable) = plan_to_steps(&prep, &[]);
+        assert_eq!(unusable.len(), 3, "all three became no step: {unusable:?}");
+        assert_eq!(
+            prep.unpreparable_count(),
+            1,
+            "but only one could not be PREPARED"
+        );
+    }
+
+    #[test]
+    fn a_winget_prune_becomes_a_winget_remove_and_never_a_scoop_one() {
+        // **This test's assertion is inverted, and the risk it guards is not.**
+        // It was `a_winget_prune_produces_no_scoop_step_and_is_reported_as_
+        // unrouted`, and while winget had no executor the only safe answer to a
+        // winget `ReadyToRemove` was "no step at all". Winget has one now, so
+        // the right step exists -- but the hazard is exactly the same one, and
+        // now it is reachable in production: `backend == SCOOP` on the scoop
+        // Prune arm is a runtime value check no type defends.
+        // `Step::Scoop(ScoopStep::Remove)` compiles perfectly well for a winget
+        // `Action::Prune` and would reach `run_scoop_step` and invoke `scoop
+        // uninstall` against a winget package if the guard were deleted, and
+        // nothing upstream stops it: `classify` maps every `Prune` to
+        // `NoArtifactNeeded` -> `ReadyToRemove` with no backend check at all.
+        // So the assertion is on the step's exact identity, not merely on its
+        // count.
         let prep = Preparation {
             prepared: vec![Prepared {
                 action: Action::Prune {
@@ -2069,17 +2590,79 @@ mod tests {
             }],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
-        assert!(steps.is_empty(), "{steps:?}");
+        // The guard names come from the scan; here there is no scan row for
+        // this id, which is the fallback `guard_for` documents.
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert_eq!(
-            unusable,
-            vec![(
-                Name::new("Vivaldi.Vivaldi"),
-                "winget: prepared, but no executor claimed it -- this is a routing bug, not a \
-                 package problem"
-                    .to_string()
-            )],
-            "a winget prune must never fall through to a scoop step: {unusable:?}"
+            steps,
+            vec![Step::Winget(WingetStep::Remove {
+                id: Name::new("Vivaldi.Vivaldi"),
+                version: "8.1.4087.62".into(),
+                guard: vec!["vivaldi".to_string(), "vivaldi.vivaldi".to_string()],
+            })],
+            "a winget prune must become winget's own removal, never scoop's"
+        );
+        assert!(unusable.is_empty(), "{unusable:?}");
+    }
+
+    #[test]
+    fn a_winget_step_takes_its_guard_names_from_the_scan_not_from_the_id_alone() {
+        // The whole reason `plan_to_steps` takes `installed` at all. `Google.
+        // Chrome`'s live process is `chrome.exe` and its display Name is
+        // "Google Chrome" -- the display Name exists only in the scan, so
+        // re-deriving guards here from the id would silently drop it, and
+        // `execute`'s per-step re-sampler would stop catching a running Chrome.
+        let mut inst = Installed {
+            backend: WINGET.to_string(),
+            // Deliberately a different spelling from the action's: `guard_for`
+            // matches by `Name`, which folds case, because a lock key and a
+            // scan row are two independently-cased sources for one package.
+            name: Name::new("google.chrome"),
+            version: "141.0.7390.123".to_string(),
+            arch: None,
+            bucket: None,
+            bins: Vec::new(),
+        };
+        inst.bins = crate::backend::winget::guard_names("Google.Chrome", "Google Chrome");
+        assert_eq!(
+            inst.bins,
+            vec!["chrome".to_string(), "google chrome".to_string()],
+            "the fixture itself must carry the measured pair"
+        );
+
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Upgrade {
+                    backend: WINGET.into(),
+                    name: Name::new("Google.Chrome"),
+                    from: "141.0.7390.100".into(),
+                    to: "141.0.7390.123".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToSet {
+                    version: "141.0.7390.123".into(),
+                },
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep, &[inst]);
+        assert_eq!(
+            steps,
+            vec![Step::Winget(WingetStep::Set {
+                id: Name::new("Google.Chrome"),
+                version: "141.0.7390.123".into(),
+                guard: vec!["chrome".to_string(), "google chrome".to_string()],
+            })],
+            "an Upgrade is a `Set`, and its guards come from the scan row"
+        );
+        assert!(unusable.is_empty(), "{unusable:?}");
+        // The negative control for the lookup itself: with no scan row, the
+        // display-name guard is unavailable and cannot be invented.
+        let (fallback, _) = plan_to_steps(&prep, &[]);
+        assert_eq!(
+            fallback[0].guard_names(),
+            ["chrome".to_string(), "google.chrome".to_string()],
+            "the fallback derives from the id alone, and says so"
         );
     }
 
@@ -2117,7 +2700,7 @@ mod tests {
             ],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert_eq!(
             unusable,
@@ -2165,7 +2748,7 @@ mod tests {
             ],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert_eq!(
             unusable,
@@ -2199,7 +2782,7 @@ mod tests {
             }],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert_eq!(
             unusable,
@@ -2225,7 +2808,7 @@ mod tests {
             }],
         };
 
-        let (steps, unusable) = plan_to_steps(&prep);
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
         assert!(steps.is_empty(), "{steps:?}");
         assert!(unusable.is_empty(), "{unusable:?}");
     }

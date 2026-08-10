@@ -1,7 +1,7 @@
 use dotpkg::config;
 use dotpkg::lock;
 use dotpkg::model::{Installed, Name, Running, SCOOP, WINGET};
-use dotpkg::plan::{plan, Action, Divergence, SkipReason};
+use dotpkg::plan::{plan, Action, SkipReason};
 use dotpkg::state::{Ownership, State};
 use std::collections::BTreeSet;
 
@@ -224,18 +224,21 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
 
 #[test]
 fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped() {
-    // Winget has had a real `BackendView` since Task 14, but its capability
-    // is `ReportsOnly` -- a declared package with no lock entry is
-    // `ReportedOnly(Divergence::NotLocked)`, NOT `SkipReason::NotLocked`.
-    // `NotLocked` fails the whole `apply` run (see `Divergence::NotLocked`'s
-    // own doc comment for why that is right for scoop and wrong here); this
-    // task's own review caught that using it for winget too broke `apply`
-    // outright for anyone whose pkg.toml has a `[winget]` section with no
-    // matching lock entries -- which, before `update` resolves winget at
-    // all, is every one of them. Reporting it at all is still the point: the
+    // Reporting it at all is the point, and that has never changed: the
     // spec's example pkg.toml declares `[winget]`, and a user who copies it
     // must not be told `nothing to do`. Silence is the one answer that is
     // indistinguishable from "dotpkg never read your file".
+    //
+    // **The reason has changed twice.** Task 14 gave winget a `BackendView`
+    // whose capability was report-only, and this had to be
+    // `ReportedOnly(Divergence::NotLocked)` rather than plain
+    // `SkipReason::NotLocked` because `NotLocked` fails the whole `apply` run
+    // and `apply` could not have installed the package even with a pin --
+    // refusing every unrelated scoop action over it helped nobody. Task 13
+    // gave winget an executor, which removes that whole argument: `apply` may
+    // still not resolve a version itself, `dotpkg update` can, and the run
+    // must refuse rather than quietly install nothing -- exactly as it does
+    // for scoop.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Git.Git\", \"Brave.Brave\"]\n").unwrap(),
         &lock::Lock::default(),
@@ -251,12 +254,12 @@ fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped()
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                reason: SkipReason::NotLocked,
             },
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Brave.Brave".into(),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                reason: SkipReason::NotLocked,
             },
         ]
     );
@@ -264,7 +267,7 @@ fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped()
     assert_eq!(
         p.change_count(),
         0,
-        "nothing in this plan will be done, so nothing must count as a change"
+        "a skip is never a change, whatever its reason"
     );
 }
 
@@ -292,7 +295,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                reason: SkipReason::NotLocked,
             },
         ]
     );
@@ -300,15 +303,19 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
 }
 
 #[test]
-fn a_declared_locked_winget_package_with_nothing_installed_is_reported_as_a_would_be_install() {
-    // The `None` arm of the same match `a_declared_locked_package_that_is_
-    // absent_is_an_install` exercises for scoop -- but winget's view has
-    // `Capability::ReportsOnly`, so what would have been an Install becomes
-    // a Skip carrying the version it would have installed.
+fn a_declared_locked_uninstalled_winget_package_is_a_real_install_now() {
+    // **The capability flip, at the planner level.** This is the `None` arm of
+    // the same match `a_declared_locked_package_that_is_absent_is_an_install`
+    // exercises for scoop, and until Task 13 it produced
+    // `Skip { ReportedOnly(Divergence::Install { .. }) }` and
+    // `change_count() == 0`, because nothing could install a winget package.
+    // Something can now, so it is an `Action::Install` and it counts.
     let p = plan(
-        &config::parse("[winget]\npackages = [\"Git.Git\"]\n").unwrap(),
-        &lock::parse("[winget.\"Git.Git\"]\nversion = \"2.55.0\"\npin = \"version-only\"\n")
-            .unwrap(),
+        &config::parse("[winget]\npackages = [\"BurntSushi.ripgrep.MSVC\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"BurntSushi.ripgrep.MSVC\"]\nversion = \"15.2.0\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
         &[],
         &[],
         &State::default(),
@@ -317,23 +324,25 @@ fn a_declared_locked_winget_package_with_nothing_installed_is_reported_as_a_woul
     );
     assert_eq!(
         p.actions,
-        vec![Action::Skip {
+        vec![Action::Install {
             backend: WINGET.into(),
-            name: "Git.Git".into(),
-            reason: SkipReason::ReportedOnly(Divergence::Install {
-                version: "2.55.0".into(),
-            }),
+            name: "BurntSushi.ripgrep.MSVC".into(),
+            version: "15.2.0".into(),
+            // winget exposes no architecture: `Installed.arch` is always None
+            // and `[winget.opts]` does not exist.
+            arch: None,
         }]
     );
-    assert_eq!(
-        p.change_count(),
-        0,
-        "an install dotpkg cannot perform yet must not count as a change"
-    );
+    assert_eq!(p.change_count(), 1, "it counts as a change now");
 }
 
 #[test]
-fn a_winget_package_that_differs_from_the_lock_is_reported_with_its_diff() {
+fn a_winget_package_that_differs_from_the_lock_is_a_real_upgrade_with_both_versions() {
+    // Was `..._is_reported_with_its_diff`, producing
+    // `Skip { ReportedOnly(Divergence::Change { from, to }) }`. `Divergence`
+    // carried both versions so `status` could show the diff of a change that
+    // would never happen; an `Upgrade` carries both because it is about to
+    // perform it. Same two versions, and now they mean something.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(
@@ -348,44 +357,57 @@ fn a_winget_package_that_differs_from_the_lock_is_reported_with_its_diff() {
     );
     assert_eq!(
         p.actions,
-        vec![Action::Skip {
+        vec![Action::Upgrade {
             backend: WINGET.into(),
             name: "Brave.Brave".into(),
-            reason: SkipReason::ReportedOnly(Divergence::Change {
-                from: "151.1.93.132".into(),
-                to: "151.1.93.134".into(),
-            }),
+            from: "151.1.93.132".into(),
+            to: "151.1.93.134".into(),
+            arch: None,
         }]
     );
+    assert_eq!(p.change_count(), 1);
+    assert_eq!(p.skip_count(), 0);
 }
 
 #[test]
-fn a_reported_only_package_is_not_counted_as_a_change() {
-    // change_count() prints "N changes, M skipped. Continue?" -- the one line
-    // the user reads before saying yes. Counting a change that will never
-    // happen puts a false number in it, which is the defect class Phase 3
-    // fixed twice in render.rs.
+fn a_winget_downgrade_is_a_downgrade_not_an_upgrade() {
+    // The other side of `is_older`, for winget. `Divergence::Change` had one
+    // shape for both directions -- a backend that could not act on either had
+    // no reason to carry a distinction that exists purely to pick an arrow.
+    // Winget acts now, so the distinction is back, and `apply` really does
+    // need it: `render` prints "(downgrade, from lock)" and the user is
+    // entitled to see which way the version is moving before saying yes.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(
-            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.132\"\npin = \"version-only\"\n",
         )
         .unwrap(),
-        &[installed_winget("Brave.Brave", "151.1.93.132")],
+        &[installed_winget("Brave.Brave", "151.1.93.134")],
         &[],
         &State::default(),
         &Running::default(),
         &[],
     );
-    assert_eq!(p.change_count(), 0, "nothing in this plan will be done");
-    assert_eq!(p.skip_count(), 1);
+    assert_eq!(
+        p.actions,
+        vec![Action::Downgrade {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            from: "151.1.93.134".into(),
+            to: "151.1.93.132".into(),
+            arch: None,
+        }]
+    );
 }
 
 #[test]
 fn a_winget_package_already_at_the_locked_version_produces_no_action_either() {
-    // The positive control for the two tests above: a `ReportsOnly` backend
-    // must still recognise convergence and say nothing, exactly like scoop's
-    // `a_package_already_at_the_locked_version_produces_no_action`.
+    // The positive control for the tests above: winget must still recognise
+    // convergence and say nothing, exactly like scoop's
+    // `a_package_already_at_the_locked_version_produces_no_action`. Without
+    // it, a planner that emitted an `Upgrade` for every declared winget
+    // package would pass them all.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(
@@ -484,20 +506,20 @@ fn an_idle_winget_package_still_reports_its_version_difference() {
         p.actions[0]
     );
     assert!(
-        matches!(
-            &p.actions[0],
-            Action::Skip {
-                reason: SkipReason::ReportedOnly(Divergence::Change { .. }),
-                ..
-            }
-        ),
-        "an idle winget package must report its version difference: {:?}",
+        matches!(&p.actions[0], Action::Upgrade { .. }),
+        "an idle winget package must act on its version difference: {:?}",
         p.actions[0]
     );
 }
 
 #[test]
-fn an_owned_undeclared_winget_package_is_reported_not_pruned() {
+fn an_owned_undeclared_winget_package_is_a_real_prune_now() {
+    // Was `an_owned_undeclared_winget_package_is_reported_not_pruned`, whose
+    // assertions were the exact negation of these: no `Action::Prune` may
+    // exist, and a `ReportedOnly(Divergence::Prune)` skip must. That was the
+    // truth for as long as nothing could uninstall a winget package. Something
+    // can now, and dotpkg's own rule for a package it OWNS and the user has
+    // stopped declaring is the same for both backends: release it.
     let mut state = State::default();
     state.set(WINGET, &Name::new("OpenAI.Codex"), Ownership::Adopted);
     let p = plan(
@@ -510,17 +532,28 @@ fn an_owned_undeclared_winget_package_is_reported_not_pruned() {
         &[],
     );
     assert!(
-        !p.actions.iter().any(|a| matches!(a, Action::Prune { .. })),
-        "dotpkg cannot uninstall a winget package in this phase: {:?}",
+        p.actions.iter().any(|a| matches!(
+            a,
+            Action::Prune {
+                backend,
+                version,
+                ..
+            } if backend == WINGET && version == "0.145.0"
+        )),
+        "an owned, undeclared winget package is dotpkg's to release: {:?}",
         p.actions
     );
-    assert!(p.actions.iter().any(|a| matches!(
-        a,
-        Action::Skip {
-            reason: SkipReason::ReportedOnly(Divergence::Prune { .. }),
-            ..
-        }
-    )));
+    // No winget skip at all. Scoped to winget, not `skip_count() == 0`: the
+    // `[scoop] packages = ["fzf"]` in this fixture has no lock entry and is
+    // legitimately its own `NotLocked` skip, which has nothing to do with what
+    // this test is about.
+    assert!(
+        !p.actions
+            .iter()
+            .any(|a| matches!(a, Action::Skip { backend, .. } if backend == WINGET)),
+        "and it is no longer merely reported: {:?}",
+        p.actions
+    );
 }
 
 #[test]
@@ -1251,11 +1284,11 @@ fn a_running_owned_undeclared_scoop_package_still_prints_before_the_winget_view(
             Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                // No lock at all, and winget's capability is `ReportsOnly`,
-                // so this is `ReportedOnly(NotLocked)`, not the fatal
+                // No lock at all. This was `ReportedOnly(NotLocked)` while
+                // winget could not act -- deliberately NOT the fatal
                 // `SkipReason::NotLocked` a scoop package in the same shape
-                // would get.
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                // got. Both backends act now, so both get the same reason.
+                reason: SkipReason::NotLocked,
             },
         ],
         "got {:?}",
@@ -1297,10 +1330,12 @@ fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
 #[test]
 fn a_declared_locked_winget_package_is_not_installed_again_when_the_scan_failed() {
     // The over-acting direction `scan_or_warn`'s doc comment never covered.
-    // An empty scan turns every declared+locked winget package into
-    // Divergence::Install -- a divergence that does not exist. Harmless as a
-    // report line; with Capability::Acts it is dotpkg installing a package
-    // that is already there.
+    // An empty scan would turn every declared+locked winget package into an
+    // `Install` for a package that is already there. It was written one task
+    // ahead of the danger: it was harmless while a winget `Install` was only a
+    // report line, and Task 13's `Capability::Acts` is exactly the day it
+    // stopped being harmless. `SkipReason::Unscannable` is what keeps it safe,
+    // and this is the test that says so.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(

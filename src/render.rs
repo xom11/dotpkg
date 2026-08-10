@@ -2,12 +2,6 @@ use crate::apply::{Outcome, Preparation, Prepared};
 use crate::execute::{Execution, ItemResult};
 use crate::model::Name;
 use crate::plan::{Action, Plan, SkipReason};
-// Only this file's own tests name `Divergence` directly (`render`'s match
-// arm binds `divergence` and calls `.describe()` without needing the type in
-// scope), so the import is `cfg(test)`-gated -- otherwise it is unused in a
-// normal build and the crate would no longer be warning-free.
-#[cfg(test)]
-use crate::plan::Divergence;
 
 /// The plan is the product here: `status` is this and nothing else, and in
 /// Phase 2 `apply` prints exactly this before asking for confirmation.
@@ -67,7 +61,6 @@ pub fn render(plan: &Plan) -> String {
                 let why = match reason {
                     SkipReason::Running => "running -- stop it first".to_string(),
                     SkipReason::NotLocked => "no lock entry -- run `dotpkg update`".to_string(),
-                    SkipReason::ReportedOnly(divergence) => divergence.describe(),
                     SkipReason::Opaque => {
                         "installed, but its state could not be read -- see the warnings above"
                             .to_string()
@@ -219,7 +212,13 @@ pub fn render_execution(ex: &Execution) -> String {
 fn prepared_line(item: &Prepared) -> String {
     let (backend, name) = action_backend_name(&item.action);
     let (marker, rest) = match &item.outcome {
-        Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove => {
+        // Every ready shape prints the same `ready` marker and the same
+        // right-hand side, because the right-hand side describes the ACTION,
+        // not how it was prepared: a winget `ReadyToSet` renders "1.2.3
+        // (install)" or "1.2.3 -> 1.2.4 (upgrade)" exactly as a scoop
+        // `ReadyToFetch` does. What was fetched, staged or merely confirmed is
+        // dotpkg's business, not something a user reads a table to learn.
+        Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove | Outcome::ReadyToSet { .. } => {
             ("ready", ready_rest(&item.action))
         }
         Outcome::Failed { why } => ("FAILED", why.clone()),
@@ -270,10 +269,10 @@ fn arch_suffix(arch: &Option<String>) -> String {
 }
 
 /// The right-hand side of a `ready` line. `classify` only ever produces a
-/// ready outcome for these four action shapes (`ReadyToFetch` for the three
-/// `NeedsArtifact` kinds, `ReadyToRemove` for `Prune`), so the fallback below
-/// is unreachable in practice; it stays total rather than panicking if that
-/// ever changes.
+/// ready outcome for these four action shapes (`ReadyToFetch` for a scoop
+/// install/upgrade/downgrade, `ReadyToSet` for a winget one, `ReadyToRemove`
+/// for either backend's `Prune`), so the fallback below is unreachable in
+/// practice; it stays total rather than panicking if that ever changes.
 fn ready_rest(action: &Action) -> String {
     match action {
         Action::Install { version, arch, .. } => {
@@ -609,30 +608,29 @@ mod tests {
 
     #[test]
     fn a_name_at_least_14_characters_long_still_gets_a_separator_before_its_rest() {
-        // The dogfood-found shape, reproduced directly (the same
-        // `Divergence::Change` a real `Brave.Brave` skip renders elsewhere in
-        // this file, with a name long enough to exhaust `{name:<14}`'s
-        // padding entirely -- nothing left to pad with, so the literal space
-        // after it is the only thing that still separates it from what
-        // follows). Without that literal space, this renders as
-        // "...JanDeDobbeleer.OhMyPosh29.36.0.0 ->..." -- exactly what a14's
-        // real `apply --prepare` output showed.
+        // The dogfood-found shape, reproduced directly: a real winget id long
+        // enough to exhaust `{name:<14}`'s padding entirely -- nothing left to
+        // pad with, so the literal space after it is the only thing that still
+        // separates it from what follows. Without that literal space, this
+        // renders as "...JanDeDobbeleer.OhMyPosh29.36.0.0 ->..." -- exactly
+        // what a14's real `apply --prepare` output showed.
+        //
+        // It was a report-only skip when the dogfood found it, because that was
+        // all a winget difference could be; Task 13 made the same difference a
+        // real `Upgrade` prepared to `ReadyToSet`. The name and the column are
+        // what this test is about, so it follows that shape rather than keeping
+        // a deleted one alive.
         let p = Preparation {
             prepared: vec![Prepared {
-                action: Action::Skip {
+                action: Action::Upgrade {
                     backend: WINGET.into(),
                     name: Name::new("JanDeDobbeleer.OhMyPosh"),
-                    reason: SkipReason::ReportedOnly(Divergence::Change {
-                        from: "29.36.0.0".into(),
-                        to: "30.6.3".into(),
-                    }),
+                    from: "29.36.0.0".into(),
+                    to: "30.6.3".into(),
+                    arch: None,
                 },
-                outcome: Outcome::Skipped {
-                    why: Divergence::Change {
-                        from: "29.36.0.0".into(),
-                        to: "30.6.3".into(),
-                    }
-                    .describe(),
+                outcome: Outcome::ReadyToSet {
+                    version: "30.6.3".into(),
                 },
             }],
         };
@@ -835,12 +833,14 @@ mod tests {
                     name: "kanata".into(),
                     reason: SkipReason::Running,
                 },
+                // A winget skip, to prove the `!` marker is not scoop-only.
+                // It was a report-only skip until Task 13; a declared winget
+                // package with no lock entry is the shape that still produces
+                // one, and it is now spelled exactly as scoop's is.
                 Action::Skip {
                     backend: WINGET.into(),
                     name: "Git.Git".into(),
-                    reason: SkipReason::ReportedOnly(Divergence::Install {
-                        version: "2.55.0".into(),
-                    }),
+                    reason: SkipReason::NotLocked,
                 },
                 Action::Unmanaged {
                     backend: SCOOP.into(),
@@ -990,86 +990,89 @@ mod tests {
     }
 
     #[test]
-    fn a_winget_package_that_differs_from_the_lock_prints_both_versions_and_says_reported_only() {
-        // The user must be able to tell "dotpkg saw this and cannot act yet"
-        // apart from "dotpkg never saw it" -- and must be able to see the
-        // diff itself (both versions), not just the fact that one exists:
-        // hiding that Brave is `151.1 -> 151.2` throws away the whole product
-        // of `status`.
+    fn a_winget_package_that_differs_from_the_lock_is_a_real_upgrade_and_never_says_reported_only()
+    {
+        // **This reverses a test**, name and all: it was
+        // `..._prints_both_versions_and_says_reported_only`, and it asserted
+        // `out.contains("reported only")` on exactly this input. That sentence
+        // was true for as long as winget had no executor and became false the
+        // moment it got one, so the assertion is inverted rather than deleted
+        // -- the string must now be absent from the very plan that used to
+        // require it, which is a stronger guard than the separate
+        // scoop-only counterweight this replaces
+        // (`a_plan_with_no_winget_divergence_never_prints_reported_only`,
+        // deleted: it asserted the absence of a string on a plan that never
+        // had a reason to contain it, and no code path can produce that string
+        // for any plan now).
+        //
+        // What has NOT changed is the reason the diff is rendered at all: both
+        // versions must be visible, not just the fact that one exists. Hiding
+        // that Brave is `151.1 -> 151.2` throws away the whole product of
+        // `status`.
         let plan = Plan {
-            actions: vec![Action::Skip {
+            actions: vec![Action::Upgrade {
                 backend: WINGET.into(),
                 name: "Brave.Brave".into(),
-                reason: SkipReason::ReportedOnly(Divergence::Change {
-                    from: "151.1.93.132".into(),
-                    to: "151.1.93.134".into(),
-                }),
-            }],
-        };
-        let out = render(&plan);
-        assert!(out.contains("Brave.Brave"), "got: {out}");
-        assert!(
-            out.contains("151.1.93.132") && out.contains("151.1.93.134"),
-            "both versions must be visible, not just \"differs\": {out}"
-        );
-        assert!(out.contains("reported only"), "got: {out}");
-    }
-
-    #[test]
-    fn a_plan_with_no_winget_divergence_never_prints_reported_only() {
-        // The counterweight to the assertion above: without it, an
-        // unconditional "reported only" line would satisfy it on every plan,
-        // winget or not.
-        let plan = Plan {
-            actions: vec![Action::Install {
-                backend: SCOOP.into(),
-                name: "ripgrep".into(),
-                version: "14.1.1".into(),
+                from: "151.1.93.132".into(),
+                to: "151.1.93.134".into(),
                 arch: None,
             }],
         };
         let out = render(&plan);
+        assert!(out.contains("^ winget Brave.Brave"), "got: {out}");
+        assert!(
+            out.contains("151.1.93.132") && out.contains("151.1.93.134"),
+            "both versions must be visible, not just \"differs\": {out}"
+        );
         assert!(
             !out.contains("reported only"),
-            "no winget divergence in this plan: {out}"
+            "dotpkg installs winget packages now: {out}"
         );
+        assert!(
+            !out.contains("cannot install"),
+            "the four sentences that said this were deleted with \
+             `Divergence`; none may come back through any other path: {out}"
+        );
+        assert_eq!(plan.change_count(), 1, "and it counts as a change");
     }
 
     #[test]
-    fn a_declared_unlocked_winget_package_is_now_told_to_run_dotpkg_update() {
-        // Task 15 made `update::run` resolve winget packages too
-        // (`src/update.rs:403-459`; `fold_backend` writes the result into
-        // `pkg.lock`'s `winget` table at `:477-487`) -- the exact reverse of
-        // what this test used to assert
-        // (`a_declared_unlocked_winget_package_is_not_told_to_run_update`,
-        // which checked `!out.contains("dotpkg update")`). Staying silent
-        // about the one command that now fixes this state would itself be
-        // the false line, so the old test is replaced rather than kept
-        // alongside a contradicting one.
+    fn a_declared_unlocked_winget_package_is_told_to_run_dotpkg_update() {
+        // Two reversals, in order. Task 15 made `update::run` resolve winget
+        // packages too (`src/update.rs:403-459`), which reversed
+        // `a_declared_unlocked_winget_package_is_not_told_to_run_update` into
+        // this test. Task 13 then changed what shape carries the message:
+        // `SkipReason::ReportedOnly(Divergence::NotLocked)` existed only
+        // because refusing the whole run over a missing pin helped nobody for
+        // a backend that could not act anyway. Winget acts now, so the planner
+        // emits plain `SkipReason::NotLocked` and this renders exactly as
+        // scoop's does.
+        //
+        // Still its own test rather than folded into
+        // `a_skip_says_what_to_do_about_it`: the advice must reach a WINGET
+        // package, and for two phases it deliberately did not.
         let plan = Plan {
             actions: vec![Action::Skip {
                 backend: WINGET.into(),
                 name: "Git.Git".into(),
-                reason: SkipReason::ReportedOnly(Divergence::NotLocked),
+                reason: SkipReason::NotLocked,
             }],
         };
         let out = render(&plan);
-        assert!(out.contains("Git.Git"), "got: {out}");
-        assert!(out.contains("not in pkg.lock"), "got: {out}");
+        assert!(out.contains("! winget Git.Git"), "got: {out}");
         assert!(
             out.contains("dotpkg update"),
-            "update can resolve a winget package's version now, so the \
+            "update can resolve a winget package's version, so the \
              fix must be named: {out}"
         );
-        // Paired with the assertion above rather than left standing alone:
-        // resolving is no longer impossible, only installing still is. A
-        // regression that kept "run `dotpkg update`" but also brought back
-        // a "cannot resolve" claim would still print a false line, and
-        // would slip past the assertion above by itself.
+        // Paired with the assertion above rather than left standing alone: a
+        // regression that kept "run `dotpkg update`" but also brought back a
+        // "cannot" claim would still print a false line, and would slip past
+        // the assertion above by itself.
         assert!(
-            !out.contains("cannot resolve"),
-            "installing is still impossible, but resolving is not -- the \
-             text must not claim otherwise: {out}"
+            !out.contains("cannot resolve") && !out.contains("cannot install"),
+            "nothing here is impossible any more -- the text must not claim \
+             otherwise: {out}"
         );
     }
 

@@ -796,6 +796,24 @@ impl Mutator for Downloader {
     }
 }
 
+/// A winget that refuses every call.
+///
+/// The sibling of `Downloader`'s panicking arms, for winget's read-only seam:
+/// every plan in this file is scoop-only, so `prepare` must never ask winget
+/// anything, and a fake that answered would not prove it. `prepare` takes
+/// `WingetCmd`, not `WingetMutator`, so this cannot install or remove even if
+/// it wanted to.
+struct NoWinget;
+
+impl dotpkg::backend::winget::WingetCmd for NoWinget {
+    fn run(
+        &self,
+        args: &[&str],
+    ) -> Result<dotpkg::backend::winget::CmdOut, dotpkg::backend::winget::CmdError> {
+        panic!("a scoop-only plan must not make prepare run winget {args:?}");
+    }
+}
+
 fn one_install_plan(name: &str, version: &str, arch: Option<&str>) -> dotpkg::plan::Plan {
     dotpkg::plan::Plan {
         actions: vec![dotpkg::plan::Action::Install {
@@ -829,6 +847,7 @@ fn a_real_ready_to_fetch_is_produced_by_production_code_and_carries_the_architec
         &lock,
         &scoop,
         &fake,
+        &NoWinget,
         stage_dir.path(),
         &declared,
     );
@@ -871,6 +890,7 @@ fn a_hash_failure_that_exits_zero_is_still_a_failed_outcome() {
         &lock,
         &scoop,
         &Downloader::hash_failure(),
+        &NoWinget,
         stage_dir.path(),
         &declared,
     );

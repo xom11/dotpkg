@@ -1259,24 +1259,22 @@ fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
 }
 
 #[test]
-fn a_declared_unlocked_winget_package_does_not_block_a_legitimate_scoop_prune() {
-    // The Critical regression review caught, reproduced at the level it
-    // actually broke: not `plan()` alone, but the whole chain through
-    // `prepare()` to the exit code. Before the fix, a declared winget
-    // package with no lock entry became `SkipReason::NotLocked` --
-    // `Intent::NotLocked` -> `Outcome::NotLocked` -> `not_locked_count() > 0`
-    // -> `Preparation::is_ok() == false` -- and `main.rs`'s `!preparation.
-    // is_ok() && !keep_going` branch refused the ENTIRE run before `execute`
-    // was ever called, printing "N package(s) could not be prepared, so
-    // nothing has been changed" and exiting 2. `aichat`'s prune -- entirely
-    // unrelated to the undeclared winget package -- never got a chance.
+fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_and_holds_the_scoop_prune() {
+    // **This test is inverted, on purpose, and its old name was
+    // `a_declared_unlocked_winget_package_does_not_block_a_legitimate_scoop_
+    // prune`.** It was written when a declared, unlocked winget package
+    // becoming `SkipReason::NotLocked` was a Critical regression: `apply` could
+    // not have installed the package even with a pin, so refusing the whole run
+    // -- `aichat`'s entirely unrelated prune included -- punished the user for
+    // a lock entry that could not have helped anyone.
     //
-    // This is otherwise `a_prune_authorised_by_both_flags_runs_and_records_
-    // the_release` with one addition: `[winget] packages = ["Git.Git"]`,
-    // declared and never locked. If the regression were still present, this
-    // run would refuse outright (exit 2, no "FAILED" line at all, because
-    // `execute` never runs) instead of genuinely attempting the prune and
-    // failing at the uninstall step the way the sibling test does.
+    // Task 13 removed the premise. Winget has an executor now, so `Git.Git`
+    // without a pin is the same thing a scoop package without a pin is: work
+    // dotpkg was asked to do and may not invent a version for. Refusing is the
+    // correct answer, and quietly installing nothing would be the "degrade
+    // silently" failure the spec forbids. What has NOT changed is that `aichat`
+    // must be left alone -- `gate_removals` holds every removal while any
+    // package could not be prepared, and this is that path end to end.
     let f = Fixture::new(
         "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n[winget]\npackages = [\"Git.Git\"]\n",
         r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
@@ -1291,35 +1289,33 @@ fn a_declared_unlocked_winget_package_does_not_block_a_legitimate_scoop_prune() 
     let all = format!("{stdout}{stderr}");
 
     assert!(
-        !all.contains("could not be prepared, so nothing has been changed"),
-        "this must not be a refusal -- the winget package is reported, not \
-         fatal: {all}"
-    );
-    // Same proof `a_prune_authorised_by_both_flags_runs_and_records_the_
-    // release` uses: `execute` was genuinely called (aichat's uninstall was
-    // attempted and failed, since this platform has no real scoop.cmd),
-    // which is only reachable if `preparation.is_ok()` was true.
-    assert!(
-        all.contains("FAILED") && all.contains("aichat"),
-        "the scoop prune must have been genuinely attempted, not refused \
-         before execute ever ran: {all}"
+        all.contains("1 package(s) could not be prepared, so nothing has been changed"),
+        "one package could not be prepared, and the count must be that one: {all}"
     );
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "a genuine attempt that failed is outstanding, not a refusal (2) \
-         and not success (0): {all}"
+        Some(2),
+        "a refusal is 2, distinct from the 1 a genuine failed attempt gets: {all}"
     );
-    // The winget package is still reported somewhere in the run, not
-    // silently dropped now that it no longer fails the run.
     assert!(
         all.contains("Git.Git"),
-        "a declared winget package must still be visible even though it no \
-         longer fails the run: {all}"
+        "and it must name the package it refused over: {all}"
+    );
+    assert!(
+        all.contains("dotpkg update"),
+        "and the command that fixes it: {all}"
+    );
+    // `execute` must never have run: the reachability sentinel this file uses
+    // everywhere else is that `aichat`'s uninstall would FAIL loudly on a
+    // platform with no real `scoop.cmd`, so its absence proves nothing was
+    // attempted.
+    assert!(
+        !all.contains("FAILED"),
+        "nothing may be attempted when the preparation is refused: {all}"
     );
     assert!(
         f.scoop.path().join("apps").join("aichat").exists(),
-        "a failed uninstall must leave the app alone"
+        "a held prune must leave the app alone"
     );
 }
 

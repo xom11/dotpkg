@@ -129,54 +129,56 @@ fn refuse(err: anyhow::Error) -> ! {
 ///
 /// A package that failed to PREPARE never becomes a `Step`, so `Execution`
 /// cannot see it; a package skipped for a reason that could differ on the
-/// next run (`Preparation::outstanding_skips` -- running, opaque, or
-/// reported-only) is outstanding work the user asked for and did not get.
-/// Any of those means 0 would tell a scheduled task the machine is fine when
-/// it is not.
+/// next run (`Preparation::outstanding_skips` -- running or opaque) is
+/// outstanding work the user asked for and did not get. Either of those means
+/// 0 would tell a scheduled task the machine is fine when it is not.
 ///
-/// `has_reported_only` is Task 14's addition and is deliberately its own
-/// parameter rather than folded into `has_running_skips`: `apply::
-/// is_outstanding` already floors a `SkipReason::ReportedOnly` the same way
-/// it floors `Running`/`Opaque`, so at `apply`'s own call site the two
-/// arguments agree by construction today. Kept separate anyway so this
-/// function's own tests can pin the winget rule directly, the same way they
-/// already pin the running/opaque one, rather than trusting that the two
-/// callers' inputs happen to overlap.
+/// It had a third parameter, `has_reported_only`, from Task 14 until Task 13:
+/// a winget package that differed from the lock and that dotpkg could not act
+/// on floored the code too. Winget acts now, so such a package is an
+/// `Install`/`Upgrade`/`Downgrade`/`Prune` that either succeeds (0) or fails
+/// through `Execution`'s own code, and there is nothing left for a separate
+/// parameter to say. It was deleted rather than kept as an argument every
+/// caller passes `false` for.
 ///
 /// A floor, not an override: a non-zero code passes through untouched.
-fn floor_exit_code(
-    code: i32,
-    preparation_ok: bool,
-    has_running_skips: bool,
-    has_reported_only: bool,
-) -> i32 {
-    if code == 0 && (!preparation_ok || has_running_skips || has_reported_only) {
+fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> i32 {
+    if code == 0 && (!preparation_ok || has_running_skips) {
         1
     } else {
         code
     }
 }
 
-/// How many `steps` are a scoop version-change and how many are a scoop
-/// fresh install, for the confirmation prompt's "N will be uninstalled and
-/// reinstalled, M installed" wording.
+/// How many `steps` are a version-change performed as uninstall-then-install
+/// and how many put a package on the machine, for the confirmation prompt's
+/// "N will be uninstalled and reinstalled, M installed" wording.
 ///
 /// Written as an exhaustive match over every `ScoopStep`/`WingetStep` leaf,
 /// not `steps.iter().filter(|s| matches!(s, Step::Scoop(ScoopStep::Install {
 /// .. }))).count()`: `matches!` against a partial pattern silently returns
-/// `false` for a variant it does not name, so the day `plan_to_steps` starts
-/// producing `Step::Winget(WingetStep::Set { .. })` (a later task wires that
-/// in), this prompt would go on saying "0 installed" for a run that installs
-/// a winget package -- with no compiler error to force anyone to notice.
-/// Naming every leaf here turns that day into a compile error instead, the
-/// same discipline `is_outstanding`'s own doc comment argues for and that
-/// `execute::order`/`execute::write_recovery` already apply to this same
-/// enum.
+/// `false` for a variant it does not name, so the day `plan_to_steps` started
+/// producing `Step::Winget(WingetStep::Set { .. })` this prompt would have
+/// gone on saying "0 installed" for a run that installs a winget package,
+/// with no compiler error to force anyone to notice. Naming every leaf turned
+/// that day into a compile error instead -- and that day is Task 13, which
+/// answered it below.
 ///
-/// Both winget variants currently count as neither. What this prompt should
-/// say about a winget install is a decision for the task that wires winget
-/// in, not this one -- the point here is only that skipping them is a
-/// decision written down, not a silent default.
+/// **`WingetStep::Set` counts as an install, in both of its meanings.** A
+/// fresh install obviously is one. A winget *version change* is counted as an
+/// install rather than a replacement because `replaces` is not "how many
+/// versions change", it is the number the prompt's second sentence is about:
+/// "Every version change is an uninstall followed by an install, in both
+/// directions" -- true of `ScoopStep::Replace`, which is the only way scoop
+/// can change a version, and measurably false of `WingetStep::Set`, which is
+/// one `install --version` call that opens no window where the package is
+/// absent (see `WingetStep`'s own doc comment). Counting it as a replacement
+/// would make the prompt warn about a risk this step does not carry; counting
+/// it as neither would put a false zero in the one line the user reads before
+/// saying yes.
+///
+/// `WingetStep::Remove` counts as neither, exactly like
+/// `ScoopStep::Remove`: removals have their own count at the call site.
 fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
     steps
         .iter()
@@ -184,7 +186,7 @@ fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
             Step::Scoop(ScoopStep::Replace { .. }) => (replaces + 1, installs),
             Step::Scoop(ScoopStep::Install { .. }) => (replaces, installs + 1),
             Step::Scoop(ScoopStep::Remove { .. }) => (replaces, installs),
-            Step::Winget(WingetStep::Set { .. }) => (replaces, installs),
+            Step::Winget(WingetStep::Set { .. }) => (replaces, installs + 1),
             Step::Winget(WingetStep::Remove { .. }) => (replaces, installs),
         })
 }
@@ -383,19 +385,6 @@ fn main() -> Result<()> {
                 &unscannable,
             );
             print!("{}", dotpkg::render::render(&plan));
-            // Whether this plan carries any package dotpkg has scanned,
-            // planned and decided differs from the lock but cannot act on --
-            // outstanding work the user asked for and did not get, same as a
-            // running or opaque skip, and floored the same way below.
-            let has_reported_only = plan.actions.iter().any(|a| {
-                matches!(
-                    a,
-                    dotpkg::plan::Action::Skip {
-                        reason: dotpkg::plan::SkipReason::ReportedOnly(_),
-                        ..
-                    }
-                )
-            });
 
             if clone_missing_buckets {
                 for (name, why) in d.scoop.clone_missing_buckets(&d.declared, &d.scoop) {
@@ -404,11 +393,15 @@ fn main() -> Result<()> {
             }
 
             let staging_root = dotpkg::apply::default_staging_root();
+            // `RealWinget`, winget's READ-ONLY seam: `prepare` asks it `winget
+            // show` and nothing else. The mutating seam (`RealWingetMutator`)
+            // is constructed further down, for `execute` alone.
             let preparation = dotpkg::apply::prepare(
                 &plan,
                 &d.locked,
                 &d.scoop,
                 &d.scoop,
+                &RealWinget,
                 &staging_root,
                 &d.declared,
             );
@@ -429,8 +422,7 @@ fn main() -> Result<()> {
                 println!("  Nothing has been changed.");
                 std::io::stdout().flush().ok();
                 // A package skipped for a reason that could differ on the
-                // next run (running, opaque, or a winget package that
-                // differs from the lock -- `SkipReason::ReportedOnly`) does
+                // next run (running, or a state that could not be read) does
                 // not fail `is_ok()` -- deliberately, see `Preparation::
                 // outstanding_skips`'s doc comment -- but it is still
                 // outstanding work the user asked for and did not get. The
@@ -447,7 +439,11 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let (steps, unusable) = dotpkg::apply::plan_to_steps(&preparation);
+            // `installed` is handed over for the winget steps' process guards:
+            // a `WingetStep` carries the names a live process might report for
+            // its package, and the only source for them is the scan's own
+            // `Installed.bins` (see `apply::guard_for`).
+            let (steps, unusable) = dotpkg::apply::plan_to_steps(&preparation, &installed);
             let raw_removals = steps.iter().filter(|s| s.is_remove()).count();
 
             if !preparation.is_ok() && !keep_going {
@@ -455,7 +451,10 @@ fn main() -> Result<()> {
                     "\n{} package(s) could not be prepared, so nothing has been changed. \
                      Fix them, or pass --keep-going to install the {} that are ready \
                      (removals stay held either way).",
-                    unusable.len(),
+                    // NOT `unusable.len()`, which is a wider set and made this
+                    // sentence say "3" for one real failure plus two running
+                    // apps. See `Preparation::unpreparable_count`.
+                    preparation.unpreparable_count(),
                     steps.len() - raw_removals
                 );
                 std::process::exit(2);
@@ -472,6 +471,27 @@ fn main() -> Result<()> {
                     "note: {app} was ready to be removed, but is held: this run also has \
                      package(s) that could not be prepared, and a removal only proceeds \
                      when the whole preparation is ok. Fix them and rerun to let it through."
+                );
+            }
+
+            // Every ready outcome must become exactly one step -- one
+            // `ScoopStep` per `ReadyToFetch`, one `Remove` per
+            // `ReadyToRemove`, one `WingetStep::Set` per `ReadyToSet` -- with
+            // `gate_removals` moving some of them into `held` rather than
+            // dropping them. So this can only fail if a `plan_to_steps` arm
+            // did not claim something `prepare` made ready, which is
+            // `apply::plan_to_steps`'s "routing bug" arm: a package the plan
+            // promised, rendered `ready` in the table above, that the machine
+            // will never get. It is `is_ok()`-invisible by construction (a
+            // ready outcome raises neither failure count), so without this it
+            // is printed nowhere at all.
+            let routed = steps.len() + held.len();
+            if routed < preparation.ready_count() {
+                eprintln!(
+                    "warning: {} package(s) were prepared and shown as ready above, but no \
+                     executor step was built for them, so they will NOT be changed. This is \
+                     a routing bug in dotpkg, not a problem with your packages.",
+                    preparation.ready_count() - routed
                 );
             }
 
@@ -599,31 +619,17 @@ fn main() -> Result<()> {
             //
             // A package SKIPPED at prepare time for a reason that could
             // differ on the next run (`Preparation::outstanding_skips` --
-            // running, opaque, or a winget package that differs from the
-            // lock) floors the same way, and for the same reason: it is
-            // outstanding work the user asked for and did not get. It is
-            // pushed into `ex` above as `Held`, which already makes
-            // `exit_code` return 1 -- but this checks `preparation` directly,
-            // rather than trusting that push alone, for the same reason the
-            // line above does not trust `ex` alone: a skipped package is a
-            // fact about the plan, not about what `execute` happened to see,
-            // and 0 would tell a scheduled task the machine is fine for as
-            // long as the editor stays open, for as long as a package's
-            // state could not be read, or for as long as a winget package
-            // keeps drifting from its pin.
-            //
-            // `has_reported_only` is computed straight from `plan` (above),
-            // not from `outstanding_skips`: `is_outstanding` already floors a
-            // `ReportedOnly` skip the same way, so the two agree here by
-            // construction, but `floor_exit_code`'s own tests need to be able
-            // to pin the winget rule independently of that agreement holding
-            // -- see its doc comment.
-            let code = floor_exit_code(
-                code,
-                preparation.is_ok(),
-                !outstanding_skips.is_empty(),
-                has_reported_only,
-            );
+            // running, or a state that could not be read) floors the same
+            // way, and for the same reason: it is outstanding work the user
+            // asked for and did not get. It is pushed into `ex` above as
+            // `Held`, which already makes `exit_code` return 1 -- but this
+            // checks `preparation` directly, rather than trusting that push
+            // alone, for the same reason the line above does not trust `ex`
+            // alone: a skipped package is a fact about the plan, not about
+            // what `execute` happened to see, and 0 would tell a scheduled
+            // task the machine is fine for as long as the editor stays open,
+            // or for as long as a package's state could not be read.
+            let code = floor_exit_code(code, preparation.is_ok(), !outstanding_skips.is_empty());
             if code != 0 {
                 std::process::exit(code);
             }
@@ -788,42 +794,38 @@ mod tests {
         // The case tests/cli.rs cannot construct: no fixture may provide a fake
         // scoop binary, so a fully successful non-empty apply is unreachable there.
         // This is the only case that distinguishes `&&` from `||` and `!` from ``.
-        assert_eq!(floor_exit_code(0, true, false, false), 0);
+        assert_eq!(floor_exit_code(0, true, false), 0);
     }
 
     #[test]
     fn outstanding_work_floors_a_zero_to_one() {
         assert_eq!(
-            floor_exit_code(0, false, false, false),
+            floor_exit_code(0, false, false),
             1,
             "a package that failed to prepare"
         );
         assert_eq!(
-            floor_exit_code(0, true, true, false),
+            floor_exit_code(0, true, true),
             1,
             "a package skipped because it is running"
         );
-        assert_eq!(floor_exit_code(0, false, true, false), 1, "both");
+        assert_eq!(floor_exit_code(0, false, true), 1, "both");
     }
 
     #[test]
-    fn outstanding_reported_only_work_floors_the_exit_code_to_one() {
-        // Same rule already applied to running skips: work the user asked for
-        // and did not get must not report success to a scheduled task.
-        assert_eq!(floor_exit_code(0, true, false, true), 1);
-        assert_eq!(
-            floor_exit_code(0, true, false, false),
-            0,
-            "the positive sibling"
-        );
-    }
-
-    #[test]
-    fn count_replaces_and_installs_counts_only_scoop_and_treats_every_winget_step_as_neither() {
+    fn count_replaces_and_installs_counts_a_winget_set_as_an_install_and_neither_remove_as_either()
+    {
         // Pins the exhaustive match itself, not just its current output: a
-        // mutant swapping the Replace/Install increments, or moving
-        // ScoopStep::Remove or either WingetStep variant into one of the two
-        // counts, must turn this red.
+        // mutant swapping the Replace/Install increments, or moving either
+        // `Remove` into one of the two counts, or putting `WingetStep::Set`
+        // back into `replaces` or into neither, must turn this red.
+        //
+        // `WingetStep::Set` counted as neither until Task 13 -- deliberately,
+        // as a decision written down rather than a silent default, because
+        // nothing produced one yet. It does now, and a prompt that said "0
+        // installed" for a run that installs a winget package would be the
+        // false-number-in-the-line-the-user-reads defect this project has
+        // already fixed twice.
         let steps = vec![
             Step::Scoop(ScoopStep::Replace {
                 app: Name::new("bat"),
@@ -851,24 +853,19 @@ mod tests {
         ];
         assert_eq!(
             count_replaces_and_installs(&steps),
-            (1, 1),
-            "one scoop replace, one scoop install; the scoop remove and both \
-             winget steps must move neither count"
+            (1, 2),
+            "one scoop replace; one scoop install plus one winget Set are two \
+             installs; neither `Remove` moves either count"
         );
     }
 
     #[test]
     fn a_nonzero_code_is_never_lowered_or_raised() {
-        assert_eq!(floor_exit_code(2, true, false, false), 2);
+        assert_eq!(floor_exit_code(2, true, false), 2);
         assert_eq!(
-            floor_exit_code(2, false, true, false),
+            floor_exit_code(2, false, true),
             2,
             "the floor is a floor, not an override"
-        );
-        assert_eq!(
-            floor_exit_code(2, true, false, true),
-            2,
-            "a reported-only skip does not override a nonzero code either"
         );
     }
 
@@ -902,7 +899,7 @@ mod tests {
             "an opaque skip is outstanding work"
         );
         assert_eq!(
-            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty(), false),
+            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty()),
             1,
             "an otherwise-clean run with only an opaque package must not report success"
         );
@@ -914,12 +911,7 @@ mod tests {
         let clean = dotpkg::apply::Preparation::default();
         assert!(clean.outstanding_skips().is_empty());
         assert_eq!(
-            floor_exit_code(
-                0,
-                clean.is_ok(),
-                !clean.outstanding_skips().is_empty(),
-                false
-            ),
+            floor_exit_code(0, clean.is_ok(), !clean.outstanding_skips().is_empty()),
             0,
             "a preparation with nothing outstanding must keep its own exit code"
         );

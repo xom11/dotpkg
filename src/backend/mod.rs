@@ -220,10 +220,11 @@ pub enum ScanOutcome {
 /// only ever covered the prune direction. It said nothing about the other
 /// one: a declared, locked package with nothing in `installed` because the
 /// scan failed reads exactly like a declared, locked package that is
-/// genuinely not installed -- `Divergence::Install` for a `ReportsOnly`
-/// backend today, and once a backend `Acts` (Task 13), a real
-/// `Action::Install` for a package that may already be sitting there,
-/// converged. `ScanOutcome::Unscannable` is that other half's answer:
+/// genuinely not installed. When Task 6 wrote that, the consequence for winget
+/// was a wrong report line; Task 13 gave winget an executor, so the
+/// consequence now is a real `Action::Install` for a package that may already
+/// be sitting there, converged. This function was written one task ahead of
+/// its own danger, and `ScanOutcome::Unscannable` is that other half's answer:
 /// `plan()` takes this backend's name via its `unscannable: &[&'static str]`
 /// parameter and skips the backend's declared loop entirely, emitting
 /// `SkipReason::Unscannable` for every declared package instead of reading

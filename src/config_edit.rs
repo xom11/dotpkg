@@ -87,6 +87,7 @@ pub fn add_scoop_package(text: &str, name: &Name) -> Result<String> {
     append_to_packages_array(packages, name);
 
     let out = doc.to_string();
+    no_comment_was_lost(text, &out)?;
     verify_round_trip(&before, name, &out)?;
     Ok(out)
 }
@@ -105,6 +106,14 @@ pub fn add_scoop_package(text: &str, name: &Name) -> Result<String> {
 /// is an input the earlier check already refused. The `buckets` / `opts` /
 /// `winget` comparison here is what remains: defence against a future change
 /// to the editing code above that touches something it should not.
+///
+/// This is the semantic half only: it re-parses `out` and compares `Config`
+/// values, and `Config` has no field for comments, so a lost comment is
+/// invisible here by construction. `no_comment_was_lost` is the text-level
+/// sibling that catches that; it is called in `add_scoop_package`, beside
+/// this function's own call, because only the caller holds both the
+/// original and edited text. A future third `add_*_package` function must
+/// call both, the way this one does.
 fn verify_round_trip(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
     let after = crate::config::parse(out)
         .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
@@ -164,6 +173,7 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
     append_to_packages_array(packages, name);
 
     let out = doc.to_string();
+    no_comment_was_lost(text, &out)?;
     verify_round_trip_winget(&before, name, &out)?;
     Ok(out)
 }
@@ -175,6 +185,13 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
 /// `verify_round_trip` above, which has to compare three of `ScoopSection`'s
 /// own fields individually because `[scoop] packages` -- part of the SAME
 /// section -- is exactly what `add_scoop_package` changes.
+///
+/// Like `verify_round_trip`, this is the semantic half only -- it cannot see
+/// a lost comment, because the `Config` it compares has no field for one.
+/// `no_comment_was_lost` is the text-level sibling that catches that; it is
+/// called in `add_winget_package`, beside this function's own call, for the
+/// same reason: only the caller holds both texts. A future third
+/// `add_*_package` function must call both, the way this one does.
 fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
     let after = crate::config::parse(out)
         .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
@@ -189,6 +206,79 @@ fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &s
         "the edit did not add exactly {name} to [winget] packages; refusing to write it"
     );
     Ok(())
+}
+
+/// Every `#` comment present in `before` must still be present in `after` --
+/// compared as a MULTISET of comment texts, not a set, so a comment that is
+/// one of several identical ones and silently drops to fewer copies is
+/// caught even though its text is still present elsewhere in the file. A
+/// plain "is this text in `after` somewhere" check cannot tell those apart.
+///
+/// This function's first version, `exactly_one_line_added`, checked a
+/// different and wrong invariant: that `after` has exactly one more line
+/// than `before`, with every original line otherwise unchanged and in
+/// order. That is only true of ONE of the shapes `add_scoop_package` and
+/// `add_winget_package` produce -- appending to an existing multiline
+/// array, the shape the Phase 4 dogfood bug lived in. It is false of two
+/// other shapes those same functions are documented and tested to produce:
+/// creating a section (`[scoop]` or `[winget]`) that did not exist yet adds
+/// several lines, not one, and appending to a single-line or previously
+/// empty array adds zero lines, because an existing line's content is
+/// extended in place. Wiring the line-count version in made 16 pre-existing
+/// tests fail for those two reasons -- none involving a lost comment -- so
+/// it checked a description of one code path, not an invariant true of all
+/// of them. Comment loss, not line count, is the actual defect class this
+/// guard exists for, and comment loss is what it checks now.
+///
+/// The heuristic for "what is a comment" on a line: everything from the
+/// first `#` after that line's LAST `"` to the end of the line. This is
+/// scoped deliberately to `pkg.toml`'s own shape here -- a bare key, a
+/// quoted string value, optionally a trailing `# comment` -- not a general
+/// string-literal-aware scanner; see `line_comment`.
+///
+/// **Known, accepted weakness**: a comment that MOVES to a different line,
+/// without being lost, is not caught -- a multiset remembers count, not
+/// position. This is the same class of gap a plain `.contains` assertion
+/// has (`docs/dogfood-phase4-2026-08-10.md`: "cannot tell 'still attached to
+/// the right line' apart from 'moved'"). Loss is the defect class actually
+/// measured (the dogfood bug); position is not checkable here without
+/// reintroducing the line-count invariant this function replaced, which is
+/// exactly what rejected legitimate edits. Deliberate, not an oversight.
+fn no_comment_was_lost(before: &str, after: &str) -> Result<()> {
+    let mut counts: std::collections::BTreeMap<&str, i32> = std::collections::BTreeMap::new();
+    for line in before.lines() {
+        if let Some(comment) = line_comment(line) {
+            *counts.entry(comment).or_insert(0) += 1;
+        }
+    }
+    for line in after.lines() {
+        if let Some(comment) = line_comment(line) {
+            *counts.entry(comment).or_insert(0) -= 1;
+        }
+    }
+    if let Some((&comment, _)) = counts.iter().find(|&(_, &net)| net > 0) {
+        anyhow::bail!(
+            "the edit lost a comment: {comment:?} was in pkg.toml before and has fewer \
+             copies (or none) now; refusing to write it"
+        );
+    }
+    Ok(())
+}
+
+/// The comment on one `pkg.toml` line, if it has one: everything from the
+/// first `#` after the line's last `"` to the end of the line.
+///
+/// A full-line comment (no `"` on the line at all) is included too, since
+/// `rfind` then finds nothing and the search falls back to the start of the
+/// line. Scoped to this file's own shape -- no package name or key `pkg.toml`
+/// writes ever contains a literal `#` inside a quoted string -- rather than
+/// being a general string-literal-aware scanner: a `#` that DID appear
+/// inside a string value would be misread as a comment start.
+fn line_comment(line: &str) -> Option<&str> {
+    let search_from = line.rfind('"').map(|i| i + 1).unwrap_or(0);
+    line[search_from..]
+        .find('#')
+        .map(|i| line[search_from + i..].trim_end())
 }
 
 /// Replace `pkg.toml`, keeping the file the user wrote as `pkg.toml.bak`.
@@ -583,5 +673,59 @@ packages = [
         let before = crate::config::parse(HAND_WRITTEN_WINGET).unwrap();
         let out = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("7zip.7zip")).unwrap();
         verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &out).unwrap();
+    }
+
+    // -- no_comment_was_lost ------------------------------------------------
+    //
+    // Both guards above re-parse the edited text and compare `Config`
+    // values, and `Config` has no field for comments -- so the comment-loss
+    // bug the Phase 4 dogfood found (a same-line trailing comment on a
+    // `[winget] packages` array's last element, silently dropped on append)
+    // was invisible to either guard BY CONSTRUCTION. This is the text-level
+    // half that catches it.
+    //
+    // An earlier version of this guard, `exactly_one_line_added`, checked
+    // line COUNT instead of comment content and was wrong: creating a new
+    // section legitimately adds several lines, and an inline array append
+    // legitimately adds zero. `HAND_WRITTEN` and `HAND_WRITTEN_WINGET`
+    // above, which both carry real comments and go through the real
+    // `add_*_package` path, are this guard's live positive controls -- if
+    // an append ever regresses, they go red without anyone writing a new
+    // test.
+
+    #[test]
+    fn a_dropped_trailing_comment_is_caught_by_the_text_level_guard() {
+        // The exact bytes of the Phase 4 dogfood's finding: a same-line comment
+        // on the array's LAST element, before the closing bracket.
+        let before = "[winget]\npackages = [\n  \"ajeetdsouza.zoxide\",  # keep me\n]\n";
+        // What the bug produced: the comment gone, one element added.
+        let buggy =
+            "[winget]\npackages = [\n  \"ajeetdsouza.zoxide\",\n  \"Vivaldi.Vivaldi\",\n]\n";
+        assert!(
+            no_comment_was_lost(before, buggy).is_err(),
+            "a lost comment must be caught"
+        );
+
+        // The positive control: the correct output must pass. Without it, a
+        // guard that rejected everything would satisfy the assertion above.
+        let good = "[winget]\npackages = [\n  \"ajeetdsouza.zoxide\",  # keep me\n  \"Vivaldi.Vivaldi\",\n]\n";
+        assert!(
+            no_comment_was_lost(before, good).is_ok(),
+            "the correct edit must pass"
+        );
+
+        // A plain "is this text present anywhere in `after`" check is fooled
+        // here: two elements happen to carry the identical comment "# keep",
+        // so that text never disappears from the file -- a SET of comment
+        // texts looks unchanged. Comparing as a MULTISET catches it anyway:
+        // "# keep" goes from two copies to one, so one of them was silently
+        // dropped even though its text survives on the other line.
+        let two_copies = "[winget]\npackages = [\n  \"A.A\",  # keep\n  \"B.B\",  # keep\n]\n";
+        let one_dropped = "[winget]\npackages = [\n  \"A.A\",\n  \"B.B\",  # keep\n]\n";
+        assert!(
+            no_comment_was_lost(two_copies, one_dropped).is_err(),
+            "one of two identical comments vanishing must be caught, not waved \
+             through because its text is still present on the other line"
+        );
     }
 }

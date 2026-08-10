@@ -156,12 +156,29 @@ pub fn remove_argv(id: &Name, version: &str) -> Vec<String> {
 /// and they read the canonical id back out of the `Found <name> [<Id>]`
 /// line that self-verifying call produces. `list_one_argv` runs *after*
 /// resolution, against the canonical spelling `pkg.lock` already holds --
-/// the exact spelling winget itself echoed back -- so `-e` is safe here
-/// precisely because that spelling is already in hand, and it is
-/// preferable here: an exact match cannot drift onto a different package.
-/// Copying `-e` into a resolver call, or dropping it from this one, would
-/// reintroduce the "not found for a package that exists" defect
-/// `Name`'s own doc comment describes.
+/// the exact spelling winget itself echoed back.
+///
+/// Copying `-e` into a resolver call is a measured hazard: `--exact`
+/// together with a folded or wrong-case spelling returns
+/// `NO_APPLICATIONS_FOUND` for a package that exists (`show -e --id
+/// git.git` -> `0x8A150014`, `docs/measurements-2026-08-09-winget.md` §3,
+/// line 166) -- the defect `Name`'s own doc comment describes.
+///
+/// **Dropping `-e` from THIS call is not known to break anything, and this
+/// comment must not claim otherwise.** That defect needs `--exact` AND a
+/// wrong-case spelling together; `list_one_argv` only ever runs against a
+/// spelling already confirmed correct, and measured, dropping `-e` there
+/// still finds it (`show --id Git.Git`, no `-e`, still returns `Found Git
+/// [Git.Git]`, `docs/measurements-2026-08-09-winget.md` §3, line 169). The
+/// over-matching worry that might otherwise justify keeping `-e` -- a bare
+/// substring like `git` accidentally matching `Git.Git` -- is also measured
+/// not to happen for a full id: `docs/measurements-2026-08-10-winget-write
+/// -path.md` §7 probed `--id 7zip`/`Microsoft`/`ripgrep`/`git`/`zoxide`,
+/// each a real substring of a real installed id, all without `--exact`, and
+/// every one came back "no package found" -- `--id` always requires the
+/// whole id, `--exact` only ever controls case. `-e` is kept here because
+/// it is the stricter form against a spelling already known canonical and
+/// costs nothing, not because dropping it is known to be dangerous.
 ///
 /// `id.to_string()`, never `id.key()` -- same reasoning as `set_argv`.
 pub fn list_one_argv(id: &Name) -> Vec<String> {

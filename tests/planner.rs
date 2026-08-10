@@ -483,6 +483,17 @@ fn an_idle_winget_package_still_reports_its_version_difference() {
         "an idle package must not be Running: {:?}",
         p.actions[0]
     );
+    assert!(
+        matches!(
+            &p.actions[0],
+            Action::Skip {
+                reason: SkipReason::ReportedOnly(Divergence::Change { .. }),
+                ..
+            }
+        ),
+        "an idle winget package must report its version difference: {:?}",
+        p.actions[0]
+    );
 }
 
 #[test]

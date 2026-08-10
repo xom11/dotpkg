@@ -10,6 +10,46 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, Item, Value};
 
+/// Append `name` to `packages`, matching the surrounding style: if the
+/// existing entries are on their own lines, keep that (and give the new one
+/// its own indented, trailing-comma-terminated line); otherwise append
+/// inline. Shared by `add_scoop_package` and `add_winget_package` -- the two
+/// call sites were carrying identical copies of this block until a reviewer
+/// flagged the duplication.
+///
+/// **Carries the array's own trailing text forward as the new element's
+/// prefix, rather than discarding it.** `toml_edit` (measured directly,
+/// 0.22.27) stores a same-line comment on an array's LAST element as the
+/// ARRAY's own `trailing` decor -- the text between the last comma and `]`
+/// -- not as that element's `suffix`. A comment on any OTHER element instead
+/// lands in the NEXT element's `prefix`, which nothing here ever touches, so
+/// that case was always safe. Overwriting `trailing` unconditionally (this
+/// function's first version) silently dropped a comment on the last element
+/// on every append -- found by the Phase 4 dogfood running `dotpkg adopt
+/// --backend winget` for real, not by review. When the old trailing was
+/// unremarkable (no elements yet, or the plain `"\n"` a clean multiline array
+/// leaves behind), `format!("{old_trailing}  ")` reduces to exactly the
+/// `"\n  "` this function hardcoded before the fix, so the ordinary case is
+/// byte-for-byte unchanged.
+fn append_to_packages_array(packages: &mut Array, name: &Name) {
+    let multiline = packages.iter().count() > 0 && packages.to_string().contains('\n');
+    let old_trailing = packages.trailing().as_str().unwrap_or("").to_string();
+    packages.push(name.to_string());
+    if multiline {
+        let last_idx = packages.len() - 1;
+        let prefix = if old_trailing.is_empty() {
+            "\n  ".to_string()
+        } else {
+            format!("{old_trailing}  ")
+        };
+        if let Some(last) = packages.get_mut(last_idx) {
+            last.decor_mut().set_prefix(prefix);
+        }
+        packages.set_trailing_comma(true);
+        packages.set_trailing("\n");
+    }
+}
+
 /// Add `name` to `[scoop] packages`, preserving comments, ordering and
 /// formatting.
 ///
@@ -44,18 +84,7 @@ pub fn add_scoop_package(text: &str, name: &Name) -> Result<String> {
         .as_array_mut()
         .context("pkg.toml's [scoop] packages is not an array")?;
 
-    // Match the surrounding style: if the existing entries are on their own
-    // lines, keep that; otherwise append inline.
-    let multiline = packages.iter().count() > 0 && packages.to_string().contains('\n');
-    packages.push(name.to_string());
-    if multiline {
-        let last_idx = packages.len() - 1;
-        if let Some(last) = packages.get_mut(last_idx) {
-            last.decor_mut().set_prefix("\n  ");
-        }
-        packages.set_trailing_comma(true);
-        packages.set_trailing("\n");
-    }
+    append_to_packages_array(packages, name);
 
     let out = doc.to_string();
     verify_round_trip(&before, name, &out)?;
@@ -132,16 +161,7 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
         .as_array_mut()
         .context("pkg.toml's [winget] packages is not an array")?;
 
-    let multiline = packages.iter().count() > 0 && packages.to_string().contains('\n');
-    packages.push(name.to_string());
-    if multiline {
-        let last_idx = packages.len() - 1;
-        if let Some(last) = packages.get_mut(last_idx) {
-            last.decor_mut().set_prefix("\n  ");
-        }
-        packages.set_trailing_comma(true);
-        packages.set_trailing("\n");
-    }
+    append_to_packages_array(packages, name);
 
     let out = doc.to_string();
     verify_round_trip_winget(&before, name, &out)?;
@@ -234,6 +254,28 @@ python = { arch = "64bit" }   # force an architecture
         assert_eq!(
             cfg.scoop.opts[&Name::new("python")].arch,
             Some(crate::config::Arch::X64)
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_on_the_last_scoop_element_survives_an_append() {
+        // The scoop-side sibling of `add_winget_package`'s test of the same
+        // shape: `append_to_packages_array` is shared code, and the bug the
+        // Phase 4 dogfood found in the winget path was pre-existing here too
+        // -- `HAND_WRITTEN` above never happened to put its comment on the
+        // LAST element (`"bat"` has none), so nothing exercised this path
+        // before.
+        const SRC: &str = "[scoop]\npackages = [\n  \"fzf\",  # fuzzy finder\n]\n";
+        let out = add_scoop_package(SRC, &Name::new("ripgrep")).unwrap();
+        assert!(
+            out.contains("\"fzf\",  # fuzzy finder\n  \"ripgrep\",\n]"),
+            "the comment must stay attached to fzf's own line, and the new \
+             entry must land on its own line after it: {out}"
+        );
+        let cfg = crate::config::parse(&out).unwrap();
+        assert_eq!(
+            cfg.scoop.packages,
+            vec![Name::new("fzf"), Name::new("ripgrep")]
         );
     }
 
@@ -402,16 +444,17 @@ python = { arch = "64bit" }   # force an architecture
 
     // The comment sits on the FIRST of two elements, not the last, matching
     // `add_scoop_package`'s own `HAND_WRITTEN` fixture above -- deliberately,
-    // not incidentally. Measured while writing this test: an inline comment
-    // on the LAST element of a multiline array is attached to the array's
-    // own trailing decor, not to that element, and `packages.set_trailing
-    // ("\n")` (shared by both `add_scoop_package` and `add_winget_package`,
-    // a few lines up) unconditionally overwrites it -- so that comment is
-    // silently dropped on append. Pre-existing in `add_scoop_package` too
-    // (its own fixture never happened to put a comment on the last element,
-    // so nothing there ever exercised this path); recorded as a finding in
-    // this task's report rather than fixed here, since the mechanism is
-    // shared code this task did not otherwise touch.
+    // not incidentally, and paired with `a_trailing_comment_on_the_last_
+    // element_survives_an_append` below, which puts one on the last element
+    // instead. A comment on a non-last element lands in the NEXT element's
+    // `prefix` and nothing this module does ever touches it; a comment on
+    // the LAST element lands in the ARRAY's own `trailing` decor, which
+    // `append_to_packages_array` used to overwrite unconditionally on every
+    // append -- found by the Phase 4 dogfood running `dotpkg adopt --backend
+    // winget` for real, fixed in `append_to_packages_array`. Keeping both
+    // fixtures means a fix that only moves the problem (e.g. one that always
+    // preserves whichever comment happens to already be safe) is still
+    // caught.
     const HAND_WRITTEN_WINGET: &str = r#"# what this machine should have
 [scoop]
 buckets  = ["main"]
@@ -438,6 +481,35 @@ packages = [
         // untouched.
         assert!(cfg.scoop.packages.contains(&Name::new("fzf")));
         assert_eq!(cfg.scoop.buckets.len(), 1);
+    }
+
+    #[test]
+    fn a_trailing_comment_on_the_last_winget_element_survives_an_append() {
+        // The dogfood-found shape, reproduced directly: a same-line comment
+        // on the array's LAST element, appended to. An exact substring, not
+        // a loose `.contains("# ...")` -- `.contains` alone is exactly what
+        // let the original bug hide behind `a_winget_package_is_added_and_
+        // every_comment_survives` above, since that only checks the comment
+        // text appears SOMEWHERE, not that it stayed attached to the right
+        // line.
+        const SRC: &str =
+            "[winget]\npackages = [\n  \"ajeetdsouza.zoxide\",  # kept for comment-survival check\n]\n";
+        let out = add_winget_package(SRC, &Name::new("Vivaldi.Vivaldi")).unwrap();
+        assert!(
+            out.contains(
+                "\"ajeetdsouza.zoxide\",  # kept for comment-survival check\n  \"Vivaldi.Vivaldi\",\n]"
+            ),
+            "the comment must stay attached to ajeetdsouza.zoxide's own line, \
+             and the new entry must land on its own line after it: {out}"
+        );
+        let cfg = crate::config::parse(&out).unwrap();
+        assert_eq!(
+            cfg.winget.packages,
+            vec![
+                Name::new("ajeetdsouza.zoxide"),
+                Name::new("Vivaldi.Vivaldi")
+            ]
+        );
     }
 
     #[test]

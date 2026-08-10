@@ -214,7 +214,19 @@ fn prepared_line(item: &Prepared) -> String {
         Outcome::NotLocked => ("!", "no lock entry -- run `dotpkg update`".to_string()),
         Outcome::Report => report_marker_and_rest(&item.action),
     };
-    format!("  {marker:<8}{backend:<6} {name:<13}{rest}\n")
+    // `{name:<14} ` -- a literal space after the padded field, not just
+    // padding relied on to provide one. `{name:<13}{rest}` (no literal
+    // space, one column narrower) was sized against Phase 2b1's scoop-only
+    // examples, every one of them under 13 characters; a real winget id
+    // (`Microsoft.WindowsAppRuntime.1.7`, `JanDeDobbeleer.OhMyPosh`, ...)
+    // routinely exceeds it, and `{:<N}` does not truncate or insert a
+    // minimum gap when the value is already >= N wide -- it emits nothing
+    // extra at all, so `rest` glued directly onto the end of `name` with no
+    // separator. Found by the Phase 4 dogfood's own `apply --prepare`
+    // output, not by review. `render(plan)`'s sibling lines already use this
+    // same `{name:<14} ` shape (explicit space, one field over) for exactly
+    // this reason; matched here rather than inventing a second convention.
+    format!("  {marker:<8}{backend:<6} {name:<14} {rest}\n")
 }
 
 /// Every `Action` variant names a backend and a package; this is the one
@@ -562,19 +574,86 @@ mod tests {
             ],
         };
 
-        // Byte-for-byte against the design doc's own example: the strongest
-        // check available that the column widths were reverse-engineered
-        // correctly rather than eyeballed.
-        let expected = "  ready   scoop  ripgrep      14.1.0            (install)
-  ready   scoop  bat          0.25.0 -> 0.26.1  (upgrade)
-  FAILED  scoop  fzf          commit a28d0c56 is not in bucket main
-  FAILED  scoop  neovim       download failed: hash mismatch
-  !       scoop  kanata       running -- stop it first
-  !       scoop  zellij       no lock entry -- run `dotpkg update`
+        // Byte-for-byte: the strongest check available that the column
+        // widths were reverse-engineered correctly rather than eyeballed.
+        // One column wider than Phase 2b1's original design-doc mockup
+        // (`{name:<13}{rest}` -> `{name:<14} {rest}`) -- see `prepared_line`'s
+        // own doc comment for why: a name this wide plus a literal space is
+        // what keeps a long winget id from running into its version with no
+        // separator, and every scoop name here is short enough that the
+        // extra column is the only visible difference from before.
+        let expected = "  ready   scoop  ripgrep        14.1.0            (install)
+  ready   scoop  bat            0.25.0 -> 0.26.1  (upgrade)
+  FAILED  scoop  fzf            commit a28d0c56 is not in bucket main
+  FAILED  scoop  neovim         download failed: hash mismatch
+  !       scoop  kanata         running -- stop it first
+  !       scoop  zellij         no lock entry -- run `dotpkg update`
 
   2 of 4 changes ready, 2 failed, 1 skipped, 1 not locked.
 ";
         assert_eq!(render_preparation(&p), expected);
+    }
+
+    #[test]
+    fn a_name_at_least_14_characters_long_still_gets_a_separator_before_its_rest() {
+        // The dogfood-found shape, reproduced directly (the same
+        // `Divergence::Change` a real `Brave.Brave` skip renders elsewhere in
+        // this file, with a name long enough to exhaust `{name:<14}`'s
+        // padding entirely -- nothing left to pad with, so the literal space
+        // after it is the only thing that still separates it from what
+        // follows). Without that literal space, this renders as
+        // "...JanDeDobbeleer.OhMyPosh29.36.0.0 ->..." -- exactly what a14's
+        // real `apply --prepare` output showed.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Skip {
+                    backend: WINGET.into(),
+                    name: Name::new("JanDeDobbeleer.OhMyPosh"),
+                    reason: SkipReason::ReportedOnly(Divergence::Change {
+                        from: "29.36.0.0".into(),
+                        to: "30.6.3".into(),
+                    }),
+                },
+                outcome: Outcome::Skipped {
+                    why: Divergence::Change {
+                        from: "29.36.0.0".into(),
+                        to: "30.6.3".into(),
+                    }
+                    .describe(),
+                },
+            }],
+        };
+        let out = render_preparation(&p);
+        assert!(
+            out.contains("JanDeDobbeleer.OhMyPosh 29.36.0.0 -> 30.6.3"),
+            "a literal space must separate the name from what follows even \
+             when the name itself is >= 14 characters: {out}"
+        );
+    }
+
+    #[test]
+    fn a_short_name_is_still_padded_not_just_given_one_bare_space() {
+        // The other side of the same fix: this must not degrade into
+        // "always emit exactly one space and stop aligning columns" --
+        // short names still line up in a fixed-width column, the same as
+        // every other line in this table.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: "fzf".into(),
+                    version: "14.1.0".into(),
+                    arch: None,
+                },
+                outcome: ready_to_fetch("fzf", "14.1.0"),
+            }],
+        };
+        let out = render_preparation(&p);
+        assert!(
+            out.contains("  ready   scoop  fzf            14.1.0            (install)\n"),
+            "a short name must still be padded out to the column width, not \
+             just followed by one bare space: {out}"
+        );
     }
 
     #[test]

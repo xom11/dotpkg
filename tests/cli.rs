@@ -1026,9 +1026,11 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     // `prepared_line`'s `Outcome::Skipped` arm already named this before
     // either fix existed -- pinned here so the exit code stays explainable
     // on this branch too, matching the format `render_preparation`'s own
-    // test (`src/render.rs`) pins for the identical shape.
+    // test (`src/render.rs`) pins for the identical shape. The name column is
+    // one wider than it used to be (`src/render.rs:229`, Task 16's Windows
+    // fix wave) so a real winget id no longer runs into what follows it.
     assert!(
-        stdout.contains("  !       scoop  aichat       running -- stop it first\n"),
+        stdout.contains("  !       scoop  aichat         running -- stop it first\n"),
         "the preparation table must name the skipped package: {stdout}"
     );
     f.assert_nothing_was_touched(before);
@@ -1116,7 +1118,7 @@ fn apply_prepare_also_reports_an_opaque_skip_as_outstanding() {
     );
     assert!(
         stdout.contains(
-            "  !       scoop  aichat       installed, but its state could not be read -- \
+            "  !       scoop  aichat         installed, but its state could not be read -- \
              see the warnings above\n"
         ),
         "the preparation table must name the opaque package: {stdout}"

@@ -1065,19 +1065,51 @@ mod tests {
     // -- resolve_root -------------------------------------------------------
 
     #[test]
-    fn a_root_that_needs_no_prefix_stripping_is_kept_as_canonicalize_returned_it() {
-        // A real (not fabricated) `canonicalize` round trip. This documents
-        // `resolve_root`'s actual contract but -- see `rewritten` above --
-        // cannot discriminate its own guard's mutants on a platform whose
-        // `canonicalize` never emits a `\\?\`-prefixed string in the first
-        // place: `rewritten`'s dedicated tests are what kill those.
+    fn resolve_root_strips_any_extended_prefix_and_still_names_the_same_directory() {
+        // A real (not fabricated) `canonicalize` round trip -- `rewritten`'s
+        // own tests above already pin the string-level stripping cases
+        // directly and on every platform; this one's job is only the
+        // integration, that `resolve_root` actually runs `canonicalize` and
+        // then `rewritten`, on the real, live behaviour of this platform's
+        // filesystem.
+        //
+        // The previous version of this test asserted `got ==
+        // std::fs::canonicalize(d.path())` -- the UNSTRIPPED value -- which
+        // only ever held on a platform (macOS, every dev machine this suite
+        // had run on) where `canonicalize` never adds a `\\?\` prefix in the
+        // first place, so there was nothing to strip and the comparison
+        // passed vacuously. On real Windows `canonicalize` DOES add that
+        // prefix and `resolve_root` DOES strip it -- correctly, that is the
+        // whole point of the function -- so the old assertion was checking
+        // the opposite of what `resolve_root` exists to do, and it took a
+        // real Windows run (Task 16) to show that rather than merely being
+        // unable to discriminate a mutant here, as this test's own comment
+        // already suspected.
+        //
+        // Deliberately NOT `#[cfg(windows)]`/`#[cfg(unix)]`: a platform-gated
+        // version of this test would have hidden exactly the same defect --
+        // green on macOS because the interesting platform never ran it, gated
+        // out on Windows because "not our platform" reads as caution rather
+        // than as the coverage hole it is. What follows holds unconditionally
+        // on both.
         let d = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(d.path()).unwrap();
         let got = resolve_root(d.path().to_path_buf());
-        assert_eq!(
-            got,
-            std::fs::canonicalize(d.path()).unwrap_or_else(|_| d.path().to_path_buf())
-        );
+
+        // 1. No extended-length prefix survives, regardless of whether this
+        //    platform's `canonicalize` ever produces one.
         assert!(!got.to_string_lossy().starts_with(r"\\?\"), "got {got:?}");
+
+        // 2. `got` still designates the exact same directory `canonicalize`
+        //    did -- checked by re-canonicalizing `got` itself and comparing
+        //    against the direct call above, rather than comparing `got`
+        //    against `canon` textually (that comparison is exactly what
+        //    made the old assertion platform-dependent).
+        assert_eq!(
+            std::fs::canonicalize(&got).unwrap(),
+            canon,
+            "resolve_root's output must still resolve to the same directory"
+        );
     }
 
     // -- strip_ansi -----------------------------------------------------

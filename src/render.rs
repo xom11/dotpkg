@@ -159,16 +159,26 @@ pub fn render_execution(ex: &Execution) -> String {
     let mut out = String::new();
     for (name, r) in &ex.results {
         let line = match r {
-            ItemResult::Done => format!("  done    scoop  {name:<13}verified on disk"),
-            ItemResult::Failed { why, .. } => format!("  FAILED  scoop  {name:<13}{why}"),
-            ItemResult::Held(why) => format!("  held    scoop  {name:<13}{why}"),
+            // `{name:<14} ` -- a literal space after the padded field, the
+            // same fix `prepared_line` needed and got at Task 16
+            // (`src/render.rs:229`; see its own doc comment for the
+            // mechanism). This function used the narrower `{name:<13}` with
+            // no literal separator, the identical shape that turned into
+            // a real, dogfood-found glued-together line at `prepared_line`
+            // -- one column short, and reachable here the same way, with an
+            // ordinary scoop package: `windows-terminal` is 16 characters,
+            // long enough to exhaust the padding entirely and leave nothing
+            // to separate it from what follows.
+            ItemResult::Done => format!("  done    scoop  {name:<14} verified on disk"),
+            ItemResult::Failed { why, .. } => format!("  FAILED  scoop  {name:<14} {why}"),
+            ItemResult::Held(why) => format!("  held    scoop  {name:<14} {why}"),
         };
         out.push_str(&line);
         out.push('\n');
     }
     for name in &ex.dropped_ghosts {
         out.push_str(&format!(
-            "  note    scoop  {name:<13}ownership record dropped: nothing by that name is installed\n"
+            "  note    scoop  {name:<14} ownership record dropped: nothing by that name is installed\n"
         ));
     }
     out.push_str(&format!(
@@ -1023,14 +1033,16 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_unlocked_winget_package_is_not_told_to_run_update() {
-        // `dotpkg update` explicitly declines to resolve winget packages and
-        // carries existing pins through untouched (`update::run`'s own
-        // winget notice) -- so the generic `SkipReason::NotLocked` line
-        // ("no lock entry -- run `dotpkg update`", asserted a few tests
-        // down) would be false advice here. This is the counterpart to
-        // `SkipReason::NotLocked` itself producing that text for scoop,
-        // where the advice IS true.
+    fn a_declared_unlocked_winget_package_is_now_told_to_run_dotpkg_update() {
+        // Task 15 made `update::run` resolve winget packages too
+        // (`src/update.rs:403-459`; `fold_backend` writes the result into
+        // `pkg.lock`'s `winget` table at `:477-487`) -- the exact reverse of
+        // what this test used to assert
+        // (`a_declared_unlocked_winget_package_is_not_told_to_run_update`,
+        // which checked `!out.contains("dotpkg update")`). Staying silent
+        // about the one command that now fixes this state would itself be
+        // the false line, so the old test is replaced rather than kept
+        // alongside a contradicting one.
         let plan = Plan {
             actions: vec![Action::Skip {
                 backend: WINGET.into(),
@@ -1042,8 +1054,19 @@ mod tests {
         assert!(out.contains("Git.Git"), "got: {out}");
         assert!(out.contains("not in pkg.lock"), "got: {out}");
         assert!(
-            !out.contains("dotpkg update"),
-            "update cannot fix this today, so it must not be told to run it: {out}"
+            out.contains("dotpkg update"),
+            "update can resolve a winget package's version now, so the \
+             fix must be named: {out}"
+        );
+        // Paired with the assertion above rather than left standing alone:
+        // resolving is no longer impossible, only installing still is. A
+        // regression that kept "run `dotpkg update`" but also brought back
+        // a "cannot resolve" claim would still print a false line, and
+        // would slip past the assertion above by itself.
+        assert!(
+            !out.contains("cannot resolve"),
+            "installing is still impossible, but resolving is not -- the \
+             text must not claim otherwise: {out}"
         );
     }
 
@@ -1180,6 +1203,50 @@ mod tests {
         };
         let out = render_execution(&ex);
         assert!(out.contains("permission denied"), "{out}");
+    }
+
+    #[test]
+    fn a_name_at_least_14_characters_long_still_gets_a_separator_before_verified_on_disk() {
+        // The same dogfood-found shape `prepared_line` had (see the paired
+        // tests above `render_preparation`'s own section, and that
+        // function's own doc comment): `render_execution`'s `Done` line used
+        // `{name:<13}` with no literal separator -- exhausted by any name
+        // >= 13 characters, gluing the name straight onto "verified on
+        // disk". `windows-terminal` (16 characters) is an ordinary scoop
+        // package, not a constructed edge case; it is 16, not 13, only
+        // because the fixed column is now one wider (`<14`), the same
+        // widening `prepared_line` got.
+        let ex = Execution {
+            results: vec![(Name::new("windows-terminal"), ItemResult::Done)],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        assert!(
+            out.contains("windows-terminal verified on disk"),
+            "a literal space must separate the name from what follows even \
+             when the name itself is >= 14 characters: {out}"
+        );
+    }
+
+    #[test]
+    fn a_short_name_in_render_execution_is_still_padded_not_just_given_one_bare_space() {
+        // The other side of the same fix: this must not degrade into
+        // "always emit exactly one space and stop aligning columns" -- short
+        // names still line up in a fixed-width column. Built with the same
+        // `{:<14}` rule the real code uses, rather than a hand-counted
+        // literal, so a padding-width typo in the test itself cannot make
+        // this pass for the wrong reason.
+        let ex = Execution {
+            results: vec![(Name::new("fzf"), ItemResult::Done)],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        let expected = format!("  done    scoop  {:<14} verified on disk\n", "fzf");
+        assert!(
+            out.contains(&expected),
+            "a short name must still be padded out to the column width, not \
+             just followed by one bare space: {out}"
+        );
     }
 
     // -- render_update -----------------------------------------------------

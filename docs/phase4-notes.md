@@ -54,17 +54,36 @@ acceptable (the guard's stated job was never "preserve every byte", only
 "preserve the declared packages") or whether the promise in this project's
 own design language needs a text-level check alongside the semantic one.
 
-**`scan_or_warn`'s doc comment overstates what it guarantees.** It claims
-"under-reporting, never over-acting" for a failed winget scan, and the
-"never over-acting" half is correct — an empty `Scan` cannot fabricate a
-prune, since `plan()`'s prune loop only ever iterates `installed`. But a
-declared, locked, installed and **converged** winget package renders as
-`Divergence::Install` ("would install `<version>`") after a failed scan,
-which is a divergence that does not exist — the package was never actually
-missing, `scan()` just could not confirm it this run. That is not
-over-*acting* (`apply` still cannot install anything for winget), but it is a
-false report line: a user reading `apply`'s output would be told dotpkg
-wants to install something it does not. Task 14, deferred, not yet fixed.
+**Three winget-scan failure modes are one family, safe only because winget
+is `Capability::ReportsOnly`, and nothing said so in one place until now.**
+
+`scan_or_warn`'s own doc comment (`src/backend/mod.rs:198-202`) justifies
+safety only in the prune direction — "`plan()`'s prune loop only ever
+iterates `installed`, so an empty scan can never fabricate a prune." That
+half is correct. It says nothing about the other direction: a declared,
+locked, installed and **converged** winget package renders as
+`Divergence::Install` ("would install `<version>`") after any scan that
+comes back empty, which is a divergence that does not exist — the package
+was never actually missing, `scan()` just could not confirm it this run.
+Today that is *only* a false report line, because `apply` still cannot
+install anything for winget (`Capability::ReportsOnly`, again) — a user
+reading `apply`'s output is told dotpkg wants to install something it does
+not, but nothing actually happens. The day `Capability` becomes `Acts`, the
+same rendering, unchanged, is dotpkg installing a package that is already
+there. Over-*reporting* today, over-*acting* tomorrow, from the same line.
+
+`Winget::scan` widens how often that empty scan happens: it treats **every**
+`WingetCmd::run` error as "winget is absent" (the trait's `anyhow::Result`
+erases `io::ErrorKind` before `scan` ever sees it, unlike `Scoop::scan`,
+which distinguishes `NotFound` from other error kinds), so a broken or
+permission-denied `winget.exe` — present, not absent — hits the same
+empty-`Scan` path as a genuinely missing one, and gets the same false
+`Divergence::Install` treatment above.
+
+Recorded, not fixed, because `plan()` does not act on winget packages yet
+and the only consumer of a wrong `Divergence::Install` today is the report
+line, not a mutation decision — this is the condition to clear **before** an
+executor exists, not after.
 
 **`plan_backend` calls the scoop-specific `Arch::as_scoop()` unconditionally**
 (`src/plan.rs:315`, `:375`), regardless of `view.backend`. Harmless today
@@ -85,10 +104,18 @@ per backend (`src/plan.rs:522-551`, the `backends` array plus a loop, not a
 hardcoded scoop-then-winget duplication) — that half is real. But
 `Capability` still exists specifically to let `plan_backend` special-case
 `ReportsOnly` against `Acts`, and `as_scoop()` above is still called
-unconditionally. A third backend would slot into the loop without a code
-change to `plan()` itself, but it would inherit scoop's arch vocabulary
-unless someone remembers to fix that first, and it would need a `Capability`
-value decided for it by a human, not inferred. **Half true, not fully
+unconditionally. `plan_backend` itself is generic -- one function, dispatched
+per `BackendView`, with no backend-specific branch inside it -- but `plan()`
+is not: it still enumerates backends by hand. Its `backends` array
+(`src/plan.rs:531-548`) is a hardcoded two-element literal naming
+`declared.scoop`/`declared.winget`/`lock.scoop`/`lock.winget` directly, and
+both `Config` (`src/config.rs:8-11`) and `Lock` (`src/lock.rs:32-35`) are
+per-backend structs, not maps a loop could walk. A third backend needs a code
+change to `plan()` itself -- a new array element naming its own `Config`/
+`Lock` fields, and those fields added to both structs first -- on top of
+inheriting scoop's arch vocabulary unless someone remembers to fix that
+first, and needing a `Capability` value decided for it by a human, not
+inferred. **Half true, not fully
 withdrawn, and a phase that overstated what it achieved is how the next one
 inherits a surprise** — recording it here so Phase 4b does not have to
 rediscover it by reading the diff.
@@ -466,9 +493,10 @@ same task).
 - **Task 11:** `Winget::scan` treats any `WingetCmd::run` error as "winget
   absent" — the trait's `anyhow::Result` erases `io::ErrorKind` before
   `scan` ever sees it, unlike `Scoop::scan`, which distinguishes `NotFound`
-  from other error kinds. Matches the brief exactly; worth deciding later
-  whether "present but unexecutable" (a corrupt `winget.exe`, a permissions
-  problem) should read as a real failure rather than "absent."
+  from other error kinds. Matches the brief exactly. Elevated to "Read this
+  first" above and merged with `scan_or_warn`'s over-acting risk — a broken
+  `winget.exe` reading as "absent" is the same empty-scan failure mode, not
+  a separate one.
 - **Task 12 / Task 13, still open across both:** no fixture pair exists for
   one package having both a plain `show` and a `show --versions` capture
   taken together, so the "`show`'s `Version:` agrees with `--versions`
@@ -516,8 +544,16 @@ same task).
    loss**, structurally, because they compare parsed `Config` values.
    The one bug this blindness let through is fixed; the blindness itself
    is not.
-4. **`scan_or_warn`'s doc comment overstates**: a converged, installed
-   winget package can render as `Divergence::Install` after a failed scan.
+4. **Three winget-scan failure modes are one family, safe only because
+   winget is `Capability::ReportsOnly`**: `scan_or_warn`'s doc comment
+   overstates in the install direction (a converged, installed winget
+   package can render as a false `Divergence::Install` after a failed
+   scan), and `Winget::scan` treats any `WingetCmd::run` error — including a
+   broken or permission-denied `winget.exe`, not just a genuinely absent
+   one — as that same empty-scan case, widening how often it fires. Today
+   only a wrong report line; over-*acting*, not just over-*reporting*, the
+   day `Capability` becomes `Acts`. Clear before an executor exists. See
+   "Read this first."
 5. **`plan_backend` calls `Arch::as_scoop()` unconditionally.** A third
    backend with per-package arch options would silently inherit scoop's
    vocabulary.
@@ -552,6 +588,3 @@ same task).
    the merged `opaque` list's lost backend attribution, `--prepare` not
    consulting `has_reported_only`, and whether `status`'s exit code should
    float at all.
-14. **`Winget::scan` cannot distinguish "winget present but broken" from
-   "winget absent"** — the `WingetCmd` trait's `anyhow::Result` erases
-   `io::ErrorKind` before `scan` sees it.

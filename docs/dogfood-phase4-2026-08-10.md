@@ -45,11 +45,17 @@ Captured before anything ran.
 read `$env:SCOOP\cache` in a `-NoProfile` PowerShell session and got a false
 `0` — `SCOOP` is only set inside this machine's interactive `$PROFILE`, which
 `-NoProfile` skips, so the path resolved to nothing and `Get-ChildItem`
-silently returned empty. `dotpkg.exe` itself was never affected — `Scoop::
-discover()` does not depend on that env var, and its own output matched the
-machine correctly throughout every run in this session (`app count: 31`
-against the real, hardcoded path). The false `0` was caught before it reached
-any conclusion: the real cache count, read against `C:\Users\kln\scoop\cache`
+silently returned empty. `dotpkg.exe` itself was never affected, but not for
+the reason first written here: `Scoop::discover()` does **not** ignore
+`$SCOOP` — it reads it first, then falls back `USERPROFILE` → `HOME` → the
+literal `"scoop"` (`src/backend/scoop.rs:164-171`). There is no hardcoded
+path. What actually protected the app-count measurement is that `dotpkg.exe`
+ran in the *same* `-NoProfile` session, so `$SCOOP` was equally unset for
+it — and `discover()`'s fallback lands on `%USERPROFILE%\scoop`, which
+happens to be a14's real scoop root. The two readings agreed (`app count:
+31`) because the fallback was right on this machine, not because dotpkg is
+immune to the env var. The false `0` was caught before it reached any
+conclusion: the real cache count, read against `C:\Users\kln\scoop\cache`
 directly, is **82**, two more than Phase 3's own recorded ending value of 80.
 Nothing in this session declared or touched a scoop package, so nothing here
 could have grown it — recorded as unexplained rather than attributed, the same
@@ -175,10 +181,14 @@ individually, named, with both versions and the reason:
 ```
 
 `0 failed, 0 not locked` — the exit code is not a verdict on the lock, exactly
-Phase 3's own Q1 finding restated for winget. **The floor to `EXIT = 1` is
-`floor_exit_code`'s `has_reported_only` branch**, and every one of the 8 lines
-that caused it names itself as the reason, in place, rather than requiring the
-reader to infer it from the exit code alone.
+Phase 3's own Q1 finding restated for winget. **The floor to `EXIT = 1` here
+is `--prepare`'s own `outstanding_skips()` check** (`src/main.rs:335-337`:
+`if !preparation.is_ok() || !preparation.outstanding_skips().is_empty() {
+std::process::exit(1); }`), not `floor_exit_code` — that function's only
+call site is the non-`--prepare` `apply` path (`src/main.rs:514`), and this
+run never reaches it. Every one of the 8 lines that caused the floor names
+itself as the reason, in place, rather than requiring the reader to infer it
+from the exit code alone.
 
 **A genuine rendering defect surfaced here, not fixed.** `apply --prepare`
 prints the plan twice — once through the ordinary `render(plan)` path (well
@@ -199,9 +209,11 @@ separator:
 ```
 
 Legible only because the id and version happen not to share digits at the
-boundary. Reported for `docs/phase4-notes.md`; **not changed** — this dogfood
-is read-only for source, same as every command it ran was read-only for
-winget.
+boundary. Reported for `docs/phase4-notes.md`; **not changed by this
+dogfood** — it is read-only for source, same as every command it ran was
+read-only for winget. **Fixed afterward**, in Task 16's own fix wave
+(`src/render.rs:229`, widened column plus a literal separator, commit
+`6683dd3`) — see `docs/phase4-notes.md`'s "The dogfood" section.
 
 ## Q4 — does any declared winget package fail `show -v <pinned>` today?
 
@@ -351,10 +363,12 @@ packages` array's last element when it appends a new one, because
 `add_winget_package`'s `packages.set_trailing("\n")` overwrites the array's
 own trailing decor without preserving whatever comment text lived there. Real,
 reproducible on the machine that found it and, independently, in a from-source
-Rust reproduction. **Not fixed** — Step 4 of this task is read-only, and
-fixing a `src/config_edit.rs` defect discovered by the dogfood is exactly the
-kind of change that belongs in `docs/phase4-notes.md`'s carried-forward list
-for whoever picks it up next, not folded into this task silently.
+Rust reproduction. **Not fixed by this dogfood** — Step 4 of this task is
+read-only, and fixing a `src/config_edit.rs` defect discovered by the
+dogfood belonged in `docs/phase4-notes.md`'s carried-forward list, not
+folded into this task silently. **Fixed since**, in Task 16's own fix wave
+(the shared `append_to_packages_array`, commit `6683dd3`) — see
+`docs/phase4-notes.md`'s "The dogfood" section.
 
 ## What this dogfood deliberately did NOT cover
 
@@ -433,10 +447,14 @@ only `Cargo.toml`, `Cargo.lock`, `src\`, `tests\`, `target\`) and
   `UTF8Encoding($false)`.
 - **`$env:SCOOP` is unset in a `-NoProfile` PowerShell session on this
   machine** — it is only set inside the interactive `$PROFILE`. `dotpkg.exe`
-  is unaffected (`Scoop::discover()` does not read it the same way), but a
-  standalone verification script that reads `$env:SCOOP` directly needs its
-  own hardcoded fallback or it will silently report an empty scoop root.
-  Worth carrying forward for whichever session hits this next.
+  reads that same unset `$SCOOP` (`Scoop::discover()` checks it first, like
+  any other caller — see "What the machine is" above for why that still
+  produced the right answer here); it was unaffected only because its own
+  fallback cascade landed on `%USERPROFILE%\scoop`, a14's real root. A
+  standalone verification script that reads `$env:SCOOP` directly and stops
+  there, with no such fallback, needs its own or it will silently report an
+  empty scoop root. Worth carrying forward for whichever session hits this
+  next.
 - Never start or stop `kanata`. Recorded its process name and PID before and
   after; both unchanged.
 - Build from a tarball of `Cargo.toml`, `Cargo.lock`, `src/`, `tests/` —

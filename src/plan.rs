@@ -56,11 +56,19 @@ pub enum Divergence {
     /// `ReportsOnly` backend: `apply` could not act on this package even
     /// *with* a lock entry, so refusing the entire run -- including every
     /// unrelated scoop action in the same plan -- over one that does not
-    /// exist yet helps nobody. It is also advice `dotpkg update` cannot
-    /// follow today: `update::run` explicitly declines to resolve winget
-    /// packages and carries existing pins through untouched, so "run
-    /// `dotpkg update`" would be false for exactly the case that reaches
-    /// this variant.
+    /// exist yet helps nobody.
+    ///
+    /// `dotpkg update` **can** get this package a lock entry: Task 15 made
+    /// `update::run` resolve winget too -- it runs `winget source update`
+    /// (`src/update.rs:403-416`), calls `winget.resolve_latest` per declared
+    /// package (`:420-459`), and `fold_backend` writes the result into
+    /// `pkg.lock`'s `winget` table (`:477-487`). This variant's doc comment
+    /// used to argue the other way (`update::run` declines to resolve
+    /// winget, so "run `dotpkg update`" would be false here) -- that was
+    /// true before Task 15 and became false the moment Task 15 landed;
+    /// `describe()` below now points at `dotpkg update` for exactly that
+    /// reason. What `update` still cannot do is install the package once it
+    /// has a version, which is why the rendered text says that instead.
     NotLocked,
     /// Declared and locked, but nothing is installed: the version dotpkg
     /// would have installed.
@@ -83,12 +91,13 @@ impl Divergence {
     /// explanation reads identically whether it came from `status` or from
     /// `apply`'s preparation table.
     ///
-    /// `NotLocked`'s text deliberately does not say "run `dotpkg update`" --
-    /// see that variant's own doc comment for why that advice is false here.
+    /// `NotLocked`'s text does say "run `dotpkg update`" -- see that
+    /// variant's own doc comment for why that advice is true now, even
+    /// though an earlier version of this comment said the opposite.
     pub fn describe(&self) -> String {
         match self {
-            Divergence::NotLocked => "declared, but not in pkg.lock -- reported only, \
-                 dotpkg cannot resolve or install a winget package yet"
+            Divergence::NotLocked => "declared, but not in pkg.lock -- run `dotpkg update` \
+                 to get a lock entry; dotpkg cannot install a winget package yet"
                 .to_string(),
             Divergence::Install { version } => format!(
                 "would install {version} -- reported only, dotpkg cannot install or \

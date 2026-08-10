@@ -1454,10 +1454,21 @@ mod tests {
             );
         };
         assert!(why.contains("not in pkg.lock"), "got {why}");
+        // `dotpkg update` now does create a winget lock entry (Task 15,
+        // `update::run` resolving winget too) -- the reverse of what this
+        // assertion checked before that landed. Paired with the negative
+        // assertion below: resolving is no longer impossible, only
+        // installing still is, so the text must name the fix without
+        // reintroducing a "cannot resolve" claim.
         assert!(
-            !why.contains("dotpkg update"),
-            "dotpkg update does not create a winget lock entry today, so this \
-             advice would be false: {why}"
+            why.contains("dotpkg update"),
+            "dotpkg update can create a winget lock entry now, so the fix \
+             must be named: {why}"
+        );
+        assert!(
+            !why.contains("cannot resolve"),
+            "installing is still impossible, but resolving is not -- the \
+             text must not claim otherwise: {why}"
         );
 
         // The positive control: without it, a `prepare()` that always

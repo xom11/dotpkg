@@ -962,7 +962,7 @@ fn a_declared_package_skipped_as_running_is_outstanding_not_success() {
     // printed after `execute` returns: the exact line `main.rs` must push
     // into `Execution` for the exit code to be explainable at all.
     let closing_line = format!(
-        "  held    scoop  {:<13}running -- stop it first\n",
+        "  held    scoop  {:<14} running -- stop it first\n",
         "aichat"
     );
     assert!(
@@ -1066,7 +1066,7 @@ fn a_declared_package_whose_manifest_is_unreadable_is_outstanding_not_success() 
          not success: stdout: {stdout} stderr: {stderr}"
     );
     let closing_line = format!(
-        "  held    scoop  {:<13}installed, but its state could not be read -- see the warnings above\n",
+        "  held    scoop  {:<14} installed, but its state could not be read -- see the warnings above\n",
         "aichat"
     );
     assert!(

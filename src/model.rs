@@ -259,6 +259,17 @@ impl Running {
     pub fn covers_name(&self, name: &Name) -> bool {
         self.dirs.contains(name) || self.names.contains(name.key())
     }
+
+    /// `covers_name`'s two signals plus an explicit guard list, for a caller
+    /// that has a package name and a set of plausible process names but no
+    /// `Installed` -- which is `execute`'s per-step re-sampler, whose only
+    /// input is a `Step`.
+    ///
+    /// `covers` remains the form to use wherever an `Installed` is available;
+    /// this exists because the executor deliberately does not carry one.
+    pub fn covers_any(&self, name: &Name, guard: &[String]) -> bool {
+        self.covers_name(name) || guard.iter().any(|g| self.names.contains(g))
+    }
 }
 
 #[cfg(test)]
@@ -421,5 +432,29 @@ mod tests {
             !by_dir.covers_name(&Name::new("fzf")),
             "an unrelated directory must not be covered"
         );
+    }
+
+    #[test]
+    fn covers_any_sees_a_guard_name_that_covers_name_cannot() {
+        // `covers_name` is dirs-or-names only. For a winget package `dirs` can
+        // never contain the id (it is filled from the scoop root alone) and the
+        // id itself is never a process name, so the mid-run re-sampler was
+        // 0-of-36 even after `bins` was populated for the planner.
+        let r = Running::new(BTreeSet::from(["brave".to_string()]), BTreeSet::new());
+        let id = Name::new("Brave.Brave");
+        assert!(!r.covers_name(&id), "this is the blind spot being closed");
+        assert!(r.covers_any(&id, &["brave".to_string()]));
+
+        // Both halves of covers_name must still work through covers_any, or a
+        // scoop step (whose guard list is empty) loses its guard entirely.
+        assert!(r.covers_any(&Name::new("brave"), &[]), "the names half");
+        let by_dir = Running::new(BTreeSet::new(), BTreeSet::from([Name::new("nodejs")]));
+        assert!(
+            by_dir.covers_any(&Name::new("nodejs"), &[]),
+            "the dirs half"
+        );
+
+        // And it must not match everything.
+        assert!(!r.covers_any(&Name::new("fzf"), &["notepad".to_string()]));
     }
 }

@@ -1583,3 +1583,39 @@ fn a_winget_id_that_collides_with_defer_last_is_still_not_deferred() {
          alphabetical order, not get pushed to the end of its group: {got:?}"
     );
 }
+
+// -- Task 5: the mid-run re-sampler stops being blind to winget -----------
+
+#[test]
+fn a_winget_package_that_starts_running_mid_run_is_held() {
+    // The case the re-sampler exists for, for the backend it could not see.
+    // Before `covers_any`, this step ran and the browser was replaced.
+    let t = Tree::new();
+    t.empty_apps();
+    let fake = Fake::honest(&t);
+    let wm = FakeWingetMutator::unreachable();
+    let steps = vec![Step::Winget(WingetStep::Remove {
+        id: Name::new("Brave.Brave"),
+        version: "151.1.93.132".to_string(),
+        guard: vec!["brave".to_string()],
+    })];
+    let mut state = State::default();
+    let sample = || {
+        Running::new(
+            std::collections::BTreeSet::from(["brave".to_string()]),
+            Default::default(),
+        )
+    };
+    let ex = execute(
+        t.root(),
+        steps,
+        &fake,
+        &wm,
+        &mut state,
+        &sample,
+        &ExecOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(ex.held(), 1, "got {:?}", ex.results);
+    assert!(matches!(&ex.results[0].1, ItemResult::Held(_)));
+}

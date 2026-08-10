@@ -654,7 +654,7 @@ pub fn execute(
         let app = step.app().clone();
         // Called here, per step -- not hoisted out of the loop. See the
         // function doc for why a snapshot cannot do this job.
-        if running().covers_name(&app) {
+        if running().covers_any(&app, step.guard_names()) {
             ex.results.push((
                 app,
                 ItemResult::Held(

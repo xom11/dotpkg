@@ -168,7 +168,7 @@ fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> 
 /// fresh install obviously is one. A winget *version change* is counted as an
 /// install rather than a replacement because `replaces` is not "how many
 /// versions change", it is the number the prompt's second sentence is about:
-/// "Every version change is an uninstall followed by an install, in both
+/// "A scoop version change is an uninstall followed by an install, in both
 /// directions" -- true of `ScoopStep::Replace`, which is the only way scoop
 /// can change a version, and measurably false of `WingetStep::Set`, which is
 /// one `install --version` call that opens no window where the package is
@@ -176,6 +176,11 @@ fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> 
 /// would make the prompt warn about a risk this step does not carry; counting
 /// it as neither would put a false zero in the one line the user reads before
 /// saying yes.
+///
+/// That sentence used to read "Every version change", unconditionally, which
+/// made the wording false for a winget-only run no matter how this function
+/// counted. `confirm_question` is where it was narrowed and scoped; this count
+/// is what gates it.
 ///
 /// `WingetStep::Remove` counts as neither, exactly like
 /// `ScoopStep::Remove`: removals have their own count at the call site.
@@ -189,6 +194,42 @@ fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
             Step::Winget(WingetStep::Set { .. }) => (replaces, installs + 1),
             Step::Winget(WingetStep::Remove { .. }) => (replaces, installs),
         })
+}
+
+/// The one line a user reads before saying yes.
+///
+/// A function, not a `format!` in the `apply` arm, for the reason
+/// `unrouted_warning` and `floor_exit_code` are functions: this exact text has
+/// carried a false number twice before, and a sentence nothing can assert is a
+/// sentence nothing protects.
+///
+/// **The uninstall-then-install warning is conditional, and it names scoop.**
+/// It used to read "Every version change is an uninstall followed by an install,
+/// in both directions", unconditionally. That is true of `ScoopStep::Replace` --
+/// the only way scoop can change a version, because `install` over an installed
+/// app is a measured no-op, so scoop needs an uninstall half and therefore a
+/// window in which the package is absent. It is **measurably false** of
+/// `WingetStep::Set`: `install --version <pin>` performs the change directly
+/// (measured, 0.24.1 -> 0.26.1, exit 0), so a winget version change is one call
+/// and the package is never absent.
+/// `count_replaces_and_installs`'s own doc comment already said so, and the
+/// sentence was left standing in the line the user reads before consenting --
+/// the design's *"it must not be left implied"*, implied.
+///
+/// So: printed only when `replacements > 0`, which is the only way a
+/// `ScoopStep::Replace` is in the run, and scoped to the backend it is true of.
+/// The three counts themselves are unchanged; `WingetStep::Set` still counts as
+/// an install, which is what it is.
+fn confirm_question(replacements: usize, installs: usize, removals: usize) -> String {
+    let replace_warning = if replacements > 0 {
+        " A scoop version change is an uninstall followed by an install, in both directions."
+    } else {
+        ""
+    };
+    format!(
+        "\n{replacements} package(s) will be uninstalled and reinstalled, {installs} \
+         installed, {removals} removed.{replace_warning} Continue? [y/N] "
+    )
 }
 
 /// The warning for a ready outcome that no executor step claimed, or `None`
@@ -616,11 +657,7 @@ fn main() -> Result<()> {
 
             let removals = steps.iter().filter(|s| s.is_remove()).count();
             let (replacements, installs) = count_replaces_and_installs(&steps);
-            let question = format!(
-                "\n{replacements} package(s) will be uninstalled and reinstalled, {installs} \
-                 installed, {removals} removed. Every version change is an uninstall followed \
-                 by an install, in both directions. Continue? [y/N] "
-            );
+            let question = confirm_question(replacements, installs, removals);
             if !yes {
                 let stdin = std::io::stdin();
                 let mut lock_in = stdin.lock();
@@ -1130,6 +1167,61 @@ mod tests {
         );
         assert_eq!(merged_opaque, vec![Name::new("zellij")]);
         assert_eq!(unscannable, vec![WINGET], "got {unscannable:?}");
+    }
+
+    // -- the confirmation prompt ---------------------------------------------
+
+    #[test]
+    fn the_consent_prompt_only_promises_an_uninstall_and_reinstall_when_one_is_planned() {
+        // **This project has fixed a false number in this exact line twice.**
+        // The sentence "Every version change is an uninstall followed by an
+        // install, in both directions" is true of `ScoopStep::Replace` -- the
+        // only way scoop can change a version, because `install` over an
+        // installed app is a measured no-op -- and measurably false of
+        // `WingetStep::Set`, which is one `install --version` call that opens no
+        // window where the package is absent. `count_replaces_and_installs`'s own
+        // doc comment says exactly that, and the sentence was left standing in
+        // the line the user reads before consenting.
+        //
+        // Two changes, both asserted here: the sentence appears only when a
+        // replacement is really planned, and it now names scoop rather than
+        // claiming "every version change".
+
+        // A winget-only run: one `Set`, no `Replace`. The old text told this user
+        // their package would be uninstalled first. It will not be.
+        let winget_only = confirm_question(0, 1, 0);
+        assert!(
+            winget_only.contains(
+                "0 package(s) will be uninstalled and reinstalled, 1 installed, 0 removed."
+            ),
+            "the counts are unchanged: {winget_only}"
+        );
+        assert!(
+            !winget_only.contains("uninstall followed by an install"),
+            "nothing in this run is an uninstall-then-install, so the promise must \
+             not be made: {winget_only}"
+        );
+        assert!(
+            winget_only.ends_with("removed. Continue? [y/N] "),
+            "the question still follows the counts directly: {winget_only:?}"
+        );
+
+        // A run that really does contain a `ScoopStep::Replace`: the warning is
+        // owed, and it is owed about scoop.
+        let with_replace = confirm_question(2, 1, 3);
+        assert!(
+            with_replace.contains(
+                "2 package(s) will be uninstalled and reinstalled, 1 installed, 3 removed. \
+                 A scoop version change is an uninstall followed by an install, in both \
+                 directions. Continue? [y/N] "
+            ),
+            "the whole sentence, scoped to the backend it is true of: {with_replace:?}"
+        );
+        assert!(
+            !with_replace.contains("Every version change"),
+            "\"every\" is what made it false -- a winget version change is one call: \
+             {with_replace}"
+        );
     }
 
     // -- reconcile_ghosts ----------------------------------------------------

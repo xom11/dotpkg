@@ -28,6 +28,34 @@
 
 ---
 
+## Execution Order
+
+**Task numbers are stable and are NOT the execution order.** They are how
+`task-brief PLAN_FILE N` finds a task, so renumbering would break the tooling.
+Execute in this order:
+
+```
+1  →  2  →  6  →  3  →  11  →  4  →  5  →  7  →  8  →  9  →  10
+   →  12 →  13 →  14 →  15 →  16 →  17
+```
+
+Three dependencies force it, and the first draft of this plan got two of them
+wrong by deferring tests across task boundaries:
+
+- **Task 6 before Task 3.** Task 6 gives `plan()` its `unscannable` parameter.
+  Task 3's test calls `plan()`, so running it first would mean writing the call
+  with a signature that is about to change — which is what the first draft
+  papered over with "omit that argument if this task runs before Task 6."
+- **Task 11 before Task 4.** Task 4 gives `execute` its `&dyn WingetMutator`
+  parameter, and that trait is defined in Task 11. Task 11 depends only on
+  `CmdError` (Task 6) and touches nothing Task 4 touches.
+- **Task 4 before Tasks 5 and 7.** Once `execute`'s signature is final at Task
+  4, every test in Tasks 5 and 7 compiles and runs inside its own task. The
+  first draft instead deferred three tests to Task 15, which would have ended
+  two tasks with code that does not compile — and a task that cannot run its
+  own tests has no independently testable deliverable, which is the one thing
+  every task here is required to have.
+
 ## File Structure
 
 **Created:**
@@ -602,7 +630,15 @@ pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
 
 `WingetStep::Set` groups with installs, not replacements: it is one call and opens no absent-window, so it carries none of the reason `Replace` sorts after `Install`.
 
-- [ ] **Step 5: Make `run_step` and `execute` route, with winget unimplemented for now**
+- [ ] **Step 5: Make `run_step` and `execute` route, and finalise both signatures here**
+
+**`run_step` and `execute` each gain a `wm: &dyn WingetMutator` parameter in this
+step**, from Task 11 — which is why Task 11 runs before this task (see Execution
+Order). The parameter is unused until Task 14 fills the winget arm, and that is
+deliberate: finalising the signature here is what lets Tasks 5 and 7 write tests
+that compile and run inside their own task instead of deferring them. An unused
+parameter for two tasks is a smaller cost than two tasks that cannot run their
+own tests.
 
 `run_step`'s existing body becomes `run_scoop_step(root, m, state, step: &ScoopStep)` unchanged. Add:
 
@@ -781,7 +817,16 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
 }
 ```
 
-**This test cannot be completed until Task 15 gives `execute` its winget mutator parameter.** Write it now with the call site left as a compile error, run it to see the error, then **move this test's completion into Task 15's step list** and note that in the task report. Do not leave it commented out — a commented-out test is a test that cannot go red.
+`execute`'s signature is already final: Task 4 gave it the `&dyn WingetMutator`
+parameter (see Execution Order for why Task 4 runs before this one). So pass
+`FakeWingetMutator::unreachable()` here — the step is held before any mutation is
+attempted, so a winget call would mean the guard did not fire, and
+`unreachable()` turns that into a loud panic instead of a silent pass.
+
+**Then verify this test can fail:** delete the `covers_any` call added in Step 5,
+confirm the test goes red, and restore it. A guard test that was never seen red is
+a guard test that proves nothing — three of Phase 4's fifteen plan defects were
+exactly this shape.
 
 - [ ] **Step 7: Run the suite**
 
@@ -1068,7 +1113,10 @@ fn a_run_with_even_one_scoop_step_still_needs_a_scoop_root() {
 }
 ```
 
-Both call sites depend on `execute`'s final signature (Task 15). Write them, run them to see the compile error, and **complete them in Task 15**, noting that in the report.
+`execute`'s signature is final as of Task 4, so both call sites compile here.
+Pass `FakeWingetMutator::unreachable()` in the first (a refusal check must not
+reach a mutator) and a plain `FakeWingetMutator::returning(0, String::new())` in
+the second, whose point is that `execute` returns `Err` before any step runs.
 
 - [ ] **Step 2: Make the check conditional**
 
@@ -1331,18 +1379,29 @@ fn elevated_answers_or_admits_it_does_not_know() {
     // never panics -- because its caller (`apply`'s winget removal
     // pre-check) treats `None` as "do not refuse", and a panic here would
     // take down a run that was about to do useful work.
+    // The call itself is the assertion on Windows: `#[test]` fails on a panic,
+    // and "does not panic" is the property the caller depends on -- `apply`'s
+    // winget-removal pre-check treats `None` as "do not refuse", so a panic
+    // here would take down a run that was about to do useful work.
     let answer = elevated();
     #[cfg(not(windows))]
     assert_eq!(answer, None, "there is no elevation concept to report here");
     #[cfg(windows)]
-    assert!(
-        answer.is_some() || answer.is_none(),
-        "total by construction; this line exists so the cfg has a body"
-    );
+    let _ = answer;
 }
 ```
 
-The `#[cfg(windows)]` half is deliberately weak and **must not be read as coverage**. Note in the task report that `elevated()`'s Windows branch is verified only by the Windows build and by the dogfood, exactly the way `resolve_root`'s prefix stripping was — and that is the case Phase 4 proved the Windows run exists for.
+**There is deliberately no `#[cfg(windows)]` assertion on the value**, and the
+first draft of this plan had one — `assert!(answer.is_some() || answer.is_none())`
+— which is a tautology dressed as a test. The value cannot be asserted: it
+depends on how the test runner was launched. Writing a tautology to give the
+`cfg` arm a body is `docs/phase4-notes.md`'s pattern 1 (a test that cannot fail,
+reading as a pass) reproduced on purpose, so it is not written.
+
+State plainly in the task report: **`elevated()`'s Windows branch is verified
+only by Step 5's a14 build and by the dogfood** — the same position
+`resolve_root`'s prefix stripping was in, which is the defect the Windows run
+caught in Phase 4 after seven tasks of green macOS runs.
 
 - [ ] **Step 3: Implement it**
 
@@ -2228,10 +2287,20 @@ fn the_recovery_file_carries_a_winget_line_built_from_the_mutators_own_argv() {
         !text.contains("Vivaldi"),
         "a removal must never appear in a file that only reinstalls:\n{text}"
     );
-    // The honest sentence about what a winget line is worth.
+    // The honest sentence about what a winget line is worth. Asserted on a
+    // phrase that ONLY that sentence can contain -- `text.contains("winget")`
+    // would pass on the argv line itself and prove nothing, which is what the
+    // first draft of this plan asserted.
     assert!(
-        text.contains("index") && text.contains("winget"),
-        "the file must say a winget line is a request against an index:\n{text}"
+        text.contains("re-resolved against an index dotpkg does not hold"),
+        "the file must say what a winget line is worth, not just contain the \
+         word winget:\n{text}"
+    );
+    // And the control: the scoop half's own promise must still be stated, or a
+    // rewrite that replaced one sentence with the other would pass above.
+    assert!(
+        text.contains("hash-verified"),
+        "the scoop promise must survive alongside the winget one:\n{text}"
     );
 }
 ```
@@ -2303,7 +2372,15 @@ Review the whole branch by **running** it, not by reading it. Then fast-forward 
 
 **1. Spec coverage.** Every spec section maps to a task: A1 → Tasks 2, 3, 5; A2 → Task 6; A3 → Task 9; A4 → Tasks 1, 10, 15; A5 → Task 4; A6 → Task 7; A7 → Task 8; B1 → Task 11; B2 → Task 12; B3 → Tasks 11, 14; B4 → Tasks 13, 14; B5 → Task 13; B6 → Task 16; Testing/Dogfood → Task 17. The spec's four "Corrections to earlier documents" are covered by Task 2 Step 10 (the three `Running` comments), Task 1 Step 6 (PROVENANCE drift), Task 13 Step 1 (the `describe()` sentences); the `depends` correction is documentation-only and already committed at `25ea0a0`.
 
-**2. Placeholders.** Three tests are deliberately written with an incomplete call site (Task 5 Step 6, Task 7 Step 1 ×2) because `execute`'s signature is not final until Task 15. Each says so, names Task 15 as where it completes, and is explicitly **not** to be committed commented-out. Task 8 Step 1's test body is prose rather than code, because it depends on `tests/cli.rs` helpers whose exact names this plan has not read — the implementer reads them; the two conditions the test must satisfy (a present package alongside the ghost, or it passes for the wrong reason) are stated exactly.
+**2. Placeholders.** Task 8 Step 1's test body is prose rather than code, because it depends on `tests/cli.rs` helpers whose exact names this plan has not read — the implementer reads them; the two conditions the test must satisfy (a present package alongside the ghost, or it passes for the wrong reason) are stated exactly. Everything else contains the code to write.
+
+**Pre-flight scan, run before Task 1 was dispatched — three findings, all author-side, all fixed in place:**
+
+1. **Three tests with a call site that could not compile** (Task 5 Step 6, Task 7 Step 1 ×2), deferred to Task 15 because `execute`'s signature was not final. That would have ended two tasks with code that does not compile, and a task that cannot run its own tests has no independently testable deliverable. **Fixed** by finalising `execute`'s signature in Task 4 and adding the Execution Order section that makes Task 11 precede it. The deferral is gone.
+2. **Task 10 mandated a tautology** — `assert!(answer.is_some() || answer.is_none())` — to give a `#[cfg(windows)]` arm a body. That is `docs/phase4-notes.md`'s pattern 1 written on purpose. **Fixed:** no value assertion on Windows, and the report states outright that the Windows branch's only verification is the a14 build.
+3. **Task 16 asserted `text.contains("winget")`**, which the argv line satisfies on its own, so the assertion could not fail for the reason it existed. **Fixed:** asserts a phrase only the explanatory sentence can contain, plus a control that the scoop promise survives alongside it.
+
+The rest of the plan scanned clean against the Global Constraints: no task contradicts another, and no task mandates verbatim duplication of a logic block — Task 16 explicitly forbids it (`recover.cmd`'s winget line is built from `set_argv`, for the measured reason that hand-duplicating the scoop line left a `-u`-deleting mutant green).
 
 **3. Type consistency.** `guard_names` (Task 2) → `Installed.bins` → `Step::guard_names()` (Task 4) → `Running::covers_any` (Task 5): one concept, three names, each pointing at the next. `CmdError` (Task 6) is used by `WingetCmd` and `WingetMutator` (Task 11) — one error type for both seams. `WingetState`/`winget_verdict` (Task 12) are consumed only by `run_winget_step` (Task 14). `Outcome::ReadyToSet` (Task 13) → `WingetStep::Set` (Task 4). `plan()` gains `unscannable` in Task 6, which is why Task 3's test carries a note about the argument's presence depending on task order.
 

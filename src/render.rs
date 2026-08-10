@@ -1,6 +1,6 @@
 use crate::apply::{Outcome, Preparation, Prepared};
 use crate::execute::{Execution, ItemResult};
-use crate::model::Name;
+use crate::model::{Name, WINGET};
 use crate::plan::{Action, Plan, SkipReason};
 
 /// The plan is the product here: `status` is this and nothing else, and in
@@ -29,6 +29,54 @@ pub fn render(plan: &Plan) -> String {
             } => {
                 format!(
                     "  ^ {backend:<6} {name:<14} {:<24} (upgrade{})",
+                    format!("{from} -> {to}"),
+                    arch_suffix(arch)
+                )
+            }
+            // **A winget downgrade is announced as the refusal it will be, not
+            // as a downgrade.** dotpkg does not downgrade a winget package --
+            // decided, not deferred (the design's Non-goals) -- so this run
+            // reaches `execute`, fires `install --version <pin>`, and comes back
+            // `<id>: installed <x>, pinned <y> -- dotpkg will not downgrade a
+            // winget package`, every run, forever. Rendering it as
+            // `v ... (downgrade, from lock)` and counting it in `change_count()`
+            // put it in the "N change(s)" a user says yes to, and left exit 1 as
+            // the only thing that ever told them otherwise. Announcing a
+            // downgrade in the plan the user consents to is a different decision
+            // from refusing it forever, and only the second one was ever made.
+            //
+            // The design reasoned no render change was needed because
+            // `Divergence::Change { from, to }` carried one shape for both
+            // directions and printed no arrow. Phase 4b Task 13 deleted
+            // `Divergence`, so that premise expired inside this branch.
+            //
+            // **Decided here, at the render, and NOT at the planner.** The
+            // planner keeps emitting whichever of `Upgrade`/`Downgrade`
+            // `plan::is_older` picks, and the step is still built and still
+            // fired: winget's own measured refusal is the gate, which is what
+            // keeps `is_older` cosmetic. Its own doc comment warns that whoever
+            // gates on it "owes it a real version comparison", and winget
+            // versions include `v0.2026.07.15.08.55.stable_01`.
+            //
+            // **The residual, stated rather than hidden:** because `is_older`
+            // is cosmetic, it can pick `Downgrade` for a suffixed version pair
+            // where the machine is really *behind* its pin -- and then this line
+            // predicts a refusal that does not happen, and the package is
+            // upgraded instead. That errs toward "we will not act" where the tool
+            // then acts, which is the safe direction of the two: the opposite
+            // error announces a change and refuses it. It is the same cosmetic
+            // answer as before this fix, shown in a place a user can now notice
+            // it being wrong.
+            Action::Downgrade {
+                backend,
+                name,
+                from,
+                to,
+                arch,
+            } if backend == WINGET => {
+                format!(
+                    "  ! {backend:<6} {name:<14} {:<24} (dotpkg will not downgrade a winget \
+                     package -- run `dotpkg update`{})",
                     format!("{from} -> {to}"),
                     arch_suffix(arch)
                 )
@@ -104,6 +152,16 @@ pub fn render(plan: &Plan) -> String {
         );
         if plan.drift_count() > 0 {
             summary.push_str(&format!(", {} architecture drift", plan.drift_count()));
+        }
+        // Its own clause, for `drift_count`'s reason: `change_count` excludes a
+        // winget downgrade because dotpkg has decided never to perform one, and
+        // a printed `!` line counted in no number at all would read as
+        // "0 change(s), 0 skipped" above a line the user can see.
+        if plan.refused_downgrade_count() > 0 {
+            summary.push_str(&format!(
+                ", {} winget downgrade(s) that will be refused",
+                plan.refused_downgrade_count()
+            ));
         }
         summary.push('\n');
         out.push_str(&summary);
@@ -1050,6 +1108,89 @@ mod tests {
              `Divergence`; none may come back through any other path: {out}"
         );
         assert_eq!(plan.change_count(), 1, "and it counts as a change");
+    }
+
+    #[test]
+    fn a_winget_downgrade_is_announced_as_a_refusal_and_is_not_counted_as_a_change() {
+        // **The plan must not promise something the executor has decided never
+        // to do.** An ahead-of-pin winget package -- the measured `Brave.Brave`
+        // shape, installed 151.1.93.134 against an index newest of
+        // 151.1.93.132 -- reaches `execute` and comes back
+        // "dotpkg will not downgrade a winget package", by design and forever.
+        // Rendering it as `v ... (downgrade, from lock)` and counting it in
+        // `change_count()` puts it in the "N change(s)" the user consents to,
+        // and exit 1 is then the only thing that tells them otherwise.
+        //
+        // The design reasoned this was safe because `Divergence::Change { from,
+        // to }` printed no arrow and carried one shape for both directions.
+        // Phase 4b Task 13 deleted `Divergence`, so that premise expired inside
+        // this branch and the decision it rested on was never made.
+        //
+        // Fixed at the render and the count, never at the planner: gating on
+        // `plan::is_older` would promote a function whose own doc comment says
+        // it is cosmetic, and winget versions include
+        // `v0.2026.07.15.08.55.stable_01`.
+        let plan = Plan {
+            actions: vec![Action::Downgrade {
+                backend: WINGET.into(),
+                name: "Brave.Brave".into(),
+                from: "151.1.93.134".into(),
+                to: "151.1.93.132".into(),
+                arch: None,
+            }],
+        };
+        let out = render(&plan);
+        assert!(
+            out.contains("  ! winget"),
+            "a run that will be refused is not a change dotpkg is about to make: {out}"
+        );
+        assert!(
+            !out.contains("(downgrade, from lock)"),
+            "scoop's downgrade wording announces a downgrade this backend will \
+             not perform: {out}"
+        );
+        assert!(
+            out.contains("will not downgrade"),
+            "the line must say what will actually happen: {out}"
+        );
+        assert!(
+            out.contains("151.1.93.134") && out.contains("151.1.93.132"),
+            "both versions still visible -- that is the whole product of `status`: {out}"
+        );
+        assert_eq!(
+            plan.change_count(),
+            0,
+            "a refusal is not a change, and must not enter the number the user \
+             says yes to"
+        );
+        // But it must be accounted for SOMEWHERE: a printed line counted in no
+        // number reads as "0 change(s), 0 skipped" above a line the user can see.
+        assert!(
+            out.contains("0 change(s), 0 skipped, 1 winget downgrade(s) that will be refused"),
+            "the summary must account for the line it just printed: {out}"
+        );
+
+        // The counterweight: scoop's downgrade really happens, and its line and
+        // its count must be untouched by this.
+        let scoop_plan = Plan {
+            actions: vec![Action::Downgrade {
+                backend: SCOOP.into(),
+                name: "fzf".into(),
+                from: "0.74.2".into(),
+                to: "0.74.1".into(),
+                arch: None,
+            }],
+        };
+        let scoop_out = render(&scoop_plan);
+        assert!(
+            scoop_out.contains("  v scoop") && scoop_out.contains("(downgrade, from lock)"),
+            "scoop downgrades are real and stay announced as downgrades: {scoop_out}"
+        );
+        assert_eq!(
+            scoop_plan.change_count(),
+            1,
+            "and they stay counted -- this fix is scoped to winget"
+        );
     }
 
     #[test]

@@ -374,9 +374,19 @@ fn a_winget_downgrade_is_a_downgrade_not_an_upgrade() {
     // The other side of `is_older`, for winget. `Divergence::Change` had one
     // shape for both directions -- a backend that could not act on either had
     // no reason to carry a distinction that exists purely to pick an arrow.
-    // Winget acts now, so the distinction is back, and `apply` really does
-    // need it: `render` prints "(downgrade, from lock)" and the user is
-    // entitled to see which way the version is moving before saying yes.
+    // Winget acts now, so the distinction is back, and the user is entitled to
+    // see which way the version is moving before saying yes.
+    //
+    // **The planner still emits `Downgrade`, and that is the point of this
+    // test.** `render` no longer prints it as "(downgrade, from lock)" -- it
+    // prints the refusal the executor will produce, and `change_count()`
+    // excludes it -- but the decision was deliberately made THERE and not here.
+    // Gating the planner on `is_older` would promote a function its own doc
+    // comment calls cosmetic, and the step must still be built and fired,
+    // because winget's own measured refusal is the gate rather than dotpkg's
+    // guess about which version is newer. So this asserting `Action::Downgrade`
+    // is a live counterweight: it goes red if anyone "fixes" the announced
+    // downgrade by teaching the planner to compare versions.
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(

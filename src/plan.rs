@@ -92,19 +92,31 @@ impl Plan {
     /// difference was itself a `Skip` (`SkipReason::ReportedOnly`) and this
     /// comment explained why counting it would have put a false number in
     /// that line; winget now `Acts`, so a winget difference is an
-    /// `Install`/`Upgrade`/`Downgrade`/`Prune` like scoop's and is counted
-    /// like scoop's. See `skip_count` for what is still excluded.
+    /// `Install`/`Upgrade`/`Prune` like scoop's and is counted like scoop's.
+    /// See `skip_count` for what is still excluded.
+    ///
+    /// **One exception, and it is a decision rather than an omission: a winget
+    /// `Downgrade` is not counted.** dotpkg does not downgrade a winget package
+    /// -- decided, not deferred -- so such an action reaches `execute`, fires
+    /// `install --version <pin>`, and comes back as winget's own measured
+    /// refusal, every run, forever. Counting it here would put it in the "N
+    /// change(s)" a user says yes to and in the plan `--prepare` calls ready,
+    /// and leave exit 1 as the only thing that ever said otherwise. `render`
+    /// prints the same action as the refusal it will be; the two agree on
+    /// purpose, and `a_winget_downgrade_is_announced_as_a_refusal_and_is_not_
+    /// counted_as_a_change` pins both halves together.
+    ///
+    /// Matched on the action's own `backend` rather than on any version
+    /// comparison: `plan::is_older` stays cosmetic, and the step is still built
+    /// and still fired -- winget's refusal is the gate, not dotpkg's guess. See
+    /// `render`'s own comment on this arm for the residual that leaves.
     pub fn change_count(&self) -> usize {
         self.actions
             .iter()
-            .filter(|a| {
-                matches!(
-                    a,
-                    Action::Install { .. }
-                        | Action::Upgrade { .. }
-                        | Action::Downgrade { .. }
-                        | Action::Prune { .. }
-                )
+            .filter(|a| match a {
+                Action::Install { .. } | Action::Upgrade { .. } | Action::Prune { .. } => true,
+                Action::Downgrade { backend, .. } => backend != WINGET,
+                _ => false,
             })
             .count()
     }
@@ -120,6 +132,25 @@ impl Plan {
         self.actions
             .iter()
             .filter(|a| matches!(a, Action::ArchDrift { .. }))
+            .count()
+    }
+
+    /// Winget downgrades: printed, attempted, and refused by winget itself.
+    ///
+    /// Its own clause in the summary rather than a silent omission, for the same
+    /// reason `drift_count` has one: `change_count` excludes it (see that
+    /// method), and a `!` line accounted for in neither number would leave the
+    /// user reading "0 change(s), 0 skipped" above a line dotpkg just printed.
+    ///
+    /// Not folded into `skip_count`, even though the design's own mock-up put it
+    /// there: nothing skips these. The step is built and `install --version` is
+    /// fired -- winget's measured refusal is the gate, not dotpkg's guess -- so
+    /// "skipped" would be the same kind of nearly-true word this branch spent a
+    /// review removing.
+    pub fn refused_downgrade_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::Downgrade { backend, .. } if backend == WINGET))
             .count()
     }
 }

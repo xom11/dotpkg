@@ -131,10 +131,17 @@ pub enum WingetStep {
     },
 }
 
-/// The id out of a `WingetStep`, regardless of which variant.
-fn w_app(w: &WingetStep) -> &Name {
-    match w {
-        WingetStep::Set { id, .. } | WingetStep::Remove { id, .. } => id,
+impl WingetStep {
+    /// Mirrors `ScoopStep::app()`: the id out of a `WingetStep`, regardless
+    /// of which variant. An inherent method rather than a private free
+    /// function -- the asymmetry with `ScoopStep::app()` had no reason
+    /// behind it, and a later task builds argv from a `WingetStep` it holds
+    /// directly, so it wants this the same way `run_scoop_step` wants
+    /// `ScoopStep::app()`.
+    pub fn app(&self) -> &Name {
+        match self {
+            WingetStep::Set { id, .. } | WingetStep::Remove { id, .. } => id,
+        }
     }
 }
 
@@ -142,7 +149,7 @@ impl Step {
     pub fn app(&self) -> &Name {
         match self {
             Step::Scoop(s) => s.app(),
-            Step::Winget(w) => w_app(w),
+            Step::Winget(w) => w.app(),
         }
     }
     /// Names a live process might report for this step's package, for
@@ -381,7 +388,7 @@ pub fn run_step(
         Step::Winget(w) => {
             let _ = wm;
             StepOutcome::Failed {
-                why: format!("{}: the winget executor is not wired yet", w_app(w)),
+                why: format!("{}: the winget executor is not wired yet", w.app()),
                 touched: false,
             }
         }

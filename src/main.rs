@@ -6,7 +6,7 @@ use dotpkg::backend::{
     winget::{RealWinget, Winget},
     Backend, Scan, ScanOutcome,
 };
-use dotpkg::execute::{ScoopStep, Step};
+use dotpkg::execute::{ScoopStep, Step, WingetStep};
 use dotpkg::model::{Installed, Name, WINGET};
 use dotpkg::state::State;
 use std::io::Write;
@@ -155,6 +155,38 @@ fn floor_exit_code(
     } else {
         code
     }
+}
+
+/// How many `steps` are a scoop version-change and how many are a scoop
+/// fresh install, for the confirmation prompt's "N will be uninstalled and
+/// reinstalled, M installed" wording.
+///
+/// Written as an exhaustive match over every `ScoopStep`/`WingetStep` leaf,
+/// not `steps.iter().filter(|s| matches!(s, Step::Scoop(ScoopStep::Install {
+/// .. }))).count()`: `matches!` against a partial pattern silently returns
+/// `false` for a variant it does not name, so the day `plan_to_steps` starts
+/// producing `Step::Winget(WingetStep::Set { .. })` (a later task wires that
+/// in), this prompt would go on saying "0 installed" for a run that installs
+/// a winget package -- with no compiler error to force anyone to notice.
+/// Naming every leaf here turns that day into a compile error instead, the
+/// same discipline `is_outstanding`'s own doc comment argues for and that
+/// `execute::order`/`execute::write_recovery` already apply to this same
+/// enum.
+///
+/// Both winget variants currently count as neither. What this prompt should
+/// say about a winget install is a decision for the task that wires winget
+/// in, not this one -- the point here is only that skipping them is a
+/// decision written down, not a silent default.
+fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
+    steps
+        .iter()
+        .fold((0, 0), |(replaces, installs), s| match s {
+            Step::Scoop(ScoopStep::Replace { .. }) => (replaces + 1, installs),
+            Step::Scoop(ScoopStep::Install { .. }) => (replaces, installs + 1),
+            Step::Scoop(ScoopStep::Remove { .. }) => (replaces, installs),
+            Step::Winget(WingetStep::Set { .. }) => (replaces, installs),
+            Step::Winget(WingetStep::Remove { .. }) => (replaces, installs),
+        })
 }
 
 /// Prints what each scan could not read, attributed to its own backend, then
@@ -409,19 +441,11 @@ fn main() -> Result<()> {
                 ));
             }
 
+            let (replacements, installs) = count_replaces_and_installs(&steps);
             let question = format!(
-                "\n{} package(s) will be uninstalled and reinstalled, {} installed, \
-                 {} removed. Every version change is an uninstall followed by an \
-                 install, in both directions. Continue? [y/N] ",
-                steps
-                    .iter()
-                    .filter(|s| matches!(s, Step::Scoop(ScoopStep::Replace { .. })))
-                    .count(),
-                steps
-                    .iter()
-                    .filter(|s| matches!(s, Step::Scoop(ScoopStep::Install { .. })))
-                    .count(),
-                removals,
+                "\n{replacements} package(s) will be uninstalled and reinstalled, {installs} \
+                 installed, {removals} removed. Every version change is an uninstall followed \
+                 by an install, in both directions. Continue? [y/N] "
             );
             if !yes {
                 let stdin = std::io::stdin();
@@ -731,6 +755,45 @@ mod tests {
             floor_exit_code(0, true, false, false),
             0,
             "the positive sibling"
+        );
+    }
+
+    #[test]
+    fn count_replaces_and_installs_counts_only_scoop_and_treats_every_winget_step_as_neither() {
+        // Pins the exhaustive match itself, not just its current output: a
+        // mutant swapping the Replace/Install increments, or moving
+        // ScoopStep::Remove or either WingetStep variant into one of the two
+        // counts, must turn this red.
+        let steps = vec![
+            Step::Scoop(ScoopStep::Replace {
+                app: Name::new("bat"),
+                staged: PathBuf::from("/stage/bat/2/bat.json"),
+                arch: None,
+            }),
+            Step::Scoop(ScoopStep::Install {
+                app: Name::new("fzf"),
+                staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
+                arch: None,
+            }),
+            Step::Scoop(ScoopStep::Remove {
+                app: Name::new("aichat"),
+            }),
+            Step::Winget(WingetStep::Set {
+                id: Name::new("Brave.Brave"),
+                version: "151.1.93.134".to_string(),
+                guard: vec![],
+            }),
+            Step::Winget(WingetStep::Remove {
+                id: Name::new("Vivaldi.Vivaldi"),
+                version: "8.1.4087.62".to_string(),
+                guard: vec![],
+            }),
+        ];
+        assert_eq!(
+            count_replaces_and_installs(&steps),
+            (1, 1),
+            "one scoop replace, one scoop install; the scoop remove and both \
+             winget steps must move neither count"
         );
     }
 

@@ -8,12 +8,19 @@
 //! it is self-consistent.
 //!
 //! `WingetMutator` cannot be held to that standard, and this module must not
-//! pretend otherwise. Winget has no manifest and no hash — nothing
-//! independent of winget to check winget's own write against — so
-//! `run_winget_step` verifies by re-asking the very seam that just performed
-//! the mutation, and a fake there really is only self-consistent. That is a
-//! structural weakness, said plainly here and at `WingetState`'s own doc
-//! comment rather than dressed up as equal to scoop's.
+//! pretend otherwise. **Not because winget has no hash** — it has one and
+//! verifies it: `winget show` prints `Installer SHA256`, which is exactly the
+//! correction `docs/specs/2026-08-09-phase4-backend-winget-design.md:60` made
+//! to `design.md:78`'s "winget pins a version, not a hash", and a correction
+//! this module must not quietly undo. What winget lacks is an **on-disk
+//! manifest and hash dotpkg can read back after the install**, the way
+//! `verify::verdict` compares scoop's installed manifest bytes against the
+//! staged file. With no such handle there is nothing independent of winget to
+//! check winget's own write against, so `run_winget_step` verifies by
+//! re-asking the very seam that just performed the mutation, and a fake there
+//! really is only self-consistent. That is a structural weakness, said plainly
+//! here and at `WingetState`'s own doc comment rather than dressed up as equal
+//! to scoop's.
 
 use crate::backend::winget_exec::{
     winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED, NO_AVAILABLE_UPGRADE,
@@ -247,14 +254,19 @@ pub enum StepOutcome {
     /// as it was. A `ScoopStep::Remove` sets it the mirror way: `StillPresent`
     /// is untouched, `Unreadable` is touched.
     ///
-    /// A `WingetStep` sets it in exactly one shape, and never for a plain
-    /// failure: `winget_verdict` coming back `Unconfirmable`, the same
-    /// "unknown is touched" rule as `Unreadable` above. Every *failing*
-    /// winget shape that was actually measured left `winget list`
-    /// byte-identical, and a winget version change is one call with no
-    /// absent-window to leave residue in, so `run_winget_step` reports
-    /// `touched: false` everywhere else -- see its own doc comment for which
-    /// measurements that rests on.
+    /// A `WingetStep` sets it for exactly one epistemic state -- *the
+    /// mutation ran and dotpkg cannot see the result* -- reached two ways:
+    /// the rescan came back `Unconfirmable`, or the rescan could not run at
+    /// all (`winget_verdict` returning `Err`, which means only that `winget
+    /// list` could not be spawned). Both are the same "unknown is touched"
+    /// rule as `Unreadable` above, and they must not disagree merely because
+    /// a different call was the one that failed to answer.
+    ///
+    /// Everywhere else `run_winget_step` reports `touched: false`, for two
+    /// different kinds of reason -- two paths structurally (winget never ran
+    /// at all) and four because those failing shapes were measured to leave
+    /// the package where it was. Its own doc comment says which is which,
+    /// and deliberately claims no more than the measurements support.
     ///
     /// Either way, the package this describes is neither "done" nor "as it
     /// was", and `Execution::exit_code` must not fold that into "nothing
@@ -409,9 +421,19 @@ fn run_scoop_step(
 /// function reads `out.code` only to *disambiguate* two rescan answers that
 /// would otherwise be identical, and never to decide success on its own.
 ///
-/// **`touched` is `false` on every failure path here, and that is a measured
-/// claim rather than an assumption.** Every failing shape observed left the
-/// package exactly where it was, and
+/// **`touched` is `false` on all but two of the failure paths here, and the
+/// reasons are of two different kinds. Which is which matters, because only
+/// one of them is a measurement.**
+///
+/// *Structural, not measured* -- the two `Err(e)` arms on `m.set`/`m.remove`
+/// themselves. `RealWingetMutator::run` returns `Err` only when the process
+/// could not be spawned at all (`CmdError::NotFound`, or an `io::Error` from
+/// `Command::output`), so winget never ran and nothing can have changed. That
+/// is provable from `RealWingetMutator::run`, and no measurement is claimed
+/// for it.
+///
+/// *Measured* -- the four shapes where winget **did** run, reported failure,
+/// and left the package exactly where it was.
 /// `docs/measurements-2026-08-10-winget-write-path.md` records which
 /// observation says so for each: `0x8A15002B` declining a downgrade (§2, the
 /// "unchanged" column on every row), `0x8A150017` refusing a
@@ -421,11 +443,22 @@ fn run_scoop_step(
 /// the de-elevated control then uninstalled that same package successfully,
 /// which is what proves the refusal had removed nothing).
 ///
+/// Those four are per-probe observations of *the package's state*. The
+/// document does also hash `winget list` itself, but **aggregate only, never
+/// per failing probe**, so "left `winget list` byte-identical" is not a claim
+/// this comment may make for any of the four: W1's bracket (`:33`) covers all
+/// 12 probes at once, and every one of those 12 targeted an absent package or
+/// a nonexistent version rather than any shape above; W2's (`:39`-`:40`) runs
+/// start-to-cleanup and spans the *successful* installs in between.
+///
+/// **The two `touched: true` paths** are the mutation having run with its
+/// result unseeable -- see the `Unconfirmable` and rescan-`Err` arms, which
+/// carry the reasoning where it applies.
+///
 /// A winget version change is also **one** call -- `install --version`
 /// performs the upgrade directly -- so unlike `ScoopStep::Replace` there is no
 /// uninstall half that could leave the package absent mid-step, and therefore
-/// no window this function has to reason about. `WingetState::Unconfirmable`
-/// is the one exception, for the reason given at its arm.
+/// no window this function has to reason about.
 pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetStep) -> StepOutcome {
     match step {
         WingetStep::Set { id, version, .. } => {
@@ -439,12 +472,29 @@ pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetSt
                 }
             };
             match winget_verdict(m, id) {
+                // `touched: true`, and NOT because anything was seen to
+                // change. `winget_verdict` returns `Err` from exactly one
+                // place -- `m.list_one(id)?` -- because every other problem it
+                // can hit becomes `Ok(Unconfirmable)` instead. So this arm has
+                // exactly one meaning: `winget install` **already ran** (its
+                // exit code is in the message right there) and then the rescan
+                // could not be spawned. The machine may well have changed and
+                // dotpkg cannot look.
+                //
+                // That is the same epistemic state as the `Unconfirmable` arm
+                // below, and it must not get the opposite answer just because
+                // a different call was the one that failed to answer.
+                // `render_execution` reads `Execution::touched()` to choose
+                // between "nothing was changed" and "some packages were
+                // changed and some were not"; `false` here would tell an
+                // operator nothing happened directly after a mutation that
+                // did.
                 Err(e) => StepOutcome::Failed {
                     why: format!(
                         "{id}: install ran (exit {}) but the rescan could not: {e}",
                         out.code
                     ),
-                    touched: false,
+                    touched: true,
                 },
                 // **This arm must stay above the `NO_AVAILABLE_UPGRADE` one
                 // below, and the order is the whole rule, not a style
@@ -473,6 +523,23 @@ pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetSt
                 }
                 // Reached only when the rescan disagrees with the pin, so
                 // `out.code` here can only mean the declined downgrade.
+                //
+                // **A measured gap this arm cannot close, keyed as it is on
+                // `NO_AVAILABLE_UPGRADE`.** A machine ahead of its pin *and* a
+                // pin no longer in the index exits `NO_VERSION_FOUND`
+                // (`0x8A150017`) instead -- the package-level and
+                // version-level failures are resolved before any upgrade
+                // comparison happens (measured, §6: "the package-level
+                // failure takes precedence over the version-level one"). Such
+                // a run falls through to the generic arm below and gets
+                // neither "will not downgrade" nor `dotpkg update`, even
+                // though a stale pin is exactly when the advice would help
+                // most. Widening this arm to `NO_VERSION_FOUND` is the wrong
+                // fix, and that is why the gap is documented instead of
+                // closed: that code proves only "this version is not
+                // available", which is equally what a machine *behind* an
+                // unavailable pin gets, so keying on it would print "dotpkg
+                // will not downgrade" at runs that were never downgrades.
                 Ok(WingetState::At(v)) if out.code == NO_AVAILABLE_UPGRADE => StepOutcome::Failed {
                     why: format!(
                         "{id}: installed {v}, pinned {version} -- dotpkg will not downgrade \
@@ -503,9 +570,11 @@ pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetSt
                         "{id}: winget exited {}, and the rescan cannot confirm the result -- {why}",
                         out.code
                     ),
-                    // The one `touched: true` on this whole function, and the
-                    // exception to its doc comment's measured claim: unknown,
-                    // so treated as touched in the safe direction, and an
+                    // The rescan ran and could not establish anything -- the
+                    // second of the two ways this function reaches "the
+                    // mutation ran and dotpkg cannot see the result", the
+                    // rescan-`Err` arm above being the first. Unknown, so
+                    // treated as touched in the safe direction, and an
                     // operator looks instead of being told nothing happened.
                     // Same rule as `verify::Disagreement::Unreadable` on the
                     // scoop side.
@@ -524,12 +593,18 @@ pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetSt
                 }
             };
             match winget_verdict(m, id) {
+                // `touched: true`, for the identical reason as the `Set` arm
+                // above: the uninstall already ran and the rescan could not be
+                // spawned, so the package may be gone and dotpkg cannot look.
+                // The removal direction makes this if anything sharper -- an
+                // operator told "nothing was changed" would not go looking for
+                // a package that is no longer there.
                 Err(e) => StepOutcome::Failed {
                     why: format!(
                         "{id}: uninstall ran (exit {}) but the rescan could not: {e}",
                         out.code
                     ),
-                    touched: false,
+                    touched: true,
                 },
                 // Above every failure arm for the mirror of the reason the
                 // `Set` arms are ordered the way they are: `0x8A150014` from

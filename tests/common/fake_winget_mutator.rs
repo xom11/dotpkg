@@ -31,6 +31,16 @@ enum Plan {
     /// rule -- and unlike `Constant`, this cannot simply hand back a clone,
     /// because `CmdError` holds an `anyhow::Error` and is not `Clone`.
     Failing(Option<CmdError>),
+    /// One entry consumed per call as `Script` does, and then the held
+    /// `CmdError` for the call *after* the last entry -- once, then a panic.
+    ///
+    /// **The only way to reach `run_winget_step`'s two rescan-`Err` arms.**
+    /// `winget_verdict` returns `Err` from exactly one place, `list_one`, so a
+    /// test for "the mutation ran and then the rescan could not be spawned"
+    /// needs an `Ok` answer followed by an `Err`. Neither existing variant can
+    /// produce that: `Script` answers `Ok` forever, and `Failing` errors on the
+    /// *first* call, which is the mutation itself and a different arm entirely.
+    ScriptThenFailing(Vec<(i32, String)>, usize, Option<CmdError>),
     /// Every call panics. A test that declares no winget packages must make
     /// any winget mutation a loud panic, not a silent pass -- the same rule
     /// `FakeWinget::unreachable` exists for on the read side.
@@ -75,6 +85,16 @@ impl FakeWingetMutator {
         })))
     }
 
+    /// Answer calls in order from `responses`, then error once with `e` on the
+    /// call after the last of them. See `Plan::ScriptThenFailing`'s own doc
+    /// comment for the arm this exists to reach.
+    pub fn script_then_failing(responses: Vec<(i32, String)>, e: CmdError) -> FakeWingetMutator {
+        FakeWingetMutator(Rc::new(RefCell::new(Inner {
+            plan: Plan::ScriptThenFailing(responses, 0, Some(e)),
+            calls: Vec::new(),
+        })))
+    }
+
     /// Every call panics. See `Plan::Unreachable`'s own doc comment.
     pub fn unreachable() -> FakeWingetMutator {
         FakeWingetMutator(Rc::new(RefCell::new(Inner {
@@ -111,6 +131,25 @@ impl FakeWingetMutator {
                 };
                 *idx += 1;
                 Ok(out)
+            }
+            Plan::ScriptThenFailing(responses, idx, err) => {
+                if let Some((code, stdout)) = responses.get(*idx) {
+                    let out = CmdOut {
+                        code: *code,
+                        stdout: stdout.clone(),
+                    };
+                    *idx += 1;
+                    return Ok(out);
+                }
+                Err(err.take().unwrap_or_else(|| {
+                    panic!(
+                        "FakeWingetMutator::script_then_failing was called again after its \
+                         {} scripted responses and its one error were all consumed -- same \
+                         rule as Plan::Script's own: a fake asked past its script is a \
+                         test/fake mismatch, not a case to paper over",
+                        responses.len()
+                    )
+                }))
             }
             Plan::Failing(err) => Err(err.take().unwrap_or_else(|| {
                 panic!(

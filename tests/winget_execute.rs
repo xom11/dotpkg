@@ -1,7 +1,7 @@
 mod common;
 
 use common::fake_winget_mutator::FakeWingetMutator;
-use dotpkg::backend::winget::NO_APPLICATIONS_FOUND;
+use dotpkg::backend::winget::{CmdError, NO_APPLICATIONS_FOUND};
 use dotpkg::backend::winget_exec::{
     list_one_argv, set_argv, winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED,
     NO_AVAILABLE_UPGRADE,
@@ -226,5 +226,115 @@ fn the_elevation_refusal_says_what_to_do_about_it() {
         st.ownership(WINGET, &Name::new("ducaale.xh")),
         Some(Ownership::Installed),
         "a failed removal must not release ownership -- the package is still there"
+    );
+}
+
+// -- Task 14 review: the two findings that changed behaviour or lacked a test
+
+#[test]
+fn a_mutation_that_ran_and_could_not_be_rescanned_is_touched_in_both_directions() {
+    // `winget_verdict` returns `Err` from exactly one place -- `list_one` --
+    // because every other problem it can hit becomes `Ok(Unconfirmable)`. So
+    // these two arms have exactly one meaning: the mutation ALREADY RAN (its
+    // exit code is in the message) and then the rescan could not be spawned.
+    // The machine may well have changed and dotpkg cannot look, which is the
+    // same epistemic state as `Unconfirmable` and must get the same answer --
+    // it must not flip merely because a different call was the one that failed
+    // to answer.
+    //
+    // What rides on it: `render_execution` reads `Execution::touched()` to
+    // choose between "nothing was changed" and "some packages were changed and
+    // some were not". `touched: false` here tells an operator nothing happened
+    // directly after a mutation that did -- exactly what `StepOutcome::Failed`'s
+    // own doc comment forbids.
+    let id = Name::new("ducaale.xh");
+
+    let m = FakeWingetMutator::script_then_failing(
+        vec![(0, fixture("install-version-fresh.txt"))],
+        CmdError::NotFound,
+    );
+    let mut st = State::default();
+    let set = WingetStep::Set {
+        id: id.clone(),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m, &mut st, &set) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(touched, "the install ran and cannot be confirmed: {why}");
+            assert!(
+                why.contains("install ran") && why.contains("rescan could not"),
+                "say that the mutation ran and the rescan did not: {why}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        st.ownership(WINGET, &id),
+        None,
+        "an unconfirmed install must not claim ownership"
+    );
+
+    // The removal direction, where the stakes are if anything higher: an
+    // operator told "nothing was changed" would not go looking for a package
+    // that is no longer there.
+    let m2 = FakeWingetMutator::script_then_failing(
+        vec![(0, fixture("uninstall-success.txt"))],
+        CmdError::NotFound,
+    );
+    let mut st2 = State::default();
+    st2.set(WINGET, &id, Ownership::Installed);
+    let remove = WingetStep::Remove {
+        id: id.clone(),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m2, &mut st2, &remove) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(touched, "the uninstall ran and cannot be confirmed: {why}");
+            assert!(
+                why.contains("uninstall ran") && why.contains("rescan could not"),
+                "say that the mutation ran and the rescan did not: {why}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        st2.ownership(WINGET, &id),
+        Some(Ownership::Installed),
+        "an unconfirmed removal must not release ownership -- dotpkg cannot see \
+         whether the package is gone, and dropping the record would strand it"
+    );
+}
+
+#[test]
+fn a_set_over_an_adopted_package_keeps_it_adopted() {
+    // The `is_none()` guard in the `Set` arm, which mirrors
+    // `a_successful_replace_of_an_adopted_package_keeps_it_adopted` on the
+    // scoop side. Ownership is intent: dotpkg honouring a pin for a package the
+    // operator adopted must not silently promote that record to `Installed`,
+    // which would tell a later prune that dotpkg had installed it and may
+    // remove it.
+    //
+    // Both other `Set` tests start from `State::default()`, so before this test
+    // only the comment claimed the guard -- a mutant deleting the `is_none()`
+    // check stayed green across the whole suite.
+    let id = Name::new("ducaale.xh");
+    let m = FakeWingetMutator::script(vec![
+        (0, fixture("install-upgraded.txt")),
+        (0, fixture("list-single-with-available.txt")), // reports 0.24.1
+    ]);
+    let mut st = State::default();
+    st.set(WINGET, &id, Ownership::Adopted);
+    let step = WingetStep::Set {
+        id: id.clone(),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    assert_eq!(run_winget_step(&m, &mut st, &step), StepOutcome::Done);
+    assert_eq!(
+        st.ownership(WINGET, &id),
+        Some(Ownership::Adopted),
+        "a Set over an adopted package must leave it adopted, not claim it"
     );
 }

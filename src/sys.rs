@@ -49,6 +49,55 @@ pub fn running_processes() -> Vec<Process> {
         .collect()
 }
 
+/// Whether this process holds an elevated token.
+///
+/// `None` means "could not tell", and every caller must treat that as "do not
+/// refuse". Measured on a14 (docs/measurements-2026-08-10-winget-write-path.md
+/// §5): `winget install` succeeds elevated and `winget uninstall` of that same
+/// user-scope package is then refused with 0x8A15007D. dotpkg runs as a
+/// scheduled `apply`, so an elevated run can install a package and be
+/// structurally unable to remove it -- every prune failing forever.
+#[cfg(windows)]
+pub fn elevated() -> Option<bool> {
+    use std::mem;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return None;
+        }
+        let mut info = TOKEN_ELEVATION::default();
+        let mut written = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut info as *mut _ as *mut _),
+            mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut written,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        if ok {
+            Some(info.TokenIsElevated != 0)
+        } else {
+            None
+        }
+    }
+}
+
+/// No elevation concept to report. `None`, not `Some(false)`: a caller that
+/// refuses on `Some(false)` would be wrong here, and one that refuses on
+/// `None` is wrong everywhere -- see the Windows arm's doc comment.
+#[cfg(not(windows))]
+pub fn elevated() -> Option<bool> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +142,24 @@ mod tests {
             procs.iter().any(|p| p.exe.is_some()),
             "no process reported a readable executable path -- path matching is dead"
         );
+    }
+
+    #[test]
+    fn elevated_answers_or_admits_it_does_not_know() {
+        // The only assertion that is true on all three platforms this crate is
+        // built on. The VALUE cannot be asserted: it depends on how the test
+        // runner was launched. What must hold is that the function is total and
+        // never panics -- because its caller (`apply`'s winget removal
+        // pre-check) treats `None` as "do not refuse", and a panic here would
+        // take down a run that was about to do useful work.
+        // The call itself is the assertion on Windows: `#[test]` fails on a panic,
+        // and "does not panic" is the property the caller depends on -- `apply`'s
+        // winget-removal pre-check treats `None` as "do not refuse", so a panic
+        // here would take down a run that was about to do useful work.
+        let answer = elevated();
+        #[cfg(not(windows))]
+        assert_eq!(answer, None, "there is no elevation concept to report here");
+        #[cfg(windows)]
+        let _ = answer;
     }
 }

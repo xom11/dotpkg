@@ -1614,7 +1614,17 @@ fn a_winget_id_that_collides_with_defer_last_is_still_not_deferred() {
 #[test]
 fn a_winget_package_that_starts_running_mid_run_is_held() {
     // The case the re-sampler exists for, for the backend it could not see.
-    // Before `covers_any`, this step ran and the browser was replaced.
+    //
+    // Before `covers_any` learned a winget step's guard names, nothing held
+    // this step back and it reached `run_step`'s winget arm -- which as of
+    // Phase 4b Task 14 really calls `wm.remove`, so on a real machine winget
+    // would uninstall the browser out from under the user who has it open.
+    // The earlier wording here said "the browser was replaced", which was
+    // wrong twice over: `WingetStep` has no `Replace` variant at all (see its
+    // own doc comment for why), and until Task 14 that arm was a stub that
+    // changed nothing, so nothing was removed either. `unreachable()` is what
+    // turns that same reach into a panic here instead of a real uninstall --
+    // so the hold, not the stub, is why this test is green.
     let t = Tree::new();
     t.empty_apps();
     let fake = Fake::honest(&t);

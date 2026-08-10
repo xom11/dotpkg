@@ -3,9 +3,12 @@ mod common;
 use common::fake_winget_mutator::FakeWingetMutator;
 use dotpkg::backend::winget::NO_APPLICATIONS_FOUND;
 use dotpkg::backend::winget_exec::{
-    list_one_argv, set_argv, winget_verdict, WingetMutator, WingetState,
+    list_one_argv, set_argv, winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED,
+    NO_AVAILABLE_UPGRADE,
 };
-use dotpkg::model::Name;
+use dotpkg::execute::{run_winget_step, StepOutcome, WingetStep};
+use dotpkg::model::{Name, WINGET};
+use dotpkg::state::{Ownership, State};
 
 fn fixture(name: &str) -> String {
     // Rust does no newline translation, so this keeps the CRLF the fixture was
@@ -78,4 +81,150 @@ fn a_rescan_of_an_id_installed_at_two_versions_cannot_confirm_either() {
         winget_verdict(&m, &Name::new("7zip.7zip")).unwrap(),
         WingetState::Unconfirmable(_)
     ));
+}
+
+// -- Task 14: `run_winget_step` -- where the measurements land -------------
+
+#[test]
+fn an_install_confirmed_by_the_rescan_is_done() {
+    let m = FakeWingetMutator::script(vec![
+        (0, fixture("install-version-fresh.txt")),
+        (0, fixture("list-single-with-available.txt")), // reports 0.24.1
+    ]);
+    let mut st = State::default();
+    let step = WingetStep::Set {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec!["xh".to_string()],
+    };
+    assert_eq!(run_winget_step(&m, &mut st, &step), StepOutcome::Done);
+    assert_eq!(
+        m.calls().len(),
+        2,
+        "one mutation, one rescan: {:?}",
+        m.calls()
+    );
+    assert_eq!(
+        st.ownership(WINGET, &Name::new("ducaale.xh")),
+        Some(Ownership::Installed)
+    );
+}
+
+#[test]
+fn a_converged_package_is_done_even_though_winget_exited_nonzero() {
+    // Measured: asking for the version already installed returns
+    // 0x8A15002B "No available upgrade found." That is a SUCCESS -- the
+    // machine is exactly where the pin says. Reading nonzero as failure
+    // would report a failure on a converged machine every run.
+    let m = FakeWingetMutator::script(vec![
+        (
+            NO_AVAILABLE_UPGRADE,
+            fixture("install-already-installed-no-upgrade.txt"),
+        ),
+        (0, fixture("list-single-with-available.txt")), // still 0.24.1
+    ]);
+    let mut st = State::default();
+    let step = WingetStep::Set {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    assert_eq!(run_winget_step(&m, &mut st, &step), StepOutcome::Done);
+}
+
+#[test]
+fn a_machine_ahead_of_its_pin_is_a_named_downgrade_refusal_not_a_bare_failure() {
+    // The measured Brave.Brave shape. Same exit code as the converged case
+    // above; the rescan is what tells them apart -- which is the whole
+    // reason the exit code is never the verdict.
+    let m = FakeWingetMutator::script(vec![
+        (
+            NO_AVAILABLE_UPGRADE,
+            fixture("install-already-installed-no-upgrade.txt"),
+        ),
+        (0, fixture("list-single-ahead-of-pin.txt")), // reports 0.26.2
+    ]);
+    let mut st = State::default();
+    let step = WingetStep::Set {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m, &mut st, &step) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(!touched, "nothing was changed: {why}");
+            assert!(
+                why.contains("0.26.2") && why.contains("0.24.1"),
+                "both versions: {why}"
+            );
+            assert!(why.contains("will not downgrade"), "the rule: {why}");
+            assert!(
+                why.contains("dotpkg update"),
+                "the actionable advice: {why}"
+            );
+        }
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
+    assert_eq!(
+        st.ownership(WINGET, &Name::new("ducaale.xh")),
+        None,
+        "a refused step must not claim ownership"
+    );
+}
+
+#[test]
+fn a_removal_whose_rescan_finds_nothing_is_done_even_at_0x8a150014() {
+    // Measured: `uninstall` of an absent package exits 0x8A150014 and prints
+    // "No installed package found matching input criteria." For a Remove,
+    // "already gone" is the desired end state -- and the exit code cannot be
+    // told apart from "that id is wrong", so the rescan decides.
+    let m = FakeWingetMutator::script(vec![
+        (
+            NO_APPLICATIONS_FOUND,
+            fixture("uninstall-package-absent.txt"),
+        ),
+        (NO_APPLICATIONS_FOUND, fixture("list-not-found.txt")),
+    ]);
+    let mut st = State::default();
+    st.set(WINGET, &Name::new("ducaale.xh"), Ownership::Installed);
+    let step = WingetStep::Remove {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    assert_eq!(run_winget_step(&m, &mut st, &step), StepOutcome::Done);
+    assert_eq!(st.ownership(WINGET, &Name::new("ducaale.xh")), None);
+}
+
+#[test]
+fn the_elevation_refusal_says_what_to_do_about_it() {
+    // Measured: install succeeds elevated, uninstall of that same user-scope
+    // package is refused with 0x8A15007D. A scheduled apply at high
+    // integrity can install and never remove.
+    let m = FakeWingetMutator::script(vec![
+        (
+            CANNOT_UNINSTALL_ELEVATED,
+            fixture("uninstall-refused-elevated.txt"),
+        ),
+        (0, fixture("list-single-with-available.txt")), // still installed
+    ]);
+    let mut st = State::default();
+    st.set(WINGET, &Name::new("ducaale.xh"), Ownership::Installed);
+    let step = WingetStep::Remove {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m, &mut st, &step) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(!touched, "the package is still there, untouched: {why}");
+            assert!(why.contains("elevat"), "name the cause: {why}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        st.ownership(WINGET, &Name::new("ducaale.xh")),
+        Some(Ownership::Installed),
+        "a failed removal must not release ownership -- the package is still there"
+    );
 }

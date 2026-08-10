@@ -1,13 +1,25 @@
 //! The executor: the only part of dotpkg that changes installed software.
 //!
-//! One seam is faked in tests — `Mutator`, the scoop subprocess. Everything
-//! else, including every observation of the result, runs against a real
-//! directory tree, because a fake that both performs and reports the mutation
-//! proves only that it is self-consistent.
+//! Two seams are faked in tests, and they are **not** equally strong.
+//!
+//! `Mutator` — the scoop subprocess — is faked and nothing else on that path
+//! is: every observation of a scoop result runs against a real directory tree,
+//! because a fake that both performs and reports the mutation proves only that
+//! it is self-consistent.
+//!
+//! `WingetMutator` cannot be held to that standard, and this module must not
+//! pretend otherwise. Winget has no manifest and no hash — nothing
+//! independent of winget to check winget's own write against — so
+//! `run_winget_step` verifies by re-asking the very seam that just performed
+//! the mutation, and a fake there really is only self-consistent. That is a
+//! structural weakness, said plainly here and at `WingetState`'s own doc
+//! comment rather than dressed up as equal to scoop's.
 
-use crate::backend::winget_exec::WingetMutator;
+use crate::backend::winget_exec::{
+    winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED, NO_AVAILABLE_UPGRADE,
+};
 use crate::config::BucketDecl;
-use crate::model::{Name, Running, SCOOP};
+use crate::model::{Name, Running, SCOOP, WINGET};
 use crate::state::{Ownership, State};
 use crate::verify::{verdict, Disagreement, Expected};
 use anyhow::{Context, Result};
@@ -113,9 +125,9 @@ impl ScoopStep {
 /// therefore a window where the package is absent. Measured, winget's
 /// `install --version <pin>` performs the upgrade directly (0.24.1 ->
 /// 0.26.1, exit 0), so a winget version change opens **no such window**, and
-/// `run_step`'s `touched` bookkeeping has no uninstall half to reason about.
-/// One call, either direction, covers both a fresh install and a version
-/// change -- hence `Set`, not `Install`/`Replace`.
+/// `run_winget_step`'s `touched` bookkeeping has no uninstall half to reason
+/// about. One call, either direction, covers both a fresh install and a
+/// version change -- hence `Set`, not `Install`/`Replace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WingetStep {
     /// Install OR version-change: one `install --version` call either way.
@@ -135,9 +147,10 @@ impl WingetStep {
     /// Mirrors `ScoopStep::app()`: the id out of a `WingetStep`, regardless
     /// of which variant. An inherent method rather than a private free
     /// function -- the asymmetry with `ScoopStep::app()` had no reason
-    /// behind it, and a later task builds argv from a `WingetStep` it holds
-    /// directly, so it wants this the same way `run_scoop_step` wants
-    /// `ScoopStep::app()`.
+    /// behind it. `Step::app()` is its only caller in the crate:
+    /// `run_winget_step`, the later task this comment used to predict would
+    /// want it too, matches each variant and destructures `id` out of it
+    /// directly instead.
     pub fn app(&self) -> &Name {
         match self {
             WingetStep::Set { id, .. } | WingetStep::Remove { id, .. } => id,
@@ -224,17 +237,28 @@ pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
 pub enum StepOutcome {
     Done,
     /// `touched` is true when the machine was already altered before this
-    /// failure happened. Two shapes set it: a `ScoopStep::Replace` whose
-    /// uninstall verified `Absent` before its install then failed, and any
-    /// install (fresh, or the second half of a replace) whose `verdict`
-    /// disagreement is evidence of residue -- `HalfInstalled`,
-    /// `ContentDiffers`, or `Unreadable` (which means
+    /// failure happened. On the scoop side two shapes set it: a
+    /// `ScoopStep::Replace` whose uninstall verified `Absent` before its
+    /// install then failed, and any install (fresh, or the second half of a
+    /// replace) whose `verdict` disagreement is evidence of residue --
+    /// `HalfInstalled`, `ContentDiffers`, or `Unreadable` (which means
     /// "unknown" and is treated as touched in the safe direction, so an
     /// operator looks). `NotInstalled` alone means the machine is genuinely
     /// as it was. A `ScoopStep::Remove` sets it the mirror way: `StillPresent`
-    /// is untouched, `Unreadable` is touched. Either way, the package this
-    /// describes is neither "done" nor "as it was", and
-    /// `Execution::exit_code` must not fold that into "nothing changed".
+    /// is untouched, `Unreadable` is touched.
+    ///
+    /// A `WingetStep` sets it in exactly one shape, and never for a plain
+    /// failure: `winget_verdict` coming back `Unconfirmable`, the same
+    /// "unknown is touched" rule as `Unreadable` above. Every *failing*
+    /// winget shape that was actually measured left `winget list`
+    /// byte-identical, and a winget version change is one call with no
+    /// absent-window to leave residue in, so `run_winget_step` reports
+    /// `touched: false` everywhere else -- see its own doc comment for which
+    /// measurements that rests on.
+    ///
+    /// Either way, the package this describes is neither "done" nor "as it
+    /// was", and `Execution::exit_code` must not fold that into "nothing
+    /// changed".
     Failed {
         why: String,
         touched: bool,
@@ -378,6 +402,178 @@ fn run_scoop_step(
     }
 }
 
+/// Perform one winget step and prove by rescan that it happened.
+///
+/// **The rescan is the verdict, never the exit code.** `winget_verdict`'s own
+/// doc comment carries the measurements; the consequence here is that this
+/// function reads `out.code` only to *disambiguate* two rescan answers that
+/// would otherwise be identical, and never to decide success on its own.
+///
+/// **`touched` is `false` on every failure path here, and that is a measured
+/// claim rather than an assumption.** Every failing shape observed left the
+/// package exactly where it was, and
+/// `docs/measurements-2026-08-10-winget-write-path.md` records which
+/// observation says so for each: `0x8A15002B` declining a downgrade (§2, the
+/// "unchanged" column on every row), `0x8A150017` refusing a
+/// version-mismatched uninstall (§8, "still installed? **yes**"),
+/// `0x8A150014` against a package that was absent to begin with (§8, nothing
+/// there to change), and `0x8A15007D` refusing an elevated uninstall (§5 --
+/// the de-elevated control then uninstalled that same package successfully,
+/// which is what proves the refusal had removed nothing).
+///
+/// A winget version change is also **one** call -- `install --version`
+/// performs the upgrade directly -- so unlike `ScoopStep::Replace` there is no
+/// uninstall half that could leave the package absent mid-step, and therefore
+/// no window this function has to reason about. `WingetState::Unconfirmable`
+/// is the one exception, for the reason given at its arm.
+pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetStep) -> StepOutcome {
+    match step {
+        WingetStep::Set { id, version, .. } => {
+            let out = match m.set(id, version) {
+                Ok(out) => out,
+                Err(e) => {
+                    return StepOutcome::Failed {
+                        why: format!("{id}: could not run winget install: {e}"),
+                        touched: false,
+                    }
+                }
+            };
+            match winget_verdict(m, id) {
+                Err(e) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: install ran (exit {}) but the rescan could not: {e}",
+                        out.code
+                    ),
+                    touched: false,
+                },
+                // **This arm must stay above the `NO_AVAILABLE_UPGRADE` one
+                // below, and the order is the whole rule, not a style
+                // choice.** Measured, `0x8A15002B` comes back for BOTH a
+                // converged machine (already at exactly `version` -- a
+                // success) and a declined downgrade (a failure); only the
+                // rescan tells them apart. Asking "is the machine where the
+                // pin says?" first makes the converged case `Done` whatever
+                // the exit code was.
+                //
+                // Verified by reversing them rather than reasoned about:
+                // `a_converged_package_is_done_even_though_winget_exited_
+                // nonzero` then fails with `installed 0.24.1, pinned 0.24.1
+                // -- dotpkg will not downgrade`, which is a converged machine
+                // being reported as a failure every single run. That test is
+                // what pins this order; nothing in the type system does.
+                Ok(WingetState::At(v)) if v == *version => {
+                    // Claim only now, and preserve an existing `adopt` --
+                    // the same rule `run_scoop_step` follows, for the same
+                    // reason: ownership is intent, and a version change is
+                    // an implementation detail of honouring it.
+                    if state.ownership(WINGET, id).is_none() {
+                        state.set(WINGET, id, Ownership::Installed);
+                    }
+                    StepOutcome::Done
+                }
+                // Reached only when the rescan disagrees with the pin, so
+                // `out.code` here can only mean the declined downgrade.
+                Ok(WingetState::At(v)) if out.code == NO_AVAILABLE_UPGRADE => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: installed {v}, pinned {version} -- dotpkg will not downgrade \
+                         a winget package. Measured: `winget install --version` only ever \
+                         moves a package up, and reports \"No available upgrade found\" \
+                         instead. Run `dotpkg update` to move the pin forward."
+                    ),
+                    touched: false,
+                },
+                Ok(WingetState::At(v)) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: asked winget for {version} (exit {}), rescan reports {v}",
+                        out.code
+                    ),
+                    touched: false,
+                },
+                Ok(WingetState::Absent) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: install did not happen -- winget exited {} and the rescan finds \
+                         nothing installed: {}",
+                        out.code,
+                        out.stdout.lines().next().unwrap_or("(no output)")
+                    ),
+                    touched: false,
+                },
+                Ok(WingetState::Unconfirmable(why)) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: winget exited {}, and the rescan cannot confirm the result -- {why}",
+                        out.code
+                    ),
+                    // The one `touched: true` on this whole function, and the
+                    // exception to its doc comment's measured claim: unknown,
+                    // so treated as touched in the safe direction, and an
+                    // operator looks instead of being told nothing happened.
+                    // Same rule as `verify::Disagreement::Unreadable` on the
+                    // scoop side.
+                    touched: true,
+                },
+            }
+        }
+        WingetStep::Remove { id, version, .. } => {
+            let out = match m.remove(id, version) {
+                Ok(out) => out,
+                Err(e) => {
+                    return StepOutcome::Failed {
+                        why: format!("{id}: could not run winget uninstall: {e}"),
+                        touched: false,
+                    }
+                }
+            };
+            match winget_verdict(m, id) {
+                Err(e) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: uninstall ran (exit {}) but the rescan could not: {e}",
+                        out.code
+                    ),
+                    touched: false,
+                },
+                // Above every failure arm for the mirror of the reason the
+                // `Set` arms are ordered the way they are: `0x8A150014` from
+                // `uninstall` means "no *installed* package", which for a
+                // `Remove` is the DESIRED end state and is indistinguishable
+                // by exit code from "that id is wrong". Nothing being there
+                // is done, whatever winget exited.
+                Ok(WingetState::Absent) => {
+                    state.remove(WINGET, id);
+                    StepOutcome::Done
+                }
+                Ok(WingetState::At(v)) if out.code == CANNOT_UNINSTALL_ELEVATED => {
+                    StepOutcome::Failed {
+                        why: format!(
+                            "{id}: still installed at {v}. winget refuses to uninstall a \
+                             user-scope package while dotpkg is running elevated. Re-run \
+                             without elevation."
+                        ),
+                        touched: false,
+                    }
+                }
+                Ok(WingetState::At(v)) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: uninstall did not happen -- winget exited {} and the rescan \
+                         still reports {v}: {}",
+                        out.code,
+                        out.stdout.lines().next().unwrap_or("(no output)")
+                    ),
+                    touched: false,
+                },
+                Ok(WingetState::Unconfirmable(why)) => StepOutcome::Failed {
+                    why: format!(
+                        "{id}: winget exited {}, and the rescan cannot confirm the removal -- {why}",
+                        out.code
+                    ),
+                    // Same reasoning as the `Set` arm above: unknown is
+                    // touched, so an operator looks.
+                    touched: true,
+                },
+            }
+        }
+    }
+}
+
 /// Perform one step -- scoop or winget -- and prove it happened.
 ///
 /// Dispatches on backend and nothing else: a winget `Step` cannot reach
@@ -392,19 +588,11 @@ pub fn run_step(
 ) -> StepOutcome {
     match step {
         Step::Scoop(s) => run_scoop_step(root, m, state, s),
-        // A later task replaces this. A `todo!()` would panic in a release
-        // build on a real machine; a `Failed` outcome reports and continues,
-        // which is this module's own contract ("one package's failure never
-        // stops another's"). `wm` is unused until then -- see this crate's
-        // Phase 4b plan for why the parameter is finalised here rather than
-        // added alongside its first real caller.
-        Step::Winget(w) => {
-            let _ = wm;
-            StepOutcome::Failed {
-                why: format!("{}: the winget executor is not wired yet", w.app()),
-                touched: false,
-            }
-        }
+        // No `root`: a winget step is verified by re-asking winget, which
+        // never reads the scoop root at all -- the same asymmetry
+        // `root_looks_like_scoop`'s own doc comment records, and the reason a
+        // winget-only run is exempt from that check.
+        Step::Winget(w) => run_winget_step(wm, state, w),
     }
 }
 

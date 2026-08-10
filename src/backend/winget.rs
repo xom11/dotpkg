@@ -559,9 +559,9 @@ pub trait WingetCmd {
     fn run(&self, args: &[&str]) -> Result<CmdOut, CmdError>;
 }
 
-/// The real `winget.exe`, invoked as a subprocess. Only production code
-/// (`main.rs`, once a later task wires it up) may construct this -- every
-/// test uses a fake that implements `WingetCmd` instead.
+/// The real `winget.exe`, invoked as a subprocess. Only production code may
+/// construct this -- `main.rs` does, in every arm that scans or resolves --
+/// and every test uses a fake that implements `WingetCmd` instead.
 pub struct RealWinget;
 
 impl WingetCmd for RealWinget {

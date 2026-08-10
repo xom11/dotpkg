@@ -146,7 +146,9 @@ pub fn remove_argv(id: &Name, version: &str) -> Vec<String> {
 }
 
 /// The exact argv for the single-package re-scan a step's verdict is built
-/// from, once a later task writes the code that judges it.
+/// from. `winget_verdict` below runs it; `execute::run_winget_step` is the
+/// code that judges the answer, and does so instead of reading the
+/// mutation's own exit code.
 ///
 /// **`-e`/`--exact` here, but deliberately not in `resolve_latest` or
 /// `resolve_installed` (`src/backend/winget.rs:696`, `:772`) -- the opposite
@@ -330,9 +332,10 @@ pub fn winget_verdict(m: &dyn WingetMutator, id: &Name) -> Result<WingetState, C
     )))
 }
 
-/// The real `winget.exe`, invoked as a subprocess. Only production code
-/// (`main.rs`, once a later task wires it up) may construct this -- every
-/// test uses a fake that implements `WingetMutator` instead.
+/// The real `winget.exe`, invoked as a subprocess. Only production code may
+/// construct this -- `main.rs`'s `apply` arm does, and it is the one place a
+/// real winget mutation is ever allowed to happen. Every test uses a fake
+/// that implements `WingetMutator` instead.
 pub struct RealWingetMutator;
 
 impl WingetMutator for RealWingetMutator {

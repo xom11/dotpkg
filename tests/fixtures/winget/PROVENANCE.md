@@ -129,7 +129,7 @@ longer describe.
 | `install-upgraded.txt` | `w2/03-stdout.txt` | `install -e --id ducaale.xh --version 0.26.1 --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` (0.24.1 installed, asked for 0.26.1: a real upgrade, not a template) | `0` | 588 |
 | `install-package-absent.txt` | `w1/01-stdout.txt` | `install -e --id Xyzzy.NoSuch.Dotpkg --disable-interactivity --accept-source-agreements` | `0x8A150014` | 43 |
 | `install-version-absent.txt` | `w1/05-stdout.txt` | `install -e --id sharkdp.hyperfine --version 0.0.0-dotpkg-w1-does-not-exist --disable-interactivity --accept-source-agreements` | `0x8A150017` | 59 |
-| `install-no-upgrade-available.txt` | `w2/05-stdout.txt` | `install -e --id ducaale.xh --no-upgrade --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` | `0x8A150061` | 65 |
+| `install-no-upgrade-flag.txt` | `w2/05-stdout.txt` | `install -e --id ducaale.xh --no-upgrade --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` | `0x8A150061` | 65 |
 | `uninstall-refused-elevated.txt` | `w2/12-stdout.txt` | `uninstall -e --id ducaale.xh --disable-interactivity --accept-source-agreements` (elevated) | `0x8A15007D` | 127 |
 | `uninstall-success.txt` | `w2/inner-stdout.txt` | `uninstall -e --id ducaale.xh --disable-interactivity --accept-source-agreements` (de-elevated: `runas /trustlevel:0x20000`, inner session `elevated = False`) | `0` | 80 |
 | `uninstall-package-absent.txt` | `w1/03-stdout.txt` | `uninstall -e --id Xyzzy.NoSuch.Dotpkg --disable-interactivity --accept-source-agreements` | `0x8A150014` | 53 |
@@ -137,6 +137,17 @@ longer describe.
 | `upgrade-nothing-available.txt` | `w2/07-stdout.txt` | `upgrade -e --id ducaale.xh --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` (run again, already at the newest version) | `0x8A15002B` | 99 |
 | `list-single-with-available.txt` | `w2/verify-01.txt` | `list -e --id ducaale.xh --disable-interactivity`, the verify call taken immediately after W2 step 01 (`install --version 0.24.1`) | `0` | 126 |
 | `list-single-ahead-of-pin.txt` | `w2/verify-07.txt` | `list -e --id ducaale.xh --disable-interactivity`, the verify call taken immediately after W2 step 07 (`upgrade`, already newest — package sits at `0.26.2`) | `0` | 97 |
+
+**`install-no-upgrade-flag.txt` was called
+`install-no-upgrade-available.txt` until the Phase 4b whole-branch review, and
+the old name described the wrong file.** It holds `--no-upgrade`'s
+`0x8A150061` result, *"A package version is already installed. Installation
+cancelled."*, while `install-already-installed-no-upgrade.txt` holds *"No
+available upgrade found."* / `0x8A15002B`. The two names described each
+other's contents, and the first was referenced by no test, so a later test
+reaching for it by name for the `NO_AVAILABLE_UPGRADE` case would have paired
+the wrong bytes with the wrong code with nothing to object. Bytes unchanged
+(65), only the name.
 
 Two things worth naming about the last two rows, because a later task's
 assertions depend on them:

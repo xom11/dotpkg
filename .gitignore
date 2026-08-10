@@ -2,3 +2,10 @@
 /.superpowers
 /mutants.out
 /mutants.out.old
+# Probe scripts run against the real Windows machine during a measurement
+# round. Deliberately not committed -- they are the throwaway half of a
+# measurement whose product is the captured bytes under
+# tests/fixtures/winget/ and the numbers in docs/measurements-*.md -- but
+# they should not dirty `git status` on every run either.
+/scratch
+

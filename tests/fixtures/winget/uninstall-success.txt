@@ -1,0 +1,3 @@
+Found xh [ducaale.xh]
+Starting package uninstall...
+Successfully uninstalled

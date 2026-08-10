@@ -1,0 +1,7 @@
+Found xh [ducaale.xh] Version 0.26.1
+Downloading .../v0.26.1/xh-v0.26.1-x86_64-pc-windows-msvc.zip
+Successfully verified installer hash
+Extracting archive...
+Command line alias added: "xh"
+Command line alias added: "xhs"
+Successfully installed

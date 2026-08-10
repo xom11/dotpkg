@@ -1,0 +1,2 @@
+Found xh [ducaale.xh]
+The package installed for user scope cannot be uninstalled when running with administrator privileges.

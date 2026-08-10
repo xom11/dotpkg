@@ -371,6 +371,209 @@ counts are identical under both, so the structural drift above is real and the
 
 ---
 
+## 15. `--scope` discriminates in both directions
+
+Phase 4b's design (`docs/specs/2026-08-10-phase4b-winget-executor-design.md`,
+A4) makes `apply`'s winget-removal refusal depend on `list -e --id <id>
+--scope user` versus `--scope machine` discriminating both ways. Measured 2026
+-08-10 on a14, read-only (`list`/`show`/`--version` only), by a script
+(`scratch/w3-scope.ps1`, not committed) that resolves `winget.exe` via
+`Get-Command -CommandType Application`, gates on the first `list
+--disable-interactivity` exiting `0` and exceeding 10 KB, then hashes `winget
+list`'s stdout before and after every other call.
+
+```
+winget path: C:\Users\kln\AppData\Local\Microsoft\WindowsApps\winget.exe
+session identity: ZENBOOK-A14\kln   elevated: True
+winget version: v1.29.280
+GATE1 list --disable-interactivity  EXIT 0  bytes 30738
+BEFORE sha256 78B8DCE9E2BD182B21F062520B93FECC576542FAEBA496EFE9D1F4FFCB1070B6
+```
+
+**The machine has drifted since the write-path round** (§14 says so from the
+row/id/opaque counts alone; this script recomputes them independently rather
+than trusting that section): parsing `list --disable-interactivity`'s header
+-keyed columns the same way `src/backend/winget.rs`'s `parse_list` /
+`rows_to_scan` do gives **140 rows, 125 distinct ids, 36 source-backed
+installed ids** (opaque = 125 − 36 = 89) — one less of each than the fixtures'
+141/126/37/89, consistent with §14's `wez.wezterm` removal.
+
+### The known machine-scope case, full trio
+
+```
+$ winget list -e --id Microsoft.VisualStudio.2022.BuildTools --disable-interactivity
+EXIT 0    268 bytes
+  Name                           Id                                     Version    Source
+  ----------------------------------------------------------------------------------------
+  Visual Studio Build Tools 2022 Microsoft.VisualStudio.2022.BuildTools > 17.14.37 winget
+
+$ winget list -e --id Microsoft.VisualStudio.2022.BuildTools --scope machine --disable-interactivity
+EXIT 0    268 bytes  -- byte-identical to the plain call above
+  Name                           Id                                     Version    Source
+  ----------------------------------------------------------------------------------------
+  Visual Studio Build Tools 2022 Microsoft.VisualStudio.2022.BuildTools > 17.14.37 winget
+
+$ winget list -e --id Microsoft.VisualStudio.2022.BuildTools --scope user --disable-interactivity
+EXIT -1978335212 (0x8A150014)    53 bytes
+  No installed package found matching input criteria.
+```
+
+Confirms `docs/measurements-2026-08-09-winget.md` §2 exactly, on the same
+machine, one write-path round later: **machine-scoped, `--scope machine`
+returns the row, `--scope user` refuses.**
+
+### Finding the user-scope case from the machine, not by guessing
+
+Every one of the 36 source-backed installed ids above was probed with `list -e
+--id <id> --scope user --disable-interactivity`. 23 of 36 exited `0`; the other
+13 exited `-1978335212` (`0x8A150014`, `No installed package found matching
+input criteria.`):
+
+```
+Microsoft.AppInstaller                         0
+AutoHotkey.AutoHotkey                          -1978335212
+Brave.Brave                                    0
+OpenAI.Codex                                   0
+Discord.Discord                                0
+Google.Chrome                                  -1978335212
+gerardog.gsudo                                 -1978335212
+DEVCOM.JetBrainsMonoNerdFont                   -1978335212
+ByteDance.Lark                                 0
+Microsoft.DotNet.Native.Runtime                0
+Microsoft.Office                               -1978335212
+Microsoft.Edge                                 -1978335212
+Microsoft.OneDrive                             -1978335212
+Microsoft.VCLibs.Desktop.14                    0
+Microsoft.VCLibs.14                            0
+Microsoft.VCRedist.2015+.arm64                 -1978335212
+Microsoft.VCRedist.2015+.x64                   -1978335212
+Microsoft.VCRedist.2015+.x86                   -1978335212
+Microsoft.VisualStudioCode                     0
+Obsidian.Obsidian                              0
+JanDeDobbeleer.OhMyPosh                        0
+Microsoft.OpenCLGLVulkanCompatibilityPack      0
+Microsoft.PowerShell                           -1978335212
+BurntSushi.ripgrep.MSVC                        0
+Rustlang.Rustup                                0
+Tailscale.Tailscale                            -1978335212
+Telegram.TelegramDesktop                       0
+Vivaldi.Vivaldi                                0
+PhatMT97.VKey                                  0
+Warp.Warp                                      0
+Microsoft.WindowsSDK.10.0.26100                -1978335212
+Microsoft.WSL                                  0
+Microsoft.WindowsTerminal                      0
+Microsoft.WindowsAppRuntime.1.6                0
+Microsoft.WindowsAppRuntime.1.7                0
+ajeetdsouza.zoxide                             0
+```
+
+The 23 that exited `0` were then each run through the same trio as BuildTools
+(plain, `--scope machine`, `--scope user`) to confirm the pairing rather than
+trusting one exit code in isolation. **19 are clean opposites of BuildTools** —
+`--scope machine` refuses (`-1978335212`), `--scope user` returns the row, and
+the plain call agrees with the user-scoped one:
+
+```
+Brave.Brave, OpenAI.Codex, Discord.Discord, ByteDance.Lark,
+Microsoft.DotNet.Native.Runtime, Microsoft.VCLibs.Desktop.14,
+Microsoft.VCLibs.14, Microsoft.VisualStudioCode, Obsidian.Obsidian,
+JanDeDobbeleer.OhMyPosh, BurntSushi.ripgrep.MSVC, Rustlang.Rustup,
+Telegram.TelegramDesktop, Vivaldi.Vivaldi, PhatMT97.VKey, Warp.Warp,
+Microsoft.WindowsAppRuntime.1.6, Microsoft.WindowsAppRuntime.1.7,
+ajeetdsouza.zoxide
+```
+
+One, spelled out (the same shape as BuildTools with the scopes swapped):
+
+```
+$ winget list -e --id Brave.Brave --disable-interactivity
+EXIT 0    118 bytes
+  Name  Id          Version      Source
+  --------------------------------------
+  Brave Brave.Brave 151.1.93.134 winget
+
+$ winget list -e --id Brave.Brave --scope machine --disable-interactivity
+EXIT -1978335212 (0x8A150014)    53 bytes
+  No installed package found matching input criteria.
+
+$ winget list -e --id Brave.Brave --scope user --disable-interactivity
+EXIT 0    118 bytes  -- byte-identical to the plain call above
+  Name  Id          Version      Source
+  --------------------------------------
+  Brave Brave.Brave 151.1.93.134 winget
+```
+
+**This closes the gap**: at least one id exits `0` under `--scope user` and
+non-zero under `--scope machine` (19 of them, not merely one), and
+`Microsoft.VisualStudio.2022.BuildTools` does the reverse. `--scope` is
+confirmed to discriminate in both directions, on the same machine that
+produced the one-sided measurement in
+`docs/measurements-2026-08-09-winget.md` §2.
+
+### The other 4: `--scope` returning `0` on both sides is not "does not discriminate", it is "two installations"
+
+The remaining 4 of the 23 (`Microsoft.AppInstaller`,
+`Microsoft.OpenCLGLVulkanCompatibilityPack`, `Microsoft.WSL`,
+`Microsoft.WindowsTerminal`) exited `0` under **both** `--scope machine` and
+`--scope user` — not a counterexample to the pairing above, but a third shape
+worth recording. Three of the four resolve to a **different row** depending on
+scope:
+
+```
+Microsoft.WindowsTerminal --scope machine:
+  Microsoft.WindowsTerminal Microsoft.WindowsTerminal 3001.24.11911.0 winget
+Microsoft.WindowsTerminal --scope user:
+  Windows Terminal          Microsoft.WindowsTerminal 1.24.11911.0    winget
+```
+
+Same for `Microsoft.AppInstaller` (`Microsoft.DesktopAppInstaller`
+`2026.623.1704.0` at machine scope versus `App Installer` `1.29.280.0` at user
+scope) and `Microsoft.WSL` (`MicrosoftCorporationII.WindowsSubsystemForLinux`
+`2.7.11.0` at machine scope versus `Windows Subsystem for Linux` `2.7.11.0` at
+user scope — same version, different `Name`). One id, two independently
+-registered installations, one per scope — plausible for a Store-provisioned
+machine-wide copy alongside a per-user updated one. `list` without `--scope`
+picked the user-scope row in all three cases.
+
+The fourth, `Microsoft.OpenCLGLVulkanCompatibilityPack`, returned
+**byte-identical** 336-byte output for the plain call, `--scope machine`, and
+`--scope user` — one installation, visible from both scopes, `--scope`
+genuinely inert for this one id.
+
+### The probe wrote nothing
+
+```
+AFTER list --disable-interactivity  EXIT 0  bytes 30738
+AFTER sha256  78B8DCE9E2BD182B21F062520B93FECC576542FAEBA496EFE9D1F4FFCB1070B6
+SHA256-MATCH: TRUE
+```
+
+Before and after hashes are identical across 99 winget invocations (1 version
+check + 2 gate `list`s + 3 BuildTools + 36 iteration + 19×3 confirming trios).
+
+**Consequence for A4**: the plan's premise --- that confirming `--scope`
+discriminates in both directions was a precondition, not yet met --- is now
+met, on the same machine and the same `winget` version
+(`v1.29.280`) the design measured against. Task 15's pre-check can rely on
+`--scope user` vs `--scope machine` as originally designed; it does not need
+to fall back to keying on `0x8A15007D` alone. `docs/specs/2026-08-10-phase4b
+-winget-executor-design.md`'s A4 bullet (lines 253-261) still reads as "on
+exactly one package" and "confirming... is the first task of the plan" ---
+both now stale prose, out of scope for this task's file list (only this
+measurements doc and `PROVENANCE.md` are touched here), left for whoever next
+edits that design doc to update.
+
+**A caveat this document itself does not otherwise carry**: unlike §§1-9,
+`docs/measurements-2026-08-10-winget-write-path.md` never listed `--scope`
+under "What was deliberately not measured" below --- the one-package gap lived
+only in the design doc's own prose
+(`docs/specs/2026-08-10-phase4b-winget-executor-design.md:253-261`), not here.
+There was accordingly no bullet in the section below to move; this section is
+the gap's only closure.
+
+---
+
 ## What was deliberately not measured
 
 - **`--location`.** The probe was confounded: it asked to install 0.26.1 while

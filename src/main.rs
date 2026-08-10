@@ -527,70 +527,59 @@ fn main() -> Result<()> {
                 eprintln!("{w}");
             }
 
-            // A converged machine: nothing to install, nothing to remove,
-            // nothing held back, and nothing reported as needing attention
-            // either. Asking "0 installed, 0 removed, continue?" here has no
-            // meaningful answer, and an unreadable stdin would refuse it
-            // anyway -- exit 2, "go look", every single night, about
-            // nothing. There is nothing to look at.
-            if steps.is_empty() && unusable.is_empty() && held.is_empty() {
-                println!("  Nothing to do -- the machine already matches pkg.toml and pkg.lock.");
-                std::io::stdout().flush().ok();
-                return Ok(());
-            }
-
-            let removals = steps.iter().filter(|s| s.is_remove()).count();
-            if removals > 0 && yes && !allow_prune {
-                refuse(anyhow::anyhow!(
-                    "this run would remove {removals} package(s) and --yes was passed. \
-                     Removals need --allow-prune as well."
-                ));
-            }
-
-            // After `gate_removals` (a prune is only ever reachable through it,
-            // and a held one must not be asked about) and before `execute`, so
-            // a refusal lands before the recovery file is written, before the
-            // confirmation prompt asks about a run that cannot happen, and
-            // before one single step runs. `refuse` exits 2, which this
-            // project's exit codes mean as "the machine was not touched".
-            //
-            // Last of the refusals rather than first, deliberately: this is the
-            // only one that spawns subprocesses -- one `winget list` per winget
-            // removal, ~1 s each -- and the two above it (the converged-machine
-            // return and the `--yes`-without-`--allow-prune` gate) decide from
-            // the step list alone. Same reasoning as the mass-prune and
-            // lock-coherence guards running before the machine is scanned at
-            // all: a guard that needs nothing should not wait behind one that
-            // needs a subprocess. Every guard here is still ahead of every
-            // mutation, which is the property that matters.
+            // The three checks between a prepared step list and `execute` --
+            // converged, `--allow-prune`, and the elevation pre-check -- are
+            // one `apply::` function rather than three blocks here, so that
+            // the ORDER they run in is tested code. Task 15's review found
+            // that the pre-check could be moved after the confirmation prompt,
+            // or handed a constant, with the whole suite still green: the
+            // tests pinned the function, never its place in this arm. What is
+            // left to get wrong is this one call and its arguments.
             //
             // The closure is the only place a `None` from the scope query is
-            // turned into a decision, and it turns it into "let it through" --
-            // the same rule `sys::elevated()`'s own `None` follows, and it says
-            // so out loud rather than silently. `run_winget_step`'s
-            // `CANNOT_UNINSTALL_ELEVATED` translation is what catches whatever
-            // this lets through: a pre-check plus a translation, not either
-            // alone.
+            // turned into a decision, and it turns it into "not blocked" --
+            // the same rule `sys::elevated()`'s own `None` follows, and it
+            // names the package on stderr rather than deciding quietly.
+            // "not blocked" rather than "being removed" because another id in
+            // the same run may still refuse it, and then this removal never
+            // happens at all. `run_winget_step`'s `CANNOT_UNINSTALL_ELEVATED`
+            // translation is what catches whatever this lets through: a
+            // pre-check plus a translation, not either alone.
             let winget_read = RealWinget;
             let is_user_scope = |id: &Name| match installed_at_user_scope(&winget_read, id) {
                 Some(answer) => answer,
                 None => {
                     eprintln!(
                         "warning: could not tell whether {id} is installed for user scope, so \
-                         its removal is being attempted. If winget refuses it, the failure \
-                         will say so and re-running unelevated is the fix."
+                         it is not being treated as blocked. If winget refuses to uninstall \
+                         it, the failure will say so and re-running unelevated is the fix."
                     );
                     false
                 }
             };
-            if let Err(why) = dotpkg::apply::refuse_elevated_winget_removal(
+            match dotpkg::apply::gate_the_run(
                 &steps,
+                &unusable,
+                &held,
+                yes,
+                allow_prune,
                 dotpkg::sys::elevated(),
                 &is_user_scope,
             ) {
-                refuse(anyhow::anyhow!("{why}"));
+                dotpkg::apply::RunGate::Proceed => {}
+                // The sentence lives here, not in `gate_the_run`: it is what a
+                // scheduled run's log is read for, and `tests/cli.rs` pins it.
+                dotpkg::apply::RunGate::NothingToDo => {
+                    println!(
+                        "  Nothing to do -- the machine already matches pkg.toml and pkg.lock."
+                    );
+                    std::io::stdout().flush().ok();
+                    return Ok(());
+                }
+                dotpkg::apply::RunGate::Refuse(why) => refuse(anyhow::anyhow!("{why}")),
             }
 
+            let removals = steps.iter().filter(|s| s.is_remove()).count();
             let (replacements, installs) = count_replaces_and_installs(&steps);
             let question = format!(
                 "\n{replacements} package(s) will be uninstalled and reinstalled, {installs} \

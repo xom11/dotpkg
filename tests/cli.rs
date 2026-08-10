@@ -2093,3 +2093,185 @@ fn an_unknown_elevation_answer_allows_a_user_scope_winget_removal_rather_than_re
         "and an answer that cannot decide anything must not cost a subprocess either"
     );
 }
+
+// -- Task 15 review: the ORDERING is the thing that was unpinned -----------
+//
+// The four tests above pin `refuse_elevated_winget_removal` itself: given a
+// post-`gate_removals` step list, it refuses before a mutator is reached. They
+// do **not** pin that `main.rs` calls it, where in the arm it sits, or what it
+// is handed -- they re-implement the sequence by hand and never enter
+// `src/main.rs` at all. Moving the call after the confirmation prompt, or
+// passing a constant `Some(false)` for the elevation answer, left the whole
+// suite green.
+//
+// `apply::gate_the_run` exists to shrink that: the three checks between a
+// prepared step list and `execute`, in one function, in the order they must
+// run, so the ORDER is tested code rather than four lines of driver nobody can
+// reach. What is left unpinned is one call and its arguments.
+
+#[test]
+fn a_run_refused_for_its_flags_is_refused_before_winget_is_asked_anything() {
+    // The ordering that actually costs something. The `--allow-prune` gate
+    // decides from the step list alone; the elevation pre-check spends one
+    // ~1 s `winget list` per winget removal. Putting the expensive one first
+    // would make every misflagged elevated prune pay for an answer that
+    // cannot change the outcome.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    let gate = dotpkg::apply::gate_the_run(&steps, &[], &[], true, false, Some(true), &scope);
+
+    match &gate {
+        dotpkg::apply::RunGate::Refuse(why) => {
+            assert!(
+                why.contains("--allow-prune"),
+                "the flag gate is what must speak here: {why}"
+            );
+            assert!(
+                !why.contains("0x8A15007D"),
+                "and NOT the elevation pre-check, which has not run yet: {why}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(
+        asked.get(),
+        0,
+        "a run already refused on its flags must not pay for a scope query"
+    );
+}
+
+#[test]
+fn a_converged_run_is_nothing_to_do_and_a_held_only_run_is_not() {
+    // The hoisted early return, and the exact condition that makes it safe:
+    // all THREE of steps, unusable and held empty. A version that forgot
+    // `held.is_empty()` would swallow the run whose only outstanding work is a
+    // held prune -- and with it the closing-table row that says so.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+
+    assert_eq!(
+        dotpkg::apply::gate_the_run(&[], &[], &[], false, false, Some(true), &scope),
+        dotpkg::apply::RunGate::NothingToDo,
+        "nothing to install, nothing to remove, nothing held, nothing unusable"
+    );
+
+    let held = vec![("winget".to_string(), Name::new("Brave.Brave"))];
+    assert_eq!(
+        dotpkg::apply::gate_the_run(&[], &[], &held, false, false, Some(true), &scope),
+        dotpkg::apply::RunGate::Proceed,
+        "a held prune is outstanding work: the run must go on to report it"
+    );
+
+    assert_eq!(
+        asked.get(),
+        0,
+        "neither shape has a winget removal to ask about"
+    );
+}
+
+#[test]
+fn the_elevation_pre_check_is_reached_once_the_cheaper_gates_are_satisfied() {
+    // Delegation: `gate_the_run` really does consult
+    // `refuse_elevated_winget_removal`, and hands it the post-`gate_removals`
+    // step list. Without this, the hoist could have dropped the pre-check
+    // entirely and the three tests around it would still pass.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    let gate = dotpkg::apply::gate_the_run(&steps, &[], &[], true, true, Some(true), &scope);
+
+    match &gate {
+        dotpkg::apply::RunGate::Refuse(why) => {
+            assert!(
+                why.contains("0x8A15007D") && why.contains("Brave.Brave"),
+                "the elevation refusal, naming the package and the measured code: {why}"
+            );
+        }
+        other => panic!("expected the elevation refusal, got {other:?}"),
+    }
+    assert_eq!(
+        asked.get(),
+        1,
+        "exactly one scope query, for the one removal"
+    );
+}
+
+#[test]
+fn a_run_that_clears_all_three_gates_proceeds() {
+    // The positive control for the three above: a function that returned
+    // `Refuse` unconditionally would satisfy two of them, and one that
+    // returned `NothingToDo` unconditionally would satisfy the other. This is
+    // the elevated machine-scope prune -- authorised by both flags, and
+    // unmeasured rather than refused.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Microsoft.VisualStudio.2022.BuildTools")];
+
+    assert_eq!(
+        dotpkg::apply::gate_the_run(&steps, &[], &[], true, true, Some(true), &scope),
+        dotpkg::apply::RunGate::Proceed,
+        "an authorised machine-scope prune on an elevated machine must run"
+    );
+    assert_eq!(asked.get(), 1, "and it was asked, rather than assumed");
+}
+
+/// The one link no other test in this suite can make: the **real**
+/// `sys::elevated()` answer, from a real elevated Windows session, driving the
+/// real pre-check.
+///
+/// `#[ignore]` because its whole premise is a property of the process it runs
+/// in, and `#[cfg(windows)]` because `sys::elevated()` is a hardcoded `None`
+/// everywhere else. Invoke it by name from the dogfood, in an elevated shell:
+///
+/// ```text
+/// cargo test --test cli -- --ignored on_a_real_elevated_windows_session
+/// ```
+///
+/// It fails, loudly and with instructions, if the session is not actually
+/// elevated -- so it cannot pass by being run in the wrong place, which is the
+/// failure mode a prose line in a checklist has.
+///
+/// **It still does not pin `main.rs`'s call site.** Reaching that needs a
+/// fixture whose plan contains a removal of a winget package genuinely
+/// installed at user scope on the machine under test, which no hermetic
+/// fixture can construct. That check stays manual; see the task report.
+#[test]
+#[cfg(windows)]
+#[ignore = "needs an elevated Windows session; the dogfood invokes it by name"]
+fn on_a_real_elevated_windows_session_the_pre_check_refuses_a_user_scope_removal() {
+    let elevated = dotpkg::sys::elevated();
+    assert_eq!(
+        elevated,
+        Some(true),
+        "run this from an ELEVATED Windows shell -- `sys::elevated()` said {elevated:?}, \
+         so this run proves nothing either way"
+    );
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    let gate = dotpkg::apply::gate_the_run(&steps, &[], &[], true, true, elevated, &measured_scope);
+
+    match &gate {
+        dotpkg::apply::RunGate::Refuse(why) => assert!(
+            why.contains("0x8A15007D"),
+            "the real token said elevated, so the measured refusal must fire: {why}"
+        ),
+        other => panic!(
+            "an elevated session with a user-scope winget removal must refuse, got {other:?}"
+        ),
+    }
+}

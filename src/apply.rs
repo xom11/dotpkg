@@ -1111,6 +1111,89 @@ pub fn refuse_elevated_winget_removal(
     ))
 }
 
+/// What the driver does next, once the steps are prepared and gated.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunGate {
+    /// Confirm (unless `--yes`) and run the steps.
+    Proceed,
+    /// The machine already matches the files. `main.rs` owns the sentence it
+    /// prints for this, because that exact text is what a scheduled run's log
+    /// is read for and `tests/cli.rs` pins it end to end.
+    NothingToDo,
+    /// The whole sentence a user reads. `main.rs` hands it to `refuse`, which
+    /// exits 2 -- this project's exit codes mean that as "not touched".
+    Refuse(String),
+}
+
+/// Everything that stands between a prepared, removal-gated step list and
+/// `execute`, in the order it has to happen.
+///
+/// **This is here rather than inline in the `apply` arm because the ORDER is
+/// the part that had no test.** Task 15's review found that the four driver
+/// lines calling `refuse_elevated_winget_removal` could be moved after the
+/// confirmation prompt, or after `recovery_path` was built, or handed a
+/// constant `Some(false)`, and the entire suite stayed green: the tests pinned
+/// the pre-check *function*, never its position or its arguments. Hoisting the
+/// three checks into one function moves the ordering into code a test can
+/// reach, and leaves the driver one call to get wrong instead of three
+/// separately-placed ones. The same reasoning that put `gate_removals` here:
+/// the decisions a deleted line would make silently permissive do not belong
+/// in `main.rs`.
+///
+/// The order, and why it is this one:
+///
+/// 1. **A converged machine returns first.** Nothing to install, nothing to
+///    remove, nothing held, nothing unusable -- asking "0 installed, 0
+///    removed, continue?" has no meaningful answer, and an unreadable stdin
+///    would refuse it anyway: exit 2, "go look", every night, about nothing.
+///    All three of `steps`, `unusable` and `held` must be empty, because a
+///    held prune is outstanding work whose closing-table row is the only place
+///    the user learns about it.
+/// 2. **Then the `--allow-prune` gate**, which reads the step list and nothing
+///    else.
+/// 3. **Then the elevation pre-check**, last because it is the only one that
+///    spawns subprocesses -- one `winget list` per winget removal, ~1 s each
+///    (see `refuse_elevated_winget_removal`'s own cost note). A guard that
+///    needs nothing must not queue behind one that needs a subprocess; the
+///    same reasoning already puts `mass_prune_guard` and
+///    `lock_coherence_guard` ahead of the machine scan entirely.
+///
+/// Every one of the three is still ahead of the confirmation prompt, ahead of
+/// the recovery file being written, and ahead of every mutation. That, not the
+/// relative order, is the property a refusal depends on -- and it is why this
+/// function returns a decision instead of doing anything itself.
+///
+/// `elevated` and `is_user_scope` are passed straight through to
+/// `refuse_elevated_winget_removal`; see that function for why neither may be
+/// resolved in here.
+pub fn gate_the_run(
+    steps: &[Step],
+    unusable: &[(Name, String)],
+    held: &[(String, Name)],
+    yes: bool,
+    allow_prune: bool,
+    elevated: Option<bool>,
+    is_user_scope: &dyn Fn(&Name) -> bool,
+) -> RunGate {
+    if steps.is_empty() && unusable.is_empty() && held.is_empty() {
+        return RunGate::NothingToDo;
+    }
+
+    let removals = steps.iter().filter(|s| s.is_remove()).count();
+    if removals > 0 && yes && !allow_prune {
+        return RunGate::Refuse(format!(
+            "this run would remove {removals} package(s) and --yes was passed. \
+             Removals need --allow-prune as well."
+        ));
+    }
+
+    if let Err(why) = refuse_elevated_winget_removal(steps, elevated, is_user_scope) {
+        return RunGate::Refuse(why);
+    }
+
+    RunGate::Proceed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

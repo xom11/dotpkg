@@ -1500,3 +1500,86 @@ fn a_winget_step_and_a_scoop_step_are_different_types() {
     assert_eq!(s.guard_names(), &[] as &[String]);
     assert_eq!(w.guard_names(), &["vivaldi".to_string()]);
 }
+
+#[test]
+fn a_winget_set_sorts_before_every_removal_of_either_backend() {
+    // `WingetStep` appeared in exactly one test before this (as `Remove`
+    // only, above); `WingetStep::Set` appeared in none. This pins `order`'s
+    // group assignment for it (execute.rs:190): it must sort into group 0,
+    // with installs, ahead of every removal -- scoop's or winget's --
+    // because install-before-uninstall exists so that a run that dies
+    // partway leaves an extra package rather than a missing one, per
+    // `order`'s own doc comment. Also exercises `WingetStep::Remove`
+    // sorting into group 2 alongside `ScoopStep::Remove`.
+    let s = |n: &str| PathBuf::from(format!("/stage/{n}.json"));
+    let steps = vec![
+        Step::Scoop(ScoopStep::Remove {
+            app: Name::new("aichat"),
+        }),
+        Step::Winget(WingetStep::Remove {
+            id: Name::new("Vivaldi.Vivaldi"),
+            version: "8.1.4087.62".to_string(),
+            guard: vec![],
+        }),
+        Step::Winget(WingetStep::Set {
+            id: Name::new("Brave.Brave"),
+            version: "151.1.93.134".to_string(),
+            guard: vec![],
+        }),
+        Step::Scoop(ScoopStep::Install {
+            app: Name::new("ripgrep"),
+            staged: s("ripgrep"),
+            arch: None,
+        }),
+    ];
+    let got: Vec<String> = order(steps)
+        .iter()
+        .map(|s| s.app().key().to_string())
+        .collect();
+    assert_eq!(
+        got,
+        vec!["brave.brave", "ripgrep", "aichat", "vivaldi.vivaldi"],
+        "a winget Set must sort with installs, before every removal of either \
+         backend: {got:?}"
+    );
+}
+
+#[test]
+fn a_winget_id_that_collides_with_defer_last_is_still_not_deferred() {
+    // `DEFER_LAST` is scoop-only by construction (see `order`'s own doc
+    // comment): it holds back `git` and the extraction helpers only because
+    // `Scoop::stage` shells out to git and scoop unpacks with
+    // 7zip/dark/innounp/lessmsi. Nothing in the winget path touches any of
+    // them -- winget downloads and extracts inside its own process -- so a
+    // winget id must never be deferred for that reason, even one that
+    // collides with a `DEFER_LAST` entry.
+    //
+    // The lookup compares a step's whole key against `DEFER_LAST`, not a
+    // dotted suffix, so the id here is the bare word "Git" rather than a
+    // realistic dotted id like "Git.Git": only an exact match would flip
+    // under the mutant this pins (`Step::Winget(_) => 0` replaced by the
+    // scoop arm's `DEFER_LAST` lookup), and "git.git" would never collide
+    // either way, correct or mutated -- it would not tell the two apart.
+    let steps = vec![
+        Step::Winget(WingetStep::Remove {
+            id: Name::new("Git"),
+            version: "2.47.0".to_string(),
+            guard: vec![],
+        }),
+        Step::Winget(WingetStep::Remove {
+            id: Name::new("Vivaldi.Vivaldi"),
+            version: "8.1.4087.62".to_string(),
+            guard: vec![],
+        }),
+    ];
+    let got: Vec<String> = order(steps)
+        .iter()
+        .map(|s| s.app().key().to_string())
+        .collect();
+    assert_eq!(
+        got,
+        vec!["git", "vivaldi.vivaldi"],
+        "a winget id spelled like a DEFER_LAST entry must still sort by plain \
+         alphabetical order, not get pushed to the end of its group: {got:?}"
+    );
+}

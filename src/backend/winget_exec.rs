@@ -214,8 +214,14 @@ pub trait WingetMutator {
 /// `verify::verdict` (scoop's side of this same seam) compares the installed
 /// manifest's *bytes* against the staged file -- a content address, checked
 /// against something the mutation itself did not write. Winget has no
-/// equivalent: there is no manifest, no hash, nothing independent of winget
-/// to check winget's own write against. `winget_verdict` re-runs `winget
+/// equivalent. **Not because winget has no hash** -- it has one and verifies
+/// it, printing `Successfully verified installer hash`, and `winget show`
+/// prints `Installer SHA256`; that correction is on the record at
+/// `docs/specs/2026-08-09-phase4-backend-winget-design.md:60` and
+/// `src/execute.rs`'s module doc restates it. What winget lacks is an
+/// **on-disk manifest or hash dotpkg can read back after the install**, so
+/// there is nothing independent of winget to check winget's own write against.
+/// `winget_verdict` re-runs `winget
 /// list` and reads the answer back from the very tool that just performed
 /// the mutation -- `src/execute.rs`'s own module doc names the hazard
 /// directly: "a fake that both performs and reports the mutation proves only

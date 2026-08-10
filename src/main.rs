@@ -226,8 +226,8 @@ fn unrouted_warning(ready: usize, routed: usize) -> Option<String> {
 }
 
 /// Prints what each scan could not read, attributed to its own backend, then
-/// hands back what `plan()` needs from all three: `installed` and `opaque`
-/// concatenate -- `plan()` already filters `installed` by backend, and
+/// hands back the three things `plan()` needs from the two scans: `installed`
+/// and `opaque` concatenate -- `plan()` already filters `installed` by backend, and
 /// `Scan::opaque` is backend-agnostic by construction (see its own doc
 /// comment) -- and `unscannable` names every backend whose scan failed
 /// outright rather than merely finding nothing (`ScanOutcome::Unscannable`).
@@ -269,10 +269,14 @@ fn print_scan_warnings_and_merge(
 }
 
 /// Drops ghosts -- state entries whose package is no longer there -- for
-/// every backend a run just acted on, not only scoop. Extracted out of the
-/// `apply` handler as its own function, behaviour unchanged, so this exact
-/// sequence (not a reimplementation of it) can be unit tested without
-/// spawning `winget.exe`: `tests/cli.rs` cannot drive this, because
+/// every backend a run just acted on, not only scoop.
+///
+/// Extracted out of the `apply` handler as its own function at Phase 4b Task 8.
+/// **The scoop half moved unchanged; the winget half below is new in that same
+/// commit** -- so "behaviour unchanged" describes the extraction, never the
+/// function. Extracted so this exact sequence (not a reimplementation of it)
+/// can be unit tested without spawning `winget.exe`: `tests/cli.rs` cannot
+/// drive this, because
 /// `Fixture::run` strips every `winget`/`winget.exe` file off the `PATH` it
 /// hands the spawned process, and `Winget::scan`'s own `NotFound` arm turns
 /// an absent binary into `Ok(Scan::default())`, not an error -- so `present`
@@ -298,11 +302,15 @@ fn print_scan_warnings_and_merge(
 /// that reintroduces exactly this silent data loss, and
 /// `reconcile_ghosts_leaves_winget_untouched_when_its_scan_failed` below is
 /// what catches it.
+///
 /// Each dropped record is returned with **the backend it was dropped from**.
-/// This function has reconciled both backends since Phase 4 Task 14, but its
-/// return type did not say which was which, so `render_execution` printed every
-/// dropped winget record as `note scoop <id>` -- a false word in user-facing
-/// output, older than Phase 4b Task 13 and fixed with it.
+/// That is not a fix for a defect any user ever saw: nothing reconciled winget
+/// before Phase 4b Task 8 (`98f3d33:src/main.rs` reconciles `SCOOP` only, one
+/// call, and Task 8 is the commit that added the winget half), so no winget
+/// ownership record was ever dropped, and none was ever mislabelled. The
+/// backend travels with the record because `render_execution` names a backend
+/// per line and had no way to know which one -- carried from the start of the
+/// winget half rather than added after a wrong word shipped.
 fn reconcile_ghosts(
     state: &mut State,
     scoop: &Scoop,
@@ -1197,10 +1205,11 @@ mod tests {
         let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
 
         // Each dropped record names the backend it came from. Without that,
-        // `render_execution` printed `note scoop <winget id>` for the winget
-        // half -- false since Phase 4 Task 14 taught this function both
-        // backends, and only fixed when Phase 4b Task 13 gave every execution line a
-        // real backend column.
+        // `render_execution` would print `note scoop <winget id>` for the winget
+        // half -- would, not did: nothing reconciled winget until Phase 4b Task 8
+        // added this very half, so no winget record was ever dropped before it
+        // and none was ever mislabelled. The backend travels with the record
+        // from that first commit onward.
         assert_eq!(
             dropped,
             vec![

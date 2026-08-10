@@ -703,12 +703,16 @@ pub enum ItemResult {
 /// A struct rather than the `(Name, ItemResult)` tuple this replaced, and the
 /// `backend` is the whole reason: `render_execution` hardcoded the string
 /// `"scoop"` on every line it printed. That was *correct* for as long as no
-/// `Step::Winget` could reach `execute` -- until Phase 4b Task 13, every
-/// winget action fell into `plan_to_steps`'s routing-bug arm and never became
-/// a step at all -- and it became false the moment winget got an executor,
-/// printing `FAILED scoop Brave.Brave` for a winget package. Nothing in the
-/// type system objected, and no grep for a deleted sentence could have found
-/// it, because the false word was a backend name.
+/// `Step::Winget` could reach `execute`, which held until Phase 4b Task 13 --
+/// under `Capability::ReportsOnly` a winget difference was
+/// `Action::Skip { reason: ReportedOnly }`, so it became `Intent::Skip`, then
+/// `Outcome::Skipped`, and was routed by `plan_to_steps`'s **`Skipped`** arm
+/// into `unusable`. It never became a step, but it never touched the
+/// routing-bug arm either: that arm needs a ready outcome, and was reachable
+/// only from a hand-built `Preparation`. It became false the moment winget got
+/// an executor, printing `FAILED scoop Brave.Brave` for a winget package.
+/// Nothing in the type system objected, and no grep for a deleted sentence
+/// could have found it, because the false word was a backend name.
 ///
 /// A named struct, not a third tuple element: `(Name, &str, ItemResult)` puts
 /// two strings side by side with nothing but position telling them apart,
@@ -730,10 +734,11 @@ pub struct ItemOutcome {
 pub struct Execution {
     pub results: Vec<ItemOutcome>,
     /// Ownership records dropped because nothing by that name is installed
-    /// any more, each with the backend it was dropped from -- `reconcile_ghosts`
-    /// has reconciled **both** backends since Phase 4 Task 14, so a bare
-    /// `Name` here was already enough to make `render_execution` mislabel a
-    /// winget ghost as scoop's before Phase 4b Task 13 ever ran.
+    /// any more, each with the backend it was dropped from. `reconcile_ghosts`
+    /// reconciled `SCOOP` alone until Phase 4b Task 8 added the winget half, so
+    /// the backend is here from the first commit that could produce a winget
+    /// entry -- not a repair for a mislabelled line some earlier run printed,
+    /// because no winget record was ever dropped before this branch.
     pub dropped_ghosts: Vec<(String, Name)>,
     /// `Some(reason)` when `write_recovery` failed. Deliberately not a
     /// refusal -- the run still went ahead, because `execute` does not get

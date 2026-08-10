@@ -465,8 +465,8 @@ pub fn plan(
     let mut prunes = Vec::new();
     let mut reports = Vec::new();
 
-    // One pass per backend, both real since Task 14 and both `Acts` since
-    // Phase 4b Task 13: a declared winget package that differs from the lock is an
+    // One pass per backend, both real since Phase 4 Task 14 and both `Acts`
+    // since Phase 4b Task 13: a declared winget package that differs from the lock is an
     // `Install`/`Upgrade`/`Downgrade` and an owned undeclared one is a
     // `Prune`, exactly as scoop's is, and `apply` really performs them.
     // `[winget.opts]` does not exist, so `empty_opts` stands in for it --

@@ -182,10 +182,11 @@ pub fn render_execution(ex: &Execution) -> String {
         out.push_str(&line);
         out.push('\n');
     }
-    // Same fix, and this one was already false before Phase 4b Task 13:
-    // `reconcile_ghosts` has reconciled both backends since Phase 4 Task 14,
-    // so a dropped winget ownership record has been printed as scoop's ever
-    // since.
+    // The same read-it-from-the-item fix, applied to the `note` line for
+    // completeness rather than to correct anything a user saw: nothing
+    // reconciled winget until Phase 4b Task 8, so no winget ownership record
+    // was ever dropped before this branch, and none was ever printed as
+    // scoop's. Task 8 gave the winget half a backend on day one.
     for (backend, name) in &ex.dropped_ghosts {
         out.push_str(&format!(
             "  note    {backend:<6} {name:<14} ownership record dropped: nothing by that name is installed\n"
@@ -1283,18 +1284,22 @@ mod tests {
         // **The bug this test exists for shipped, briefly, inside Phase 4b Task
         // 13's own commit.** `render_execution` hardcoded the literal `scoop`
         // on all four of its line shapes. That was correct for as long as no
-        // `Step::Winget` could reach `execute` -- before Phase 4b Task 13 every winget
-        // action fell into `plan_to_steps`'s routing-bug arm and never became a
-        // step -- and the very change that gave winget an executor turned those
-        // lines into `FAILED  scoop  Brave.Brave`.
+        // `Step::Winget` could reach `execute`: under `Capability::ReportsOnly`
+        // a winget difference was `Action::Skip { reason: ReportedOnly }` ->
+        // `Intent::Skip` -> `Outcome::Skipped`, routed into `unusable` by
+        // `plan_to_steps`'s `Skipped` arm -- never a step, and never the
+        // routing-bug arm either, which needs a ready outcome and was reachable
+        // only from a hand-built `Preparation`. The very change that gave winget
+        // an executor turned those lines into `FAILED  scoop  Brave.Brave`.
         //
         // No grep for a deleted sentence could have found it, because the false
         // word was a backend name, which is why this asserts the column
         // directly for every shape rather than trusting the plumbing.
         //
-        // The `note` line was already wrong before Phase 4b Task 13: `reconcile_ghosts`
-        // has dropped ownership records for both backends since Phase 4 Task
-        // 14.
+        // The `note` line is here for completeness, not because a user ever saw
+        // it wrong: `reconcile_ghosts` reconciled scoop alone until Phase 4b
+        // Task 8, so no winget ownership record was ever dropped before this
+        // branch.
         let winget_item = |name: &str, result: ItemResult| crate::execute::ItemOutcome {
             backend: WINGET.to_string(),
             name: Name::new(name),

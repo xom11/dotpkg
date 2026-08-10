@@ -2048,6 +2048,98 @@ mod tests {
     }
 
     #[test]
+    fn a_winget_prune_produces_no_scoop_step_and_is_reported_as_unrouted() {
+        // `backend == SCOOP` on the Prune arm (apply.rs:623) is a runtime
+        // value check the recent type split does not defend: `Step::Scoop(
+        // ScoopStep::Remove)` compiles perfectly well for a winget
+        // `Action::Prune`, and would reach `run_scoop_step` and invoke
+        // `scoop uninstall` against a winget package if this guard were
+        // ever deleted. Nothing upstream stops that: `classify` maps every
+        // `Prune` to `NoArtifactNeeded` -> `ReadyToRemove` with no backend
+        // check at all -- the only thing making this unreachable in
+        // production today is that winget is `Capability::ReportsOnly`.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Prune {
+                    backend: WINGET.into(),
+                    name: Name::new("Vivaldi.Vivaldi"),
+                    version: "8.1.4087.62".into(),
+                },
+                outcome: Outcome::ReadyToRemove,
+            }],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![(
+                Name::new("Vivaldi.Vivaldi"),
+                "winget: prepared, but no executor claimed it -- this is a routing bug, not a \
+                 package problem"
+                    .to_string()
+            )],
+            "a winget prune must never fall through to a scoop step: {unusable:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_install_and_a_winget_upgrade_produce_no_scoop_step_and_are_reported_as_unrouted() {
+        // Mirrors the test above for the other two `backend == SCOOP`
+        // guards (apply.rs:599 and :618): a winget action ready to fetch
+        // must not fall through into a `ScoopStep::Install` or
+        // `ScoopStep::Replace` either.
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Install {
+                        backend: WINGET.into(),
+                        name: Name::new("Brave.Brave"),
+                        version: "151.1.93.134".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::ReadyToFetch {
+                        manifest: PathBuf::from("/stage/Brave.Brave/151.1.93.134/manifest.json"),
+                    },
+                },
+                Prepared {
+                    action: Action::Upgrade {
+                        backend: WINGET.into(),
+                        name: Name::new("7zip.7zip"),
+                        from: "26.01.00.0".into(),
+                        to: "26.02".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::ReadyToFetch {
+                        manifest: PathBuf::from("/stage/7zip.7zip/26.02/manifest.json"),
+                    },
+                },
+            ],
+        };
+
+        let (steps, unusable) = plan_to_steps(&prep);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![
+                (
+                    Name::new("Brave.Brave"),
+                    "winget: prepared, but no executor claimed it -- this is a routing bug, \
+                     not a package problem"
+                        .to_string()
+                ),
+                (
+                    Name::new("7zip.7zip"),
+                    "winget: prepared, but no executor claimed it -- this is a routing bug, \
+                     not a package problem"
+                        .to_string()
+                ),
+            ],
+            "a winget install/upgrade must never fall through to a scoop step: {unusable:?}"
+        );
+    }
+
+    #[test]
     fn failed_and_not_locked_land_in_unusable_with_their_reasons() {
         let prep = Preparation {
             prepared: vec![

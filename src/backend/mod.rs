@@ -171,9 +171,27 @@ pub trait Backend {
     fn resolve_installed(&self, inst: &Installed, ctx: &ResolveCtx) -> Resolution;
 }
 
-/// Turns a genuine `scan()` failure into an empty `Scan` carrying exactly one
-/// `warnings` entry, rather than letting the `Result::Err` propagate out of
-/// the caller and abort the whole command.
+/// What a `scan_or_warn` call established: a real `Scan` (which may still
+/// carry its own `warnings`/`opaque` entries), or an outright failure to scan
+/// this backend at all.
+///
+/// Two variants rather than one `Scan` that happens to be empty on failure --
+/// the whole point of this task. Before this type existed, `scan_or_warn`
+/// returned a plain `Scan`, and a genuine scan failure was indistinguishable
+/// from a genuinely empty machine to every caller downstream: `Unscannable`
+/// carries the cause and lets `plan()` (via its `unscannable` parameter and
+/// `SkipReason::Unscannable`) treat "this backend's state is unknown"
+/// differently from "this backend has nothing installed", instead of reading
+/// the former as the latter.
+#[derive(Debug)]
+pub enum ScanOutcome {
+    Scanned(Scan),
+    Unscannable(String),
+}
+
+/// Turns a genuine `scan()` failure into `ScanOutcome::Unscannable` carrying
+/// the cause, rather than letting the `Result::Err` propagate out of the
+/// caller and abort the whole command.
 ///
 /// Added by Task 14's review: `src/main.rs`'s `status` and
 /// `apply::load_everything` both used to write `winget.scan()?`, and
@@ -189,26 +207,30 @@ pub trait Backend {
 /// the way out of `main`, and scoop's own half of the run -- entirely
 /// unrelated to whatever winget hiccup caused it -- never happened either.
 ///
-/// Mirrors the shape `Winget::scan` already uses for its OTHER failure mode:
-/// an empty `Scan` plus exactly one `warnings` entry. The caller prints it
-/// the same way every other scan warning already is (see
-/// `main.rs`'s `print_scan_warnings_and_merge`) -- no new printing path, and
-/// no second message stacked on top.
+/// The caller prints the cause the same way every other scan warning already
+/// is (see `main.rs`'s `print_scan_warnings_and_merge`) -- no new printing
+/// path, and no second message stacked on top.
 ///
-/// Continuing with an empty `installed`/`opaque` is safe here in a way it
-/// would not be for scoop: `plan()`'s prune loop only ever iterates
-/// `installed`, so an empty scan can never fabricate a prune, and a declared
-/// package simply reports as unresolved (`NotLocked`/`ReportedOnly`) instead
-/// of silently vanishing -- under-reporting, never over-acting.
-pub fn scan_or_warn(backend: &dyn Backend) -> Scan {
+/// **Task 6's correction:** this used to return an empty `Scan` plus one
+/// `warnings` entry -- the same shape `Winget::scan` uses for its OTHER
+/// failure mode (an absent `winget.exe`) -- and its doc comment argued that
+/// was safe: "`plan()`'s prune loop only ever iterates `installed`, so an
+/// empty scan can never fabricate a prune." That argument is still true, and
+/// only ever covered the prune direction. It said nothing about the other
+/// one: a declared, locked package with nothing in `installed` because the
+/// scan failed reads exactly like a declared, locked package that is
+/// genuinely not installed -- `Divergence::Install` for a `ReportsOnly`
+/// backend today, and once a backend `Acts` (Task 13), a real
+/// `Action::Install` for a package that may already be sitting there,
+/// converged. `ScanOutcome::Unscannable` is that other half's answer:
+/// `plan()` takes this backend's name via its `unscannable: &[&'static str]`
+/// parameter and skips the backend's declared loop entirely, emitting
+/// `SkipReason::Unscannable` for every declared package instead of reading
+/// its absence from `installed` as fact.
+pub fn scan_or_warn(backend: &dyn Backend) -> ScanOutcome {
     match backend.scan() {
-        Ok(scan) => scan,
-        Err(e) => Scan {
-            warnings: vec![format!(
-                "could not be scanned, continuing without it: {e:#}"
-            )],
-            ..Scan::default()
-        },
+        Ok(scan) => ScanOutcome::Scanned(scan),
+        Err(e) => ScanOutcome::Unscannable(format!("could not be scanned: {e:#}")),
     }
 }
 
@@ -260,32 +282,31 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_scan_becomes_an_empty_scan_with_exactly_one_warning() {
-        let scan = scan_or_warn(&FailingBackend);
-        assert!(scan.installed.is_empty(), "got {:?}", scan.installed);
-        assert!(scan.opaque.is_empty(), "got {:?}", scan.opaque);
-        assert_eq!(
-            scan.warnings.len(),
-            1,
-            "exactly one warning, not zero and not a second one stacked on \
-             top: {:?}",
-            scan.warnings
-        );
-        assert!(
-            scan.warnings[0].contains("could not be scanned")
-                && scan.warnings[0].contains("source update failed"),
-            "the underlying error must still be named, not swallowed: {:?}",
-            scan.warnings
-        );
+    fn a_failed_scan_becomes_unscannable_with_the_cause_named() {
+        match scan_or_warn(&FailingBackend) {
+            ScanOutcome::Unscannable(why) => assert!(
+                why.contains("could not be scanned") && why.contains("source update failed"),
+                "the underlying error must still be named, not swallowed: {why}"
+            ),
+            ScanOutcome::Scanned(s) => {
+                panic!("a genuine scan failure must not read as scanned: {s:?}")
+            }
+        }
     }
 
     #[test]
     fn a_successful_scan_passes_through_untouched() {
         // The positive control: without it, a version that always discarded
-        // the real scan and returned an empty one would satisfy the test
+        // the real scan and returned Unscannable would satisfy the test
         // above too.
-        let scan = scan_or_warn(&WorkingBackend);
-        assert_eq!(scan.installed.len(), 1, "got {:?}", scan.installed);
-        assert!(scan.warnings.is_empty(), "got {:?}", scan.warnings);
+        match scan_or_warn(&WorkingBackend) {
+            ScanOutcome::Scanned(scan) => {
+                assert_eq!(scan.installed.len(), 1, "got {:?}", scan.installed);
+                assert!(scan.warnings.is_empty(), "got {:?}", scan.warnings);
+            }
+            ScanOutcome::Unscannable(why) => {
+                panic!("a successful scan must not read as unscannable: {why}")
+            }
+        }
     }
 }

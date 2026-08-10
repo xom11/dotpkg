@@ -72,6 +72,9 @@ pub fn render(plan: &Plan) -> String {
                         "installed, but its state could not be read -- see the warnings above"
                             .to_string()
                     }
+                    SkipReason::Unscannable => "this backend could not be scanned -- see the \
+                         warnings above; nothing was attempted for it"
+                        .to_string(),
                 };
                 format!("  ! {backend:<6} {name:<14} {why}")
             }

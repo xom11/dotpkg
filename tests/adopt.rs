@@ -476,6 +476,7 @@ fn an_adopted_package_is_not_a_prune_candidate_and_not_notlocked() {
         &scan.opaque,
         &state,
         &dotpkg::model::Running::default(),
+        &[],
     );
 
     for a in &plan.actions {
@@ -886,6 +887,7 @@ fn a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about() {
         &scan.opaque,
         &State::default(),
         &dotpkg::model::Running::default(),
+        &[],
     );
     for a in &plan.actions {
         if let dotpkg::plan::Action::Prune { name, .. } = a {
@@ -1031,6 +1033,7 @@ fn the_forbidden_write_order_leaves_a_shape_plan_turns_into_a_prune() {
         &scan.opaque,
         &loaded_state,
         &dotpkg::model::Running::default(),
+        &[],
     );
 
     let pruned = plan.actions.iter().any(|a| {

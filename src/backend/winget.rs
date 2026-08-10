@@ -2,7 +2,7 @@ use super::{Backend, ResolveCtx, Scan};
 use crate::lock::Pin;
 use crate::model::{Installed, Name, WINGET};
 use crate::update::Resolution;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 
@@ -511,6 +511,30 @@ pub fn parse_versions(stdout: &str) -> Result<(String, Vec<String>)> {
     Ok((id, versions))
 }
 
+/// Why a winget invocation could not be made at all -- distinct from a
+/// winget that ran and reported failure through its exit code.
+///
+/// `anyhow::Error` erases `io::ErrorKind`, and `Winget::scan` needs exactly
+/// that one bit: a machine with no `winget.exe` is a legitimate, empty
+/// machine, while a `winget.exe` that exists and cannot be run is a machine
+/// whose state dotpkg does not know. Before this split both reached the same
+/// arm -- `Scoop::scan` had always distinguished them.
+#[derive(Debug)]
+pub enum CmdError {
+    /// `winget.exe` is not on `PATH`.
+    NotFound,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for CmdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmdError::NotFound => write!(f, "winget.exe is not on PATH"),
+            CmdError::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
 /// One `winget` invocation's outcome: the exit code and stdout, verbatim.
 ///
 /// `code` is a plain `i32`, not the `Option<i32>` `execute::CommandReport`
@@ -532,7 +556,7 @@ pub struct CmdOut {
 /// the standing rule that no test may create a file at `Scoop::scoop_exe()`'s
 /// path either.
 pub trait WingetCmd {
-    fn run(&self, args: &[&str]) -> Result<CmdOut>;
+    fn run(&self, args: &[&str]) -> Result<CmdOut, CmdError>;
 }
 
 /// The real `winget.exe`, invoked as a subprocess. Only production code
@@ -541,13 +565,21 @@ pub trait WingetCmd {
 pub struct RealWinget;
 
 impl WingetCmd for RealWinget {
-    fn run(&self, args: &[&str]) -> Result<CmdOut> {
+    fn run(&self, args: &[&str]) -> Result<CmdOut, CmdError> {
         let out = Command::new("winget")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .with_context(|| format!("cannot run winget {args:?}"))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    CmdError::NotFound
+                } else {
+                    CmdError::Other(
+                        anyhow::Error::new(e).context(format!("cannot run winget {args:?}")),
+                    )
+                }
+            })?;
         // `out.stderr` is captured (so it cannot leak to this process's own
         // stderr) and then never read -- deliberately discarded rather than
         // merged into `stdout`. Measured across ~45 invocations on a14
@@ -624,14 +656,22 @@ impl<C: WingetCmd> Backend for Winget<C> {
             // an empty `Scan` is the right answer. But unlike that arm this
             // records a warning rather than staying silent, because "winget
             // could not be run" and "winget ran and found nothing" would
-            // otherwise be indistinguishable to the user, and the caller
-            // named in `e` is worth keeping.
-            Err(e) => {
+            // otherwise be indistinguishable to the user.
+            Err(CmdError::NotFound) => {
                 let mut scan = Scan::default();
                 scan.warnings
-                    .push(format!("winget could not be run: {e:#}"));
+                    .push(format!("winget could not be run: {}", CmdError::NotFound));
                 return Ok(scan);
             }
+            // The OTHER failure shape, which `CmdError::NotFound` above is
+            // deliberately not: `winget.exe` exists and could not be run for
+            // some other reason (permissions, a corrupt install, ...). This
+            // machine's winget state is unknown, not empty -- an empty `Scan`
+            // here would read as "nothing is installed", which is exactly the
+            // wrong answer `mass_prune_guard` exists to catch too late. `Err`
+            // propagates so `scan_or_warn` can turn it into
+            // `ScanOutcome::Unscannable` instead.
+            Err(CmdError::Other(e)) => return Err(e.context("winget list could not be run")),
         };
         // winget signals failure through its exit code -- the opposite of
         // scoop, which was measured to exit 0 for a hash mismatch, a dead
@@ -851,13 +891,18 @@ impl<C: WingetCmd> Winget<C> {
     /// winget, the same way per-bucket fetching only ever makes sense for
     /// scoop.
     pub fn update_source(&self) -> Result<()> {
-        let out = self.cmd.run(&[
+        let out = match self.cmd.run(&[
             "source",
             "update",
             "--name",
             "winget",
             "--disable-interactivity",
-        ])?;
+        ]) {
+            Ok(out) => out,
+            // Only the new type changes here: any `WingetCmd::run` failure
+            // already turned into an `Err` for this caller, same as before.
+            Err(e) => bail!("winget source update could not be run: {e}"),
+        };
         anyhow::ensure!(
             out.code == 0,
             "winget source update exited {}: {}",

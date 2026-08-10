@@ -43,6 +43,7 @@ fn a_declared_locked_package_that_is_absent_is_an_install() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -64,6 +65,7 @@ fn a_package_already_at_the_locked_version_produces_no_action() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -77,6 +79,7 @@ fn a_newer_installed_version_is_a_downgrade_because_the_lock_is_authoritative() 
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -101,6 +104,7 @@ fn an_older_installed_version_is_an_upgrade() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -125,6 +129,7 @@ fn a_declared_package_with_no_lock_entry_is_reported_not_resolved() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -145,6 +150,7 @@ fn a_running_package_is_skipped_rather_than_changed() {
         &[],
         &State::default(),
         &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -174,6 +180,7 @@ fn a_running_package_already_at_the_locked_version_produces_no_line_at_all() {
         &[],
         &State::default(),
         &Running::new(BTreeSet::from(["fzf".to_string()]), Default::default()),
+        &[],
     );
     assert!(
         p.actions.is_empty(),
@@ -202,6 +209,7 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
         &[],
         &State::default(),
         &Running::new(BTreeSet::from(["nvim".to_string()]), Default::default()),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -235,6 +243,7 @@ fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped()
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -269,6 +278,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -303,6 +313,7 @@ fn a_declared_locked_winget_package_with_nothing_installed_is_reported_as_a_woul
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -333,6 +344,7 @@ fn a_winget_package_that_differs_from_the_lock_is_reported_with_its_diff() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -363,6 +375,7 @@ fn a_reported_only_package_is_not_counted_as_a_change() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.change_count(), 0, "nothing in this plan will be done");
     assert_eq!(p.skip_count(), 1);
@@ -383,6 +396,7 @@ fn a_winget_package_already_at_the_locked_version_produces_no_action_either() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -405,6 +419,7 @@ fn a_running_winget_package_that_differs_from_the_lock_is_skipped_as_running_not
             BTreeSet::from(["brave.brave".to_string()]),
             Default::default(),
         ),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -428,6 +443,7 @@ fn an_owned_undeclared_winget_package_is_reported_not_pruned() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
     assert!(
         !p.actions.iter().any(|a| matches!(a, Action::Prune { .. })),
@@ -455,6 +471,7 @@ fn an_undeclared_owned_package_is_a_prune() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -479,6 +496,7 @@ fn an_undeclared_unowned_package_is_reported_but_never_pruned() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -507,6 +525,7 @@ fn scoop_helpers_are_never_reported_as_strays() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -523,6 +542,7 @@ fn a_helper_that_the_user_declared_is_managed_normally() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -566,6 +586,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
 
     let kinds: Vec<&str> = p
@@ -598,6 +619,7 @@ fn counts_separate_changes_from_skips_and_reports() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     // fzf install = 1 change; bat unlocked = 1 skip; antigravity = report only.
     assert_eq!(p.change_count(), 1);
@@ -666,6 +688,7 @@ fn a_case_difference_between_pkg_toml_and_disk_is_not_two_packages() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
     assert!(
         p.actions.is_empty(),
@@ -702,6 +725,7 @@ fn a_running_package_is_never_pruned() {
         &[],
         &state,
         &Running::new(BTreeSet::from(["kanata".to_string()]), Default::default()),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -734,6 +758,7 @@ fn a_running_package_is_not_pruned_when_only_its_manifest_names_the_process() {
             BTreeSet::from(["kanata_windows_tty_winiov2_arm64".to_string()]),
             Default::default(),
         ),
+        &[],
     );
     assert!(
         matches!(
@@ -761,6 +786,7 @@ fn an_idle_owned_undeclared_package_is_still_pruned() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -790,6 +816,7 @@ fn a_package_installed_for_the_wrong_architecture_is_reported() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert!(
         p.actions.contains(&Action::ArchDrift {
@@ -816,6 +843,7 @@ fn architecture_comparison_ignores_case() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
 }
@@ -832,6 +860,7 @@ fn drift_is_reported_even_without_a_lock_entry() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.drift_count(), 1, "got {:?}", p.actions);
 }
@@ -847,6 +876,7 @@ fn an_unknown_installed_architecture_is_not_drift() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
 }
@@ -863,6 +893,7 @@ fn keep_means_never_report_whatever_is_installed() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
 }
@@ -876,6 +907,7 @@ fn an_undeclared_architecture_is_no_opinion_and_no_report() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.drift_count(), 0, "got {:?}", p.actions);
 }
@@ -889,6 +921,7 @@ fn drift_is_a_report_not_a_change() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.change_count(), 0, "drift must not count as a change");
 }
@@ -905,6 +938,7 @@ fn a_package_can_be_both_an_upgrade_and_a_drift() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(p.change_count(), 1);
     assert_eq!(p.drift_count(), 1);
@@ -929,6 +963,7 @@ fn an_owned_undeclared_helper_is_pruned_rather_than_silently_kept_forever() {
         &[],
         &state,
         &Running::default(),
+        &[],
     );
 
     assert!(
@@ -989,6 +1024,7 @@ fn the_architecture_an_install_will_use_is_decided_in_the_plan_not_in_the_execut
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
 
     // `Option<Option<String>>`, deliberately not flattened: `None` means "no
@@ -1037,6 +1073,7 @@ fn a_declared_package_the_scan_could_not_read_is_skipped_rather_than_installed()
         &[Name::new("fzf")], // ...because fzf was opaque
         &State::default(),
         &Running::default(),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -1062,6 +1099,7 @@ fn an_undeclared_package_the_scan_could_not_read_is_not_a_stray_and_not_a_prune(
         &[Name::new("aichat")],
         &state,
         &Running::default(),
+        &[],
     );
     assert!(p.actions.is_empty(), "got {:?}", p.actions);
 }
@@ -1100,6 +1138,7 @@ fn a_backend_returning_two_installed_entries_for_one_name_panics_loudly_in_a_deb
         &[],
         &state,
         &Running::default(),
+        &[],
     );
 }
 
@@ -1135,6 +1174,7 @@ fn a_running_owned_undeclared_scoop_package_still_prints_before_the_winget_view(
         &[],
         &state,
         &Running::new(BTreeSet::from(["kanata".to_string()]), Default::default()),
+        &[],
     );
     assert_eq!(
         p.actions,
@@ -1179,12 +1219,74 @@ fn a_prerelease_suffix_does_not_reduce_to_the_release_version() {
         &[],
         &State::default(),
         &Running::default(),
+        &[],
     );
 
     assert!(
         matches!(p.actions.first(), Some(Action::Downgrade { .. })),
         "1.0.0-rc1 -> 1.0.0 is [1,0,0,1] -> [1,0,0], which this function calls a \
          downgrade; the comment claiming they compare equal was wrong: {:?}",
+        p.actions
+    );
+}
+
+#[test]
+fn a_declared_locked_winget_package_is_not_installed_again_when_the_scan_failed() {
+    // The over-acting direction `scan_or_warn`'s doc comment never covered.
+    // An empty scan turns every declared+locked winget package into
+    // Divergence::Install -- a divergence that does not exist. Harmless as a
+    // report line; with Capability::Acts it is dotpkg installing a package
+    // that is already there.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[], // the failed scan: nothing installed, nothing opaque
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[WINGET],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::Unscannable,
+        }],
+        "got {:?}",
+        p.actions
+    );
+    assert_eq!(
+        p.change_count(),
+        0,
+        "an unscannable backend performs nothing"
+    );
+}
+
+#[test]
+fn an_unscannable_backend_does_not_silence_the_other_one() {
+    // The control. A winget scan failure must not stop scoop's entirely
+    // unrelated half of the run -- the same reasoning `scan_or_warn` was
+    // added for in Phase 4.
+    let p = plan(
+        &config::parse("[scoop]\npackages = [\"fzf\"]\n[winget]\npackages = [\"Brave.Brave\"]\n")
+            .unwrap(),
+        &lock::parse("[scoop.fzf]\nbucket = \"main\"\ncommit = \"abc\"\nversion = \"0.74.1\"\n")
+            .unwrap(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[WINGET],
+    );
+    assert!(
+        p.actions
+            .iter()
+            .any(|a| matches!(a, Action::Install { backend, .. } if backend == SCOOP)),
+        "scoop must still be planned: {:?}",
         p.actions
     );
 }

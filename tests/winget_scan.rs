@@ -377,6 +377,35 @@ fn a_nonzero_exit_from_list_is_an_error_not_an_empty_machine() {
 }
 
 #[test]
+fn a_winget_that_fails_for_a_reason_other_than_absence_is_not_an_empty_machine() {
+    // `Scoop::scan` distinguishes NotFound from every other io error kind.
+    // `Winget::scan` could not, because the trait returned anyhow::Result and
+    // the kind was gone before `scan` saw it -- so a broken or
+    // permission-denied winget.exe read as "this machine has no winget",
+    // which is the one answer `mass_prune_guard` exists to catch too late.
+    use dotpkg::backend::{scan_or_warn, ScanOutcome};
+    let broken = FakeWinget::failing_with(dotpkg::backend::winget::CmdError::Other(
+        anyhow::anyhow!("Access is denied. (os error 5)"),
+    ));
+    match scan_or_warn(&Winget::new(broken)) {
+        ScanOutcome::Unscannable(why) => assert!(
+            why.contains("Access is denied"),
+            "the cause must survive: {why}"
+        ),
+        ScanOutcome::Scanned(s) => panic!("a broken winget must not scan as empty: {s:?}"),
+    }
+
+    // The positive control: a genuinely ABSENT winget is still a valid,
+    // empty machine -- not every Windows install has winget.exe.
+    match scan_or_warn(&Winget::new(FakeWinget::failing_with(
+        dotpkg::backend::winget::CmdError::NotFound,
+    ))) {
+        ScanOutcome::Scanned(s) => assert!(s.installed.is_empty() && s.warnings.len() == 1),
+        ScanOutcome::Unscannable(why) => panic!("an absent winget is a valid empty machine: {why}"),
+    }
+}
+
+#[test]
 fn the_backend_reports_the_name_the_lock_and_state_are_keyed_by() {
     assert_eq!(
         Backend::name(&Winget::new(FakeWinget::returning(0, String::new()))),

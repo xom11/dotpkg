@@ -34,6 +34,10 @@ pub enum SkipReason {
     /// what turned two working, pinned-at-version packages into an
     /// uninstall-then-reinstall under `--yes` on a14.
     Opaque,
+    /// This backend's scan could not be completed at all, so the absence of a
+    /// name from `installed` is not evidence of anything. Distinct from
+    /// `Opaque`, which is per-package: this is the whole backend.
+    Unscannable,
 }
 
 /// What a `Capability::ReportsOnly` package's declared/installed state would
@@ -276,6 +280,7 @@ fn plan_backend(
     view: &BackendView,
     installed: &[Installed],
     opaque: &[Name],
+    unscannable: &[&'static str],
     state: &State,
     running: &Running,
     actions: &mut Vec<Action>,
@@ -303,6 +308,26 @@ fn plan_backend(
         "a backend returned two Installed entries for one name; \
          Scan must collapse them or mark them opaque"
     );
+
+    // A whole-backend scan failure, not a per-package one: `installed` is
+    // empty for this backend by construction (nothing was read), so reading
+    // that as "nothing is installed" would turn every declared, locked
+    // package -- including ones already sitting on the machine, converged --
+    // into a fabricated `Install`. Reported instead, once per package, via
+    // `SkipReason::Unscannable`.
+    if unscannable.contains(&view.backend) {
+        for name in view.declared {
+            actions.push(Action::Skip {
+                backend: view.backend.into(),
+                name: name.clone(),
+                reason: SkipReason::Unscannable,
+            });
+        }
+        // The undeclared loop is skipped too: `installed` is empty for this
+        // backend by construction, so it would emit nothing -- but returning
+        // here says that on purpose rather than relying on it.
+        return;
+    }
 
     let declared_set: BTreeSet<&Name> = view.declared.iter().collect();
 
@@ -509,6 +534,10 @@ fn plan_backend(
 
 /// Pure. No I/O, no network, no subprocess — every input is passed in, which is
 /// what lets the whole decision layer be tested on any OS.
+///
+/// `unscannable` names every backend whose scan failed outright (see
+/// `backend::ScanOutcome::Unscannable`) -- distinct from `opaque`, which is
+/// per-package and applies within a backend that *did* scan successfully.
 pub fn plan(
     declared: &Config,
     lock: &Lock,
@@ -516,6 +545,7 @@ pub fn plan(
     opaque: &[Name],
     state: &State,
     running: &Running,
+    unscannable: &[&'static str],
 ) -> Plan {
     let mut actions = Vec::new();
     let mut prunes = Vec::new();
@@ -551,6 +581,7 @@ pub fn plan(
             view,
             installed,
             opaque,
+            unscannable,
             state,
             running,
             &mut actions,

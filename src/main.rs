@@ -3,10 +3,10 @@ use clap::{Parser, Subcommand};
 use dotpkg::backend::{
     scoop::Scoop,
     winget::{RealWinget, Winget},
-    Backend, Scan,
+    Backend, Scan, ScanOutcome,
 };
 use dotpkg::execute::Step;
-use dotpkg::model::{Installed, Name};
+use dotpkg::model::{Installed, Name, WINGET};
 use dotpkg::state::State;
 use std::io::Write;
 use std::path::PathBuf;
@@ -157,12 +157,15 @@ fn floor_exit_code(
 }
 
 /// Prints what each scan could not read, attributed to its own backend, then
-/// hands back what `plan()` needs from both: `installed` and `opaque`
+/// hands back what `plan()` needs from all three: `installed` and `opaque`
 /// concatenate -- `plan()` already filters `installed` by backend, and
 /// `Scan::opaque` is backend-agnostic by construction (see its own doc
-/// comment). `warnings` deliberately does NOT concatenate into one untagged
-/// list; each scan's warnings are printed here, separately, so a winget
-/// warning is never mislabelled "scoop:" or vice versa.
+/// comment) -- and `unscannable` names every backend whose scan failed
+/// outright rather than merely finding nothing (`ScanOutcome::Unscannable`).
+/// `warnings` deliberately does NOT concatenate into one untagged list; each
+/// scan's warnings (or its one `Unscannable` cause) are printed here,
+/// separately, so a winget warning is never mislabelled "scoop:" or vice
+/// versa.
 ///
 /// Called before the plan is built, for the same reason `status`'s scoop
 /// warning always was, and now doubled for a second backend:
@@ -172,19 +175,28 @@ fn floor_exit_code(
 /// happens again, once per backend.
 fn print_scan_warnings_and_merge(
     scoop_scan: &Scan,
-    winget_scan: &Scan,
-) -> (Vec<Installed>, Vec<Name>) {
+    winget_scan: &ScanOutcome,
+) -> (Vec<Installed>, Vec<Name>, Vec<&'static str>) {
     for w in &scoop_scan.warnings {
         eprintln!("warning: scoop: {w}");
     }
-    for w in &winget_scan.warnings {
-        eprintln!("warning: winget: {w}");
-    }
     let mut installed = scoop_scan.installed.clone();
-    installed.extend(winget_scan.installed.iter().cloned());
     let mut opaque = scoop_scan.opaque.clone();
-    opaque.extend(winget_scan.opaque.iter().cloned());
-    (installed, opaque)
+    let mut unscannable = Vec::new();
+    match winget_scan {
+        ScanOutcome::Scanned(scan) => {
+            for w in &scan.warnings {
+                eprintln!("warning: winget: {w}");
+            }
+            installed.extend(scan.installed.iter().cloned());
+            opaque.extend(scan.opaque.iter().cloned());
+        }
+        ScanOutcome::Unscannable(why) => {
+            eprintln!("warning: winget: {why}");
+            unscannable.push(WINGET);
+        }
+    }
+    (installed, opaque, unscannable)
 }
 
 fn main() -> Result<()> {
@@ -220,10 +232,18 @@ fn main() -> Result<()> {
             // Before the plan, not after: a package missing from the plan
             // because dotpkg could not read it is the one thing the plan
             // itself cannot say.
-            let (installed, opaque) = print_scan_warnings_and_merge(&scan, &winget_scan);
+            let (installed, opaque, unscannable) =
+                print_scan_warnings_and_merge(&scan, &winget_scan);
 
-            let plan =
-                dotpkg::plan::plan(&declared, &locked, &installed, &opaque, &state, &running);
+            let plan = dotpkg::plan::plan(
+                &declared,
+                &locked,
+                &installed,
+                &opaque,
+                &state,
+                &running,
+                &unscannable,
+            );
             print!("{}", dotpkg::render::render(&plan));
         }
         Command::Apply {
@@ -263,7 +283,8 @@ fn main() -> Result<()> {
             }
 
             let mut d = dotpkg::apply::load_everything(&config, &lock, &state_path)?;
-            let (installed, opaque) = print_scan_warnings_and_merge(&d.scan, &d.winget_scan);
+            let (installed, opaque, unscannable) =
+                print_scan_warnings_and_merge(&d.scan, &d.winget_scan);
 
             let plan = dotpkg::plan::plan(
                 &d.declared,
@@ -272,6 +293,7 @@ fn main() -> Result<()> {
                 &opaque,
                 &d.state,
                 &d.running,
+                &unscannable,
             );
             print!("{}", dotpkg::render::render(&plan));
             // Whether this plan carries any package dotpkg has scanned,
@@ -799,12 +821,12 @@ mod tests {
             opaque: vec![Name::new("zellij")],
             warnings: vec!["zellij: manifest.json is not usable".to_string()],
         };
-        let winget_scan = Scan {
+        let winget_scan = ScanOutcome::Scanned(Scan {
             installed: vec![installed(dotpkg::model::WINGET, "Git.Git")],
             opaque: vec![Name::new("7zip.7zip")],
             warnings: vec!["7zip.7zip: installed at 2 disagreeing versions".to_string()],
-        };
-        let (merged_installed, merged_opaque) =
+        });
+        let (merged_installed, merged_opaque, unscannable) =
             print_scan_warnings_and_merge(&scoop_scan, &winget_scan);
         assert_eq!(
             merged_installed,
@@ -819,15 +841,45 @@ mod tests {
             vec![Name::new("zellij"), Name::new("7zip.7zip")],
             "both backends' opaque names must be present, scoop first"
         );
+        assert!(
+            unscannable.is_empty(),
+            "a scan that succeeded must not be named unscannable: {unscannable:?}"
+        );
     }
 
     #[test]
     fn print_scan_warnings_and_merge_of_two_empty_scans_merges_to_nothing() {
         // The counterweight: without it, a version that always appended a
         // hardcoded entry would still pass the test above.
-        let (merged_installed, merged_opaque) =
-            print_scan_warnings_and_merge(&Scan::default(), &Scan::default());
+        let (merged_installed, merged_opaque, unscannable) =
+            print_scan_warnings_and_merge(&Scan::default(), &ScanOutcome::Scanned(Scan::default()));
         assert!(merged_installed.is_empty(), "got {merged_installed:?}");
         assert!(merged_opaque.is_empty(), "got {merged_opaque:?}");
+        assert!(unscannable.is_empty(), "got {unscannable:?}");
+    }
+
+    #[test]
+    fn print_scan_warnings_and_merge_names_winget_as_unscannable_and_leaves_scoop_alone() {
+        // The other outcome of Task 6's `ScanOutcome`: a genuine winget scan
+        // failure contributes nothing to `installed`/`opaque` (there is
+        // nothing to contribute -- the scan never got that far) and must be
+        // named in the `unscannable` list `plan()` needs, so it does not read
+        // that emptiness as "winget has nothing installed".
+        let scoop_scan = Scan {
+            installed: vec![installed(dotpkg::model::SCOOP, "fzf")],
+            opaque: vec![Name::new("zellij")],
+            warnings: Vec::new(),
+        };
+        let (merged_installed, merged_opaque, unscannable) = print_scan_warnings_and_merge(
+            &scoop_scan,
+            &ScanOutcome::Unscannable("Access is denied. (os error 5)".to_string()),
+        );
+        assert_eq!(
+            merged_installed,
+            vec![installed(dotpkg::model::SCOOP, "fzf")],
+            "scoop's own half of the run must be unaffected"
+        );
+        assert_eq!(merged_opaque, vec![Name::new("zellij")]);
+        assert_eq!(unscannable, vec![WINGET], "got {unscannable:?}");
     }
 }

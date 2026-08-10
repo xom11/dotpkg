@@ -9,7 +9,7 @@
 //! does for its own git helpers.
 #![allow(dead_code)]
 
-use dotpkg::backend::winget::{CmdOut, WingetCmd};
+use dotpkg::backend::winget::{CmdError, CmdOut, WingetCmd};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -23,9 +23,11 @@ enum Plan {
     /// an expectation mismatched with its fake, not a case to paper over with
     /// a default answer that would mean something else entirely.
     Script(Vec<(i32, String)>, usize),
-    /// `run` always errors, matching what happens when `winget.exe` is not on
-    /// `PATH` at all.
-    FailingToSpawn,
+    /// `run` errors exactly once with the held `CmdError`, then panics. A
+    /// second call is a test/fake mismatch, matching `Plan::Script`'s own
+    /// rule -- and unlike `Constant`, this cannot simply hand back a clone,
+    /// because `CmdError` holds an `anyhow::Error` and is not `Clone`.
+    Failing(Option<CmdError>),
     /// `run` panics. See `FakeWinget::unreachable`'s own doc comment.
     Unreachable,
 }
@@ -59,10 +61,24 @@ impl FakeWinget {
         })))
     }
 
-    /// `run` always returns `Err` -- winget.exe is not on `PATH`.
+    /// `run` returns `Err(CmdError::NotFound)` exactly once -- winget.exe is
+    /// not on `PATH`. Neither existing caller of this constructor
+    /// (`tests/winget_scan.rs`, `tests/winget_resolve.rs`) may change
+    /// meaning, so this keeps constructing `CmdError::NotFound` rather than
+    /// becoming a thin wrapper over `failing_with` with a different default.
     pub fn failing_to_spawn() -> FakeWinget {
         FakeWinget(Rc::new(RefCell::new(Inner {
-            plan: Plan::FailingToSpawn,
+            plan: Plan::Failing(Some(CmdError::NotFound)),
+            calls: Vec::new(),
+        })))
+    }
+
+    /// `run` returns `Err(e)` exactly once, then panics on any further call
+    /// -- see `Plan::Failing`'s own doc comment for why "exactly once" rather
+    /// than repeatable.
+    pub fn failing_with(e: CmdError) -> FakeWinget {
+        FakeWinget(Rc::new(RefCell::new(Inner {
+            plan: Plan::Failing(Some(e)),
             calls: Vec::new(),
         })))
     }
@@ -86,7 +102,7 @@ impl FakeWinget {
 }
 
 impl WingetCmd for FakeWinget {
-    fn run(&self, args: &[&str]) -> anyhow::Result<CmdOut> {
+    fn run(&self, args: &[&str]) -> Result<CmdOut, CmdError> {
         let mut inner = self.0.borrow_mut();
         inner
             .calls
@@ -112,7 +128,15 @@ impl WingetCmd for FakeWinget {
                 *idx += 1;
                 Ok(out)
             }
-            Plan::FailingToSpawn => Err(anyhow::anyhow!("winget.exe not found on PATH (fake)")),
+            Plan::Failing(err) => Err(err.take().unwrap_or_else(|| {
+                panic!(
+                    "FakeWinget::failing_to_spawn/failing_with was called with {args:?} after \
+                     its one error was already consumed -- this fake answers with its error \
+                     exactly once, matching Plan::Script's own rule that a fake asked past its \
+                     script is a test/fake mismatch, not a case to paper over with a default \
+                     answer"
+                )
+            })),
             Plan::Unreachable => panic!(
                 "FakeWinget::unreachable was called with {args:?} -- this test declared \
                  no winget packages and must never touch winget at all"

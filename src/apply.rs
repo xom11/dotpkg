@@ -237,6 +237,16 @@ pub fn classify(action: &Action) -> Intent {
             SkipReason::Opaque => Intent::Skip(
                 "installed, but its state could not be read -- see the warnings above".to_string(),
             ),
+            // The whole-backend sibling of `Opaque`: nothing about this
+            // package specifically failed to read, its entire backend's scan
+            // did, so `installed`'s emptiness for it proves nothing either
+            // way. Installing over an unknown state is exactly the mistake
+            // this variant exists to prevent, same as `Opaque`.
+            SkipReason::Unscannable => Intent::Skip(
+                "this backend could not be scanned -- see the warnings above; nothing was \
+                 attempted for it"
+                    .to_string(),
+            ),
         },
         Action::Unmanaged { .. } | Action::ArchDrift { .. } => Intent::Report,
     }
@@ -412,6 +422,12 @@ fn is_outstanding(reason: &SkipReason) -> bool {
         // permanent: it depends on the machine, not on what phase dotpkg is.
         SkipReason::Running | SkipReason::Opaque | SkipReason::ReportedOnly(_) => true,
         SkipReason::NotLocked => false,
+        // A scan failure is a fact about this run, not a permanent property
+        // of the machine: the next run's `winget.exe` might not be
+        // permission-denied, or might be back on `PATH`. Floors the exit
+        // code and appears in the closing table exactly like `Running` and
+        // `Opaque` -- outstanding work the user asked for and did not get.
+        SkipReason::Unscannable => true,
     }
 }
 
@@ -661,16 +677,19 @@ pub struct Driver {
     pub state: State,
     pub scoop: Scoop,
     pub scan: crate::backend::Scan,
-    /// Winget's half of the same fact `scan` holds for scoop. Kept as its
-    /// own field rather than merged into `scan`: `main.rs` prints each
-    /// scan's `warnings` attributed to its own backend ("warning: scoop: …"
-    /// / "warning: winget: …"), and a plain `Vec<String>` cannot be told
-    /// apart by backend once merged -- merging first would silently mislabel
-    /// every winget warning as scoop's. `main.rs` concatenates `installed`
-    /// and `opaque` from both fields itself, right before calling `plan()`,
+    /// Winget's half of the same fact `scan` holds for scoop -- a
+    /// `ScanOutcome` rather than a bare `Scan` since Task 6, so a genuine
+    /// scan failure (`ScanOutcome::Unscannable`) cannot be confused with a
+    /// scan that succeeded and simply found nothing. Kept as its own field
+    /// rather than merged into `scan`: `main.rs` prints each scan's
+    /// `warnings` attributed to its own backend ("warning: scoop: …" /
+    /// "warning: winget: …"), and a plain `Vec<String>` cannot be told apart
+    /// by backend once merged -- merging first would silently mislabel every
+    /// winget warning as scoop's. `main.rs` concatenates `installed` and
+    /// `opaque` from both fields itself, right before calling `plan()`,
     /// which is backend-agnostic for exactly those two (see `Scan`'s own doc
     /// comment).
-    pub winget_scan: crate::backend::Scan,
+    pub winget_scan: crate::backend::ScanOutcome,
     pub running: crate::model::Running,
 }
 

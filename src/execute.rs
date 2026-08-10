@@ -596,7 +596,15 @@ pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
 /// typo'd `$SCOOP` **verifies every uninstall as successful**. Installs are
 /// safe in the same state (they come back `NotInstalled`, an error); it is
 /// only the destructive direction that silently passes, and it is exactly the
-/// direction where scoop also exits 0. One check, once, before any of it.
+/// direction where scoop also exits 0.
+///
+/// `execute` calls this whenever its step list contains at least one
+/// `Step::Scoop`, not unconditionally -- see Task 7. A winget-only run is
+/// exempt: a winget removal is verified by re-asking winget, which never
+/// reads this root at all, so a wrong or missing `$SCOOP` cannot make a
+/// winget uninstall lie the way it can a scoop one. Refusing that run anyway
+/// would refuse a machine that has winget and no scoop for a hazard it was
+/// never exposed to.
 pub fn root_looks_like_scoop(root: &Path) -> Result<(), String> {
     if root.join("apps").is_dir() {
         return Ok(());
@@ -612,12 +620,14 @@ pub fn root_looks_like_scoop(root: &Path) -> Result<(), String> {
 /// Run every step, in order, verifying each. One package's failure never
 /// stops another's.
 ///
-/// Refuses via `root_looks_like_scoop` at the very top, before anything else
-/// -- including before the recovery file is written. This used to be a
-/// precondition documented as the caller's job ("`main.rs` does"); it wasn't
-/// actually being called anywhere, which left the exact hazard it exists for
-/// -- every uninstall verifying as successful against a wrong or typo'd
-/// `$SCOOP` -- wide open. Defence belongs at the point of use.
+/// Refuses via `root_looks_like_scoop` as soon as `steps` is ordered, before
+/// anything else -- including before the recovery file is written -- but
+/// only when `steps` contains at least one `Step::Scoop`; see that
+/// function's own doc comment for why a winget-only run is exempt. This used
+/// to be a precondition documented as the caller's job ("`main.rs` does");
+/// it wasn't actually being called anywhere, which left the exact hazard it
+/// exists for -- every uninstall verifying as successful against a wrong or
+/// typo'd `$SCOOP` -- wide open. Defence belongs at the point of use.
 ///
 /// `running` is a sampler, not a snapshot: it is called again immediately
 /// before each step's mutation, not once at the top. A single `&Running`
@@ -637,9 +647,18 @@ pub fn execute(
     running: &dyn Fn() -> Running,
     opts: &ExecOptions,
 ) -> Result<Execution, String> {
-    root_looks_like_scoop(root)?;
-
     let steps = order(steps);
+
+    // Conditional, not unconditional. The hazard this guards is scoop's
+    // alone: `verify::verdict` maps "no apps/ directory" to absent and
+    // `Expected::Absent` maps absent to `Ok(())`, so a wrong or typo'd
+    // `$SCOOP` verifies every scoop uninstall as successful. A winget removal
+    // is verified by re-asking winget, which never reads this root at all --
+    // see `root_looks_like_scoop`'s own doc comment.
+    if steps.iter().any(|s| matches!(s, Step::Scoop(_))) {
+        root_looks_like_scoop(root)?;
+    }
+
     let mut ex = Execution::default();
 
     if let Some(p) = &opts.recovery_path {

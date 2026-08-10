@@ -1619,3 +1619,76 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
     assert_eq!(ex.held(), 1, "got {:?}", ex.results);
     assert!(matches!(&ex.results[0].1, ItemResult::Held(_)));
 }
+
+// -- Task 7: root_looks_like_scoop only when a scoop step exists ----------
+
+#[test]
+fn a_winget_only_run_does_not_need_a_scoop_root() {
+    // The check exists because a wrong or typo'd $SCOOP makes every scoop
+    // uninstall verify as successful against an empty tree. That hazard is
+    // entirely scoop's; refusing a winget-only run for it refuses a run that
+    // was never in danger.
+    let t = Tree::new(); // no apps/ directory at all
+    let fake = Fake::honest(&t);
+    // `unreachable()`, not `returning(...)`: `run_step`'s winget arm is still
+    // the Task-4 stub (`let _ = wm;`), so a correct fix touches `wm` exactly
+    // as often as an incorrect one that forgot the conditional -- zero times
+    // either way, since the stub never reaches it. `returning(...)` would
+    // pass the same way and say nothing; `unreachable()` at least stands as a
+    // canary that starts failing loudly the day this step's stub is replaced
+    // with a real call this test did not intend to exercise.
+    let wm = FakeWingetMutator::unreachable();
+    let mut state = State::default();
+    let steps = vec![Step::Winget(WingetStep::Remove {
+        id: Name::new("Vivaldi.Vivaldi"),
+        version: "8.1.4087.62".to_string(),
+        guard: vec!["vivaldi".to_string()],
+    })];
+
+    let r = execute(
+        t.root(),
+        steps,
+        &fake,
+        &wm,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions::default(),
+    );
+
+    assert!(r.is_ok(), "a winget-only run was refused: {r:?}");
+}
+
+#[test]
+fn a_run_with_even_one_scoop_step_still_needs_a_scoop_root() {
+    // The control that must stay red-able. Dropping the condition entirely
+    // would satisfy the test above and reopen the exact hazard it exists for.
+    let t = Tree::new(); // no apps/ directory at all
+    let fake = Fake::honest(&t);
+    let wm = FakeWingetMutator::returning(0, String::new());
+    let mut state = State::default();
+    let steps = vec![
+        Step::Winget(WingetStep::Remove {
+            id: Name::new("Vivaldi.Vivaldi"),
+            version: "8.1.4087.62".to_string(),
+            guard: vec![],
+        }),
+        Step::Scoop(ScoopStep::Remove {
+            app: Name::new("fzf"),
+        }),
+    ];
+
+    let r = execute(
+        t.root(),
+        steps,
+        &fake,
+        &wm,
+        &mut state,
+        &|| Running::default(),
+        &ExecOptions::default(),
+    );
+
+    assert!(
+        r.is_err(),
+        "a scoop step against a non-scoop root must refuse: {r:?}"
+    );
+}

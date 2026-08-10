@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn is_outstanding_floors_running_opaque_and_reported_only_but_not_not_locked() {
+    fn is_outstanding_floors_running_opaque_reported_only_and_unscannable_but_not_not_locked() {
         // `is_outstanding` is private, so this calls it directly rather than
         // routing through `prepare()` -- deliberately, for `NotLocked`: that
         // is the one `SkipReason` left in the `false` arm, and it can no
@@ -1530,7 +1530,7 @@ mod tests {
         // `prepare()`'s real pipeline; nothing has taken its place, so this
         // is now the only way to pin the `false` arm at all. The `true` arm
         // is still also proven end-to-end, below, by
-        // `outstanding_skips_finds_running_opaque_and_reported_only_skips_together`.
+        // `outstanding_skips_finds_running_opaque_reported_only_and_unscannable_skips_together`.
         assert!(is_outstanding(&SkipReason::Running));
         assert!(is_outstanding(&SkipReason::Opaque));
         assert!(is_outstanding(&SkipReason::ReportedOnly(
@@ -1539,6 +1539,13 @@ mod tests {
                 to: "2".into(),
             }
         )));
+        // Task 6's addition: a scan failure floors the same way, and for the
+        // same reason -- outstanding work the user asked for and did not
+        // get, that could differ on the next run. Nothing in this suite
+        // would notice `SkipReason::Unscannable => true` flipping to `false`
+        // without this line: the two planner tests Task 6 added only inspect
+        // `Plan`, never `prepare`/`outstanding_skips`.
+        assert!(is_outstanding(&SkipReason::Unscannable));
         assert!(
             !is_outstanding(&SkipReason::NotLocked),
             "permanent and structural for THIS run: apply cannot resolve a \
@@ -1548,12 +1555,16 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_skips_finds_running_opaque_and_reported_only_skips_together() {
-        // The end-to-end proof that all three outstanding `SkipReason`s
+    fn outstanding_skips_finds_running_opaque_reported_only_and_unscannable_skips_together() {
+        // The end-to-end proof that all four outstanding `SkipReason`s
         // really do carry through the whole pipeline -- `prepare()` ->
         // `classify()` -> `Outcome::Skipped` -> `outstanding_skips()` -- not
         // just that `is_outstanding` says so in isolation (see the direct
-        // unit test above).
+        // unit test above). `Unscannable` (Task 6) is the fourth: this test
+        // used to prove only three, and its own comment said so, until the
+        // discrepancy became stale prose the moment a fourth `SkipReason`
+        // started floating -- exactly the failure class this project exists
+        // to catch.
         let root = tempfile::tempdir().unwrap();
         let stage_dir = tempfile::tempdir().unwrap();
         let scoop = Scoop::new(root.path().to_path_buf());
@@ -1579,14 +1590,19 @@ mod tests {
                         to: "151.1.93.134".into(),
                     }),
                 },
+                Action::Skip {
+                    backend: WINGET.into(),
+                    name: Name::new("Discord.Discord"),
+                    reason: SkipReason::Unscannable,
+                },
             ],
         };
 
         let prep = prepare(&plan, &lock, &scoop, &scoop, stage_dir.path(), &declared);
         assert_eq!(
             prep.skipped_count(),
-            3,
-            "the positive control: all three really are Skipped outcomes"
+            4,
+            "the positive control: all four really are Skipped outcomes"
         );
 
         let outstanding = prep.outstanding_skips();
@@ -1605,8 +1621,14 @@ mod tests {
                      or remove winget packages yet"
                         .to_string()
                 ),
+                (
+                    Name::new("Discord.Discord"),
+                    "this backend could not be scanned -- see the warnings above; nothing \
+                     was attempted for it"
+                        .to_string()
+                ),
             ],
-            "all three must float -- none of them is permanent and structural"
+            "all four must float -- none of them is permanent and structural"
         );
     }
 

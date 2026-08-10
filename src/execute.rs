@@ -5,6 +5,7 @@
 //! directory tree, because a fake that both performs and reports the mutation
 //! proves only that it is self-consistent.
 
+use crate::backend::winget_exec::WingetMutator;
 use crate::config::BucketDecl;
 use crate::model::{Name, Running, SCOOP};
 use crate::state::{Ownership, State};
@@ -54,9 +55,29 @@ pub trait Mutator {
     fn bucket_add(&self, bucket: &BucketDecl) -> Result<CommandReport>;
 }
 
-/// One mutation, already resolved against the plan and the preparation.
+/// One mutation, already resolved against the plan and the preparation --
+/// split by backend so a winget action cannot reach scoop's executor (or the
+/// reverse) by construction.
+///
+/// Before this split, `Step` named only `app`, `staged` and `arch`, and
+/// `plan_to_steps` matched `Action::Install { name, arch, .. }` while
+/// ignoring `backend` entirely. The only thing that kept a winget action out
+/// of scoop's executor was `stage_and_fetch`'s `backend != SCOOP` check at
+/// the *staging* layer -- the wrong layer for the guard, since it says
+/// nothing about `execute` itself. Splitting the type makes the mistake
+/// unwritable, the same move this crate already makes with `Resolution`
+/// carrying a `Pin` and with `is_outstanding`'s wildcard-free match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
+    Scoop(ScoopStep),
+    Winget(WingetStep),
+}
+
+/// Every scoop mutation `execute` can be asked to perform. Named `ScoopStep`
+/// rather than `Step` now that a winget sibling exists; its three variants
+/// and their fields are otherwise unchanged from before the split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScoopStep {
     /// Nothing is installed: no window opens at all.
     Install {
         app: Name,
@@ -74,11 +95,71 @@ pub enum Step {
     },
 }
 
+impl ScoopStep {
+    pub fn app(&self) -> &Name {
+        match self {
+            ScoopStep::Install { app, .. }
+            | ScoopStep::Replace { app, .. }
+            | ScoopStep::Remove { app } => app,
+        }
+    }
+}
+
+/// Every winget mutation `execute` can be asked to perform.
+///
+/// **No `Replace`, and that is the point.** `ScoopStep::Replace` exists
+/// because scoop *cannot* change a version any other way -- `install` over
+/// an installed app is a measured no-op -- so it needs an uninstall half and
+/// therefore a window where the package is absent. Measured, winget's
+/// `install --version <pin>` performs the upgrade directly (0.24.1 ->
+/// 0.26.1, exit 0), so a winget version change opens **no such window**, and
+/// `run_step`'s `touched` bookkeeping has no uninstall half to reason about.
+/// One call, either direction, covers both a fresh install and a version
+/// change -- hence `Set`, not `Install`/`Replace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WingetStep {
+    /// Install OR version-change: one `install --version` call either way.
+    Set {
+        id: Name,
+        version: String,
+        guard: Vec<String>,
+    },
+    Remove {
+        id: Name,
+        version: String,
+        guard: Vec<String>,
+    },
+}
+
+/// The id out of a `WingetStep`, regardless of which variant.
+fn w_app(w: &WingetStep) -> &Name {
+    match w {
+        WingetStep::Set { id, .. } | WingetStep::Remove { id, .. } => id,
+    }
+}
+
 impl Step {
     pub fn app(&self) -> &Name {
         match self {
-            Step::Install { app, .. } | Step::Replace { app, .. } | Step::Remove { app } => app,
+            Step::Scoop(s) => s.app(),
+            Step::Winget(w) => w_app(w),
         }
+    }
+    /// Names a live process might report for this step's package, for
+    /// `execute`'s per-step re-sampler. Empty for scoop, whose packages are
+    /// already reachable through `Running`'s `dirs` half and whose `bins` the
+    /// planner consulted at plan time.
+    pub fn guard_names(&self) -> &[String] {
+        match self {
+            Step::Scoop(_) => &[],
+            Step::Winget(WingetStep::Set { guard, .. } | WingetStep::Remove { guard, .. }) => guard,
+        }
+    }
+    pub fn is_remove(&self) -> bool {
+        matches!(
+            self,
+            Step::Scoop(ScoopStep::Remove { .. }) | Step::Winget(WingetStep::Remove { .. })
+        )
     }
 }
 
@@ -92,14 +173,28 @@ pub const DEFER_LAST: &[&str] = &["git", "7zip", "dark", "innounp", "lessmsi"];
 
 /// Installs, then replacements, then removals; `DEFER_LAST` at the end of each
 /// group; alphabetical within that, so a run is reproducible.
+///
+/// `WingetStep::Set` groups with installs, not replacements: it is one call
+/// and opens no absent-window, so it carries none of the reason `Replace`
+/// sorts after `Install`.
 pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
     steps.sort_by_key(|s| {
         let group = match s {
-            Step::Install { .. } => 0u8,
-            Step::Replace { .. } => 1,
-            Step::Remove { .. } => 2,
+            Step::Scoop(ScoopStep::Install { .. }) | Step::Winget(WingetStep::Set { .. }) => 0u8,
+            Step::Scoop(ScoopStep::Replace { .. }) => 1,
+            Step::Scoop(ScoopStep::Remove { .. }) | Step::Winget(WingetStep::Remove { .. }) => 2,
         };
-        let deferred = u8::from(DEFER_LAST.contains(&s.app().key()));
+        // DEFER_LAST is scoop-only by construction: it holds back `git` and
+        // the extraction helpers because `Scoop::stage` shells out to git and
+        // scoop unpacks with 7zip/dark/innounp/lessmsi. Nothing in the
+        // winget path shells out to any of them -- winget downloads and
+        // extracts inside its own process -- so a winget id whose last
+        // segment happens to be "git" must not be deferred for a reason that
+        // does not apply to it.
+        let deferred = match s {
+            Step::Scoop(_) => u8::from(DEFER_LAST.contains(&s.app().key())),
+            Step::Winget(_) => 0,
+        };
         (group, deferred, s.app().key().to_string())
     });
     steps
@@ -109,15 +204,15 @@ pub fn order(mut steps: Vec<Step>) -> Vec<Step> {
 pub enum StepOutcome {
     Done,
     /// `touched` is true when the machine was already altered before this
-    /// failure happened. Two shapes set it: a `Step::Replace` whose
+    /// failure happened. Two shapes set it: a `ScoopStep::Replace` whose
     /// uninstall verified `Absent` before its install then failed, and any
     /// install (fresh, or the second half of a replace) whose `verdict`
     /// disagreement is evidence of residue -- `HalfInstalled`,
     /// `ContentDiffers`, or `Unreadable` (which means
     /// "unknown" and is treated as touched in the safe direction, so an
     /// operator looks). `NotInstalled` alone means the machine is genuinely
-    /// as it was. A `Step::Remove` sets it the mirror way: `StillPresent` is
-    /// untouched, `Unreadable` is touched. Either way, the package this
+    /// as it was. A `ScoopStep::Remove` sets it the mirror way: `StillPresent`
+    /// is untouched, `Unreadable` is touched. Either way, the package this
     /// describes is neither "done" nor "as it was", and
     /// `Execution::exit_code` must not fold that into "nothing changed".
     Failed {
@@ -126,22 +221,27 @@ pub enum StepOutcome {
     },
 }
 
-/// Perform one step and prove on disk that it happened.
+/// Perform one scoop step and prove on disk that it happened.
 ///
 /// State is written only after the disk agrees, and only when the answer
 /// changes: an upgrade of a package dotpkg already owns writes nothing,
 /// because ownership is intent and the uninstall half is an implementation
 /// detail. A crash mid-window leaves the package absent and still declared,
 /// and the next run's plan re-emits an `Install`.
-pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) -> StepOutcome {
+fn run_scoop_step(
+    root: &Path,
+    m: &dyn Mutator,
+    state: &mut State,
+    step: &ScoopStep,
+) -> StepOutcome {
     match step {
-        Step::Install { app, staged, arch } | Step::Replace { app, staged, arch } => {
+        ScoopStep::Install { app, staged, arch } | ScoopStep::Replace { app, staged, arch } => {
             // Starts false and only ever moves to true, never back: two
             // independent checks below can set it, and both mean the same
             // thing -- scoop wrote SOMETHING to disk before this step gave
             // up.
             let mut touched = false;
-            if matches!(step, Step::Replace { .. }) {
+            if matches!(step, ScoopStep::Replace { .. }) {
                 if let Err(e) = m.uninstall(app) {
                     return StepOutcome::Failed {
                         why: format!("{app}: could not run uninstall: {e:#}"),
@@ -152,7 +252,7 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
                 // `verdict`, not merely attempted: a failure at or before
                 // this point leaves the machine exactly as it was, and a
                 // failure after it leaves the package genuinely gone. Same
-                // assumption as `Step::Remove`'s `StillPresent` reasoning
+                // assumption as `ScoopStep::Remove`'s `StillPresent` reasoning
                 // below: a failed uninstall here is read as having removed
                 // nothing, which holds only if scoop's uninstall is
                 // all-or-nothing -- unmeasured, and wrong if it is partial.
@@ -224,7 +324,7 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
             }
             StepOutcome::Done
         }
-        Step::Remove { app } => {
+        ScoopStep::Remove { app } => {
             if let Err(e) = m.uninstall(app) {
                 return StepOutcome::Failed {
                     why: format!("{app}: could not run uninstall: {e:#}"),
@@ -254,6 +354,36 @@ pub fn run_step(root: &Path, m: &dyn Mutator, state: &mut State, step: &Step) ->
             }
             state.remove(SCOOP, app);
             StepOutcome::Done
+        }
+    }
+}
+
+/// Perform one step -- scoop or winget -- and prove it happened.
+///
+/// Dispatches on backend and nothing else: a winget `Step` cannot reach
+/// `run_scoop_step`, and a scoop `Step` cannot reach the winget arm, because
+/// the match is over `Step` itself, not over some flag carried alongside it.
+pub fn run_step(
+    root: &Path,
+    m: &dyn Mutator,
+    wm: &dyn WingetMutator,
+    state: &mut State,
+    step: &Step,
+) -> StepOutcome {
+    match step {
+        Step::Scoop(s) => run_scoop_step(root, m, state, s),
+        // A later task replaces this. A `todo!()` would panic in a release
+        // build on a real machine; a `Failed` outcome reports and continues,
+        // which is this module's own contract ("one package's failure never
+        // stops another's"). `wm` is unused until then -- see this crate's
+        // Phase 4b plan for why the parameter is finalised here rather than
+        // added alongside its first real caller.
+        Step::Winget(w) => {
+            let _ = wm;
+            StepOutcome::Failed {
+                why: format!("{}: the winget executor is not wired yet", w_app(w)),
+                touched: false,
+            }
         }
     }
 }
@@ -393,7 +523,8 @@ impl Execution {
 /// prints advice leaves nothing once the terminal is gone -- and the terminal
 /// is exactly what a broken `git` or a broken shell takes with it.
 ///
-/// Removals never appear: this file only ever puts software back.
+/// Removals never appear: this file only ever puts software back. Neither
+/// does a winget step yet -- see the `Step::Winget` arm below.
 pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
     use std::fmt::Write as _;
     let mut text = String::from(
@@ -403,10 +534,15 @@ pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
     );
     for s in steps {
         let (staged, arch) = match s {
-            Step::Install { staged, arch, .. } | Step::Replace { staged, arch, .. } => {
-                (staged, arch)
-            }
-            Step::Remove { .. } => continue,
+            Step::Scoop(ScoopStep::Install { staged, arch, .. })
+            | Step::Scoop(ScoopStep::Replace { staged, arch, .. }) => (staged, arch),
+            Step::Scoop(ScoopStep::Remove { .. }) => continue,
+            // A later task adds a winget recovery line once this crate has
+            // measured one to build and an argv builder to build it from.
+            // Skipped here exactly like `ScoopStep::Remove` above: this
+            // function's job is "put software back", and there is nothing
+            // yet to put a winget package back FROM.
+            Step::Winget(_) => continue,
         };
         // Built from `install_argv` -- the exact argv the executor itself
         // runs -- rather than typed out a second time here. A flag added to
@@ -489,6 +625,7 @@ pub fn execute(
     root: &Path,
     steps: Vec<Step>,
     m: &dyn Mutator,
+    wm: &dyn WingetMutator,
     state: &mut State,
     running: &dyn Fn() -> Running,
     opts: &ExecOptions,
@@ -519,7 +656,7 @@ pub fn execute(
             ));
             continue;
         }
-        let r = match run_step(root, m, state, step) {
+        let r = match run_step(root, m, wm, state, step) {
             StepOutcome::Done => ItemResult::Done,
             StepOutcome::Failed { why, touched } => ItemResult::Failed { why, touched },
         };

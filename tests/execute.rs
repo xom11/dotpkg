@@ -1,6 +1,9 @@
 //! The executor against real directory trees and a fake that lies exactly the
 //! way scoop was measured to lie.
 
+mod common;
+
+use common::fake_winget_mutator::FakeWingetMutator;
 use dotpkg::execute::*;
 use dotpkg::model::{Name, Running, SCOOP};
 use dotpkg::state::{Ownership, State};
@@ -134,16 +137,18 @@ fn an_install_scoop_silently_did_not_perform_is_reported_and_not_claimed() {
     t.empty_apps();
     let fake = Fake::silent_install(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Install {
+        &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: Some("arm64".into()),
-        },
+        }),
     );
 
     let StepOutcome::Failed { why, touched } = out else {
@@ -177,16 +182,18 @@ fn a_successful_install_is_claimed_exactly_once() {
     t.empty_apps();
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Install {
+        &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        },
+        }),
     );
 
     assert_eq!(out, StepOutcome::Done);
@@ -208,16 +215,18 @@ fn a_half_install_earns_no_retry() {
     t.half_install("fzf", "1.0.0");
     let fake = Fake::silent_install(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Install {
+        &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        },
+        }),
     );
 
     assert!(matches!(out, StepOutcome::Failed { .. }), "{out:?}");
@@ -231,17 +240,19 @@ fn a_replace_whose_uninstall_did_nothing_never_reaches_the_install() {
     t.install("fzf", r#"{"version":"0.74.1"}"#);
     let fake = Fake::silent_uninstall(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Replace {
+        &Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        },
+        }),
     );
 
     let StepOutcome::Failed { why, touched } = out else {
@@ -271,17 +282,19 @@ fn a_successful_replace_of_an_adopted_package_keeps_it_adopted() {
     t.install("fzf", r#"{"version":"0.74.1"}"#);
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Replace {
+        &Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        },
+        }),
     );
 
     assert_eq!(out, StepOutcome::Done);
@@ -297,16 +310,18 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
     let t = Tree::new();
     t.install("aichat", BODY_A);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("aichat"), Ownership::Adopted);
 
     let liar = Fake::silent_uninstall(&t);
     let out = run_step(
         t.root(),
         &liar,
+        &wm,
         &mut state,
-        &Step::Remove {
+        &Step::Scoop(ScoopStep::Remove {
             app: Name::new("aichat"),
-        },
+        }),
     );
     assert!(matches!(out, StepOutcome::Failed { .. }), "{out:?}");
     assert!(
@@ -319,10 +334,11 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
     let out = run_step(
         t.root(),
         &honest,
+        &wm,
         &mut state,
-        &Step::Remove {
+        &Step::Scoop(ScoopStep::Remove {
             app: Name::new("aichat"),
-        },
+        }),
     );
     assert_eq!(out, StepOutcome::Done);
     assert_eq!(state.owned_count(SCOOP), 0);
@@ -332,29 +348,29 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
 fn installs_precede_replacements_precede_removals_and_git_goes_last() {
     let s = |n: &str| PathBuf::from(format!("/stage/{n}.json"));
     let steps = vec![
-        Step::Replace {
+        Step::Scoop(ScoopStep::Replace {
             app: Name::new("git"),
             staged: s("git"),
             arch: None,
-        },
-        Step::Remove {
+        }),
+        Step::Scoop(ScoopStep::Remove {
             app: Name::new("aichat"),
-        },
-        Step::Replace {
+        }),
+        Step::Scoop(ScoopStep::Replace {
             app: Name::new("bat"),
             staged: s("bat"),
             arch: None,
-        },
-        Step::Install {
+        }),
+        Step::Scoop(ScoopStep::Install {
             app: Name::new("ripgrep"),
             staged: s("ripgrep"),
             arch: None,
-        },
-        Step::Replace {
+        }),
+        Step::Scoop(ScoopStep::Replace {
             app: Name::new("7zip"),
             staged: s("7zip"),
             arch: None,
-        },
+        }),
     ];
     let got: Vec<String> = order(steps)
         .iter()
@@ -421,22 +437,24 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
         calls: RefCell::new(Vec::new()),
     };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
         vec![
-            Step::Install {
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
                 staged: bad,
                 arch: None,
-            },
-            Step::Install {
+            }),
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("bat"),
                 staged: good,
                 arch: None,
-            },
+            }),
         ],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -505,22 +523,24 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
     }
     let fake = Picky { tree: &t };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
         vec![
-            Step::Install {
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("alpha-broken"),
                 staged: bad,
                 arch: None,
-            },
-            Step::Install {
+            }),
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("zulu-fine"),
                 staged: good,
                 arch: None,
-            },
+            }),
         ],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -555,6 +575,7 @@ fn a_package_that_started_running_between_the_plan_and_the_mutation_is_skipped()
     t.install("nvim-ish", BODY_A);
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("nvim-ish"), Ownership::Installed);
 
     let calls = Cell::new(0usize);
@@ -574,16 +595,17 @@ fn a_package_that_started_running_between_the_plan_and_the_mutation_is_skipped()
     let ex = execute(
         t.root(),
         vec![
-            Step::Install {
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("aichat"),
                 staged,
                 arch: None,
-            },
-            Step::Remove {
+            }),
+            Step::Scoop(ScoopStep::Remove {
                 app: Name::new("nvim-ish"),
-            },
+            }),
         ],
         &fake,
+        &wm,
         &mut state,
         &running,
         &ExecOptions::default(),
@@ -621,19 +643,19 @@ fn the_recovery_file_is_written_before_anything_is_mutated_and_names_every_artif
     write_recovery(
         &out,
         &[
-            Step::Replace {
+            Step::Scoop(ScoopStep::Replace {
                 app: Name::new("bat"),
                 staged: a.clone(),
                 arch: Some("arm64".into()),
-            },
-            Step::Install {
+            }),
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
                 staged: b.clone(),
                 arch: None,
-            },
-            Step::Remove {
+            }),
+            Step::Scoop(ScoopStep::Remove {
                 app: Name::new("aichat"),
-            },
+            }),
         ],
     )
     .unwrap();
@@ -797,16 +819,18 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
     t.install("fzf", r#"{"version":"0.74.1"}"#);
     let fake = Fake::silent_install(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let ex = execute(
         t.root(),
-        vec![Step::Replace {
+        vec![Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -900,15 +924,17 @@ fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
     t.empty_apps();
     let fake = HalfInstaller { tree: &t };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
-        vec![Step::Install {
+        vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -981,15 +1007,17 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
     t.empty_apps();
     let fake = WrongManifestInstaller { tree: &t };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
-        vec![Step::Install {
+        vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1016,7 +1044,7 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
 
 #[test]
 fn a_remove_whose_post_uninstall_verdict_is_unreadable_is_touched() {
-    // `Step::Remove`'s `touched` derivation
+    // `ScoopStep::Remove`'s `touched` derivation
     // (`matches!(d, Disagreement::Unreadable(_))`) had no control: reverting
     // it to `let touched = false;` left the whole suite green. `apps/` as a
     // regular file, not a directory, is the same portable idiom
@@ -1026,15 +1054,17 @@ fn a_remove_whose_post_uninstall_verdict_is_unreadable_is_touched() {
     std::fs::write(t.root().join("apps"), b"not a directory").unwrap();
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
     state.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Remove {
+        &Step::Scoop(ScoopStep::Remove {
             app: Name::new("fzf"),
-        },
+        }),
     );
 
     assert!(
@@ -1107,16 +1137,18 @@ fn a_retry_that_leaves_half_install_residue_is_touched() {
         calls: Cell::new(0),
     };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Install {
+        &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        },
+        }),
     );
 
     assert_eq!(
@@ -1184,16 +1216,18 @@ fn the_resolved_architecture_reaches_mutator_install() {
         seen: RefCell::new(Vec::new()),
     };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
         t.root(),
         &fake,
+        &wm,
         &mut state,
-        &Step::Install {
+        &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: Some("arm64".into()),
-        },
+        }),
     );
 
     assert_eq!(out, StepOutcome::Done, "{out:?}");
@@ -1288,15 +1322,17 @@ fn the_recovery_file_exists_on_disk_before_executes_first_mutation() {
         recovery_path: recovery_path.clone(),
     };
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
-        vec![Step::Install {
+        vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions {
@@ -1319,6 +1355,7 @@ fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutat
     let staged = t.stage("fzf", "1.0.0", BODY_A);
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     // `is_err` first, so the two counterweights below are reachable under the
     // mutation they exist for: with `.unwrap_err()` here, deleting the
@@ -1327,12 +1364,13 @@ fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutat
     // checked -- which is precisely what this test is for.
     let r = execute(
         t.root(),
-        vec![Step::Install {
+        vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1367,15 +1405,17 @@ fn a_recovery_file_that_cannot_be_written_is_recorded_but_does_not_stop_the_run(
 
     let fake = Fake::honest(&t);
     let mut state = State::default();
+    let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
         t.root(),
-        vec![Step::Install {
+        vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
-        }],
+        })],
         &fake,
+        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions {
@@ -1417,11 +1457,11 @@ fn a_percent_in_a_staged_path_is_escaped_and_the_path_stays_quoted() {
 
     write_recovery(
         &out,
-        &[Step::Install {
+        &[Step::Scoop(ScoopStep::Install {
             app: Name::new("weird"),
             staged: staged.clone(),
             arch: None,
-        }],
+        })],
     )
     .unwrap();
 
@@ -1436,4 +1476,27 @@ fn a_percent_in_a_staged_path_is_escaped_and_the_path_stays_quoted() {
         !text.contains(&format!("\"{}\"", staged.display())),
         "the raw % must not survive unescaped inside quotes: {text}"
     );
+}
+
+// -- Task 4: `Step` splits by backend -------------------------------------
+
+#[test]
+fn a_winget_step_and_a_scoop_step_are_different_types() {
+    use dotpkg::execute::{ScoopStep, Step, WingetStep};
+    let s = Step::Scoop(ScoopStep::Remove {
+        app: Name::new("fzf"),
+    });
+    let w = Step::Winget(WingetStep::Remove {
+        id: Name::new("Vivaldi.Vivaldi"),
+        version: "8.1.4087.62".to_string(),
+        guard: vec!["vivaldi".to_string()],
+    });
+    assert_eq!(s.app(), &Name::new("fzf"));
+    assert_eq!(w.app(), &Name::new("Vivaldi.Vivaldi"));
+    assert!(s.is_remove() && w.is_remove());
+    // The guard names travel with the step, because `execute`'s re-sampler
+    // has only a Step and `covers_name` (its two-signal form) is 0-of-36 for
+    // winget -- see Task 5.
+    assert_eq!(s.guard_names(), &[] as &[String]);
+    assert_eq!(w.guard_names(), &["vivaldi".to_string()]);
 }

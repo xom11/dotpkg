@@ -1161,8 +1161,8 @@ mod tests {
         // holds when `changed() == 0`.
         //
         // This is the case where it does not: one `Done` and one
-        // `Failed { touched: false }` (reachable -- `Step::Remove`'s
-        // uninstall-command-failed arm, `execute.rs:221`, never touches the
+        // `Failed { touched: false }` (reachable -- `ScoopStep::Remove`'s
+        // uninstall-command-failed arm, `execute.rs:328`, never touches the
         // machine). `changed() == 1`, `touched() == 0`. The real code's
         // `changed() > 0` disjunct is true and prints the "some changed"
         // sentence. The `>` -> `<` mutant compares a `usize` against 0 with

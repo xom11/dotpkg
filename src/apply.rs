@@ -1,7 +1,7 @@
 use crate::backend::scoop::Scoop;
 use crate::backend::Backend;
 use crate::config::Config;
-use crate::execute::Step;
+use crate::execute::{ScoopStep, Step};
 use crate::lock::Lock;
 use crate::lock::Pin;
 use crate::model::{Name, SCOOP, WINGET};
@@ -304,11 +304,11 @@ pub struct Prepared {
 /// `--keep-going` narrows that in exactly one direction: install and replace
 /// whatever IS ready, and report the rest, instead of refusing outright.
 /// Removals are never part of that narrowing. `gate_removals` holds every
-/// `Step::Remove` back whenever `is_ok()` is false -- `--keep-going` included,
-/// and no other flag opens that gate either -- because every newly typed
-/// package name is `NotLocked` until `update` exists, which makes "installs
-/// nothing, deletes something" the one shape a not-ok preparation can produce
-/// today.
+/// removal step (`Step::is_remove()`) back whenever `is_ok()` is false --
+/// `--keep-going` included, and no other flag opens that gate either --
+/// because every newly typed package name is `NotLocked` until `update`
+/// exists, which makes "installs nothing, deletes something" the one shape a
+/// not-ok preparation can produce today.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Preparation {
     pub prepared: Vec<Prepared>,
@@ -583,25 +583,45 @@ pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
     for p in &prep.prepared {
         // Branch on the ACTION, never on the outcome: `Outcome::ReadyToRemove`
         // is still attachable to an `Install`, and nothing in the type system
-        // binds the two.
+        // binds the two. Every ready arm also checks `backend`, so a winget
+        // action ready to fetch or remove routes to neither scoop arm and
+        // instead falls to the routing-bug arm below -- Task 13 gives it its
+        // own arms.
         match (&p.action, &p.outcome) {
-            (Action::Install { name, arch, .. }, Outcome::ReadyToFetch { manifest }) => {
-                steps.push(Step::Install {
-                    app: name.clone(),
-                    staged: manifest.clone(),
-                    arch: arch.clone(),
-                })
-            }
             (
-                Action::Upgrade { name, arch, .. } | Action::Downgrade { name, arch, .. },
+                Action::Install {
+                    backend,
+                    name,
+                    arch,
+                    ..
+                },
                 Outcome::ReadyToFetch { manifest },
-            ) => steps.push(Step::Replace {
+            ) if backend == SCOOP => steps.push(Step::Scoop(ScoopStep::Install {
                 app: name.clone(),
                 staged: manifest.clone(),
                 arch: arch.clone(),
-            }),
-            (Action::Prune { name, .. }, Outcome::ReadyToRemove) => {
-                steps.push(Step::Remove { app: name.clone() })
+            })),
+            (
+                Action::Upgrade {
+                    backend,
+                    name,
+                    arch,
+                    ..
+                }
+                | Action::Downgrade {
+                    backend,
+                    name,
+                    arch,
+                    ..
+                },
+                Outcome::ReadyToFetch { manifest },
+            ) if backend == SCOOP => steps.push(Step::Scoop(ScoopStep::Replace {
+                app: name.clone(),
+                staged: manifest.clone(),
+                arch: arch.clone(),
+            })),
+            (Action::Prune { backend, name, .. }, Outcome::ReadyToRemove) if backend == SCOOP => {
+                steps.push(Step::Scoop(ScoopStep::Remove { app: name.clone() }))
             }
             (a, Outcome::Failed { why }) => unusable.push((action_name(a), why.clone())),
             (a, Outcome::NotLocked) => unusable.push((
@@ -609,6 +629,23 @@ pub fn plan_to_steps(prep: &Preparation) -> (Vec<Step>, Vec<(Name, String)>) {
                 "no lock entry -- run `dotpkg update`".to_string(),
             )),
             (a, Outcome::Skipped { why }) => unusable.push((action_name(a), why.clone())),
+            // A prepared action nobody routed. Reachable today only by a
+            // backend/outcome pairing no real `prepare()` call produces (a
+            // scoop action whose outcome does not match its own kind); once
+            // Task 13's staging layer stops refusing a winget artifact before
+            // it ever reaches `ReadyToFetch`, this is also how a winget
+            // action would land here if this match's own arms above ever
+            // forgot to claim it. Either way, loud beats silently dropped: a
+            // deleted step here is a package the plan promised and the
+            // machine never got, with nothing printed to say so.
+            (a, Outcome::ReadyToFetch { .. }) | (a, Outcome::ReadyToRemove) => unusable.push((
+                action_name(a),
+                format!(
+                    "{}: prepared, but no executor claimed it -- this is a routing bug, \
+                     not a package problem",
+                    action_backend(a)
+                ),
+            )),
             _ => {}
         }
     }
@@ -627,6 +664,21 @@ fn action_name(action: &Action) -> Name {
         | Action::Skip { name, .. }
         | Action::Unmanaged { name, .. }
         | Action::ArchDrift { name, .. } => name.clone(),
+    }
+}
+
+/// Every `Action` variant's `backend` field, for a routing-bug message that
+/// must name which backend was prepared but never claimed. Mirrors
+/// `action_name` above, one field over.
+fn action_backend(action: &Action) -> &str {
+    match action {
+        Action::Install { backend, .. }
+        | Action::Upgrade { backend, .. }
+        | Action::Downgrade { backend, .. }
+        | Action::Prune { backend, .. }
+        | Action::Skip { backend, .. }
+        | Action::Unmanaged { backend, .. }
+        | Action::ArchDrift { backend, .. } => backend,
     }
 }
 
@@ -737,7 +789,7 @@ pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<
     let mut kept = Vec::with_capacity(steps.len());
     let mut held = Vec::new();
     for step in steps {
-        if matches!(step, Step::Remove { .. }) {
+        if step.is_remove() {
             held.push(step.app().clone());
         } else {
             kept.push(step);
@@ -1843,7 +1895,7 @@ mod tests {
     // Unverified before this round: the reviewer enumerated all 42 (action x
     // outcome) pairs and found the behaviour correct but untested -- swapping
     // an arm so that an `Install` carrying a stray `ReadyToRemove` becomes a
-    // `Step::Remove` kept every existing test green.
+    // `ScoopStep::Remove` kept every existing test green.
 
     #[test]
     fn the_three_ready_shapes_produce_their_matching_steps() {
@@ -1900,36 +1952,45 @@ mod tests {
         assert_eq!(
             steps,
             vec![
-                Step::Install {
+                Step::Scoop(ScoopStep::Install {
                     app: Name::new("fzf"),
                     staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
                     arch: None,
-                },
-                Step::Replace {
+                }),
+                Step::Scoop(ScoopStep::Replace {
                     app: Name::new("bat"),
                     staged: PathBuf::from("/stage/bat/2/bat.json"),
                     arch: Some("arm64".into()),
-                },
-                Step::Replace {
+                }),
+                Step::Scoop(ScoopStep::Replace {
                     app: Name::new("ripgrep"),
                     staged: PathBuf::from("/stage/ripgrep/1/ripgrep.json"),
                     arch: None,
-                },
-                Step::Remove {
+                }),
+                Step::Scoop(ScoopStep::Remove {
                     app: Name::new("aichat"),
-                },
+                }),
             ]
         );
     }
 
     #[test]
-    fn an_install_action_carrying_a_stray_readytoremove_produces_nothing() {
+    fn an_install_action_carrying_a_stray_readytoremove_produces_no_step_but_is_reported() {
         // The invariant `plan_to_steps` exists to hold: branch on the ACTION,
         // never on the outcome alone. Nothing in the type system stops an
         // `Outcome::ReadyToRemove` from being attached to an `Install` --
         // this is exactly the pair a version that matched on the outcome by
-        // itself would turn into a `Step::Remove` for a package nobody asked
-        // to remove.
+        // itself would turn into a `ScoopStep::Remove` for a package nobody
+        // asked to remove.
+        //
+        // Since Task 4 narrowed the trailing wildcard, this stray pairing no
+        // longer disappears silently: no scoop arm above claims a
+        // `ReadyToRemove` for an `Install`, so it falls into the
+        // routing-bug arm and is reported, even though the backend named is
+        // scoop and a real `prepare()` call could never produce this pairing.
+        // `steps` staying empty is still the invariant under test; `unusable`
+        // gaining an entry is the new, deliberately louder consequence of
+        // "an unrouted-but-ready action is always a bug worth reporting".
         let prep = Preparation {
             prepared: vec![Prepared {
                 action: Action::Install {
@@ -1944,11 +2005,20 @@ mod tests {
 
         let (steps, unusable) = plan_to_steps(&prep);
         assert!(steps.is_empty(), "{steps:?}");
-        assert!(unusable.is_empty(), "{unusable:?}");
+        assert_eq!(
+            unusable,
+            vec![(
+                Name::new("fzf"),
+                "scoop: prepared, but no executor claimed it -- this is a routing bug, not a \
+                 package problem"
+                    .to_string()
+            )],
+            "an unrouted-but-ready action must be loud, not silently dropped: {unusable:?}"
+        );
     }
 
     #[test]
-    fn a_prune_action_carrying_a_stray_readytofetch_produces_nothing() {
+    fn a_prune_action_carrying_a_stray_readytofetch_produces_no_step_but_is_reported() {
         // The mirror image of the test above.
         let prep = Preparation {
             prepared: vec![Prepared {
@@ -1965,7 +2035,16 @@ mod tests {
 
         let (steps, unusable) = plan_to_steps(&prep);
         assert!(steps.is_empty(), "{steps:?}");
-        assert!(unusable.is_empty(), "{unusable:?}");
+        assert_eq!(
+            unusable,
+            vec![(
+                Name::new("aichat"),
+                "scoop: prepared, but no executor claimed it -- this is a routing bug, not a \
+                 package problem"
+                    .to_string()
+            )],
+            "an unrouted-but-ready action must be loud, not silently dropped: {unusable:?}"
+        );
     }
 
     #[test]
@@ -2137,26 +2216,26 @@ mod tests {
     #[test]
     fn gate_removals_holds_every_prune_back_when_the_preparation_is_not_ok() {
         let steps = vec![
-            Step::Install {
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
                 staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
                 arch: None,
-            },
-            Step::Remove {
+            }),
+            Step::Scoop(ScoopStep::Remove {
                 app: Name::new("aichat"),
-            },
-            Step::Remove {
+            }),
+            Step::Scoop(ScoopStep::Remove {
                 app: Name::new("kanata"),
-            },
+            }),
         ];
         let (kept, held) = gate_removals(steps, false);
         assert_eq!(
             kept,
-            vec![Step::Install {
+            vec![Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
                 staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
                 arch: None,
-            }],
+            })],
             "a non-removal step must still run"
         );
         assert_eq!(held, vec![Name::new("aichat"), Name::new("kanata")]);
@@ -2167,14 +2246,14 @@ mod tests {
         // The positive control: without it, a version that always holds
         // everything back would pass the test above too.
         let steps = vec![
-            Step::Remove {
+            Step::Scoop(ScoopStep::Remove {
                 app: Name::new("aichat"),
-            },
-            Step::Install {
+            }),
+            Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
                 staged: PathBuf::from("/stage/fzf/1.0.0/fzf.json"),
                 arch: None,
-            },
+            }),
         ];
         let (kept, held) = gate_removals(steps.clone(), true);
         assert_eq!(kept, steps);

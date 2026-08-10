@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dotpkg::backend::winget_exec::RealWingetMutator;
 use dotpkg::backend::{
     scoop::Scoop,
     winget::{RealWinget, Winget},
     Backend, Scan, ScanOutcome,
 };
-use dotpkg::execute::Step;
+use dotpkg::execute::{ScoopStep, Step};
 use dotpkg::model::{Installed, Name, WINGET};
 use dotpkg::state::State;
 use std::io::Write;
@@ -361,10 +362,7 @@ fn main() -> Result<()> {
             }
 
             let (steps, unusable) = dotpkg::apply::plan_to_steps(&preparation);
-            let raw_removals = steps
-                .iter()
-                .filter(|s| matches!(s, Step::Remove { .. }))
-                .count();
+            let raw_removals = steps.iter().filter(|s| s.is_remove()).count();
 
             if !preparation.is_ok() && !keep_going {
                 eprintln!(
@@ -403,10 +401,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let removals = steps
-                .iter()
-                .filter(|s| matches!(s, Step::Remove { .. }))
-                .count();
+            let removals = steps.iter().filter(|s| s.is_remove()).count();
             if removals > 0 && yes && !allow_prune {
                 refuse(anyhow::anyhow!(
                     "this run would remove {removals} package(s) and --yes was passed. \
@@ -420,11 +415,11 @@ fn main() -> Result<()> {
                  install, in both directions. Continue? [y/N] ",
                 steps
                     .iter()
-                    .filter(|s| matches!(s, Step::Replace { .. }))
+                    .filter(|s| matches!(s, Step::Scoop(ScoopStep::Replace { .. })))
                     .count(),
                 steps
                     .iter()
-                    .filter(|s| matches!(s, Step::Install { .. }))
+                    .filter(|s| matches!(s, Step::Scoop(ScoopStep::Install { .. })))
                     .count(),
                 removals,
             );
@@ -443,10 +438,16 @@ fn main() -> Result<()> {
                 recovery_path: recovery_path.clone(),
             };
             let sample = || d.scoop.running_set(&dotpkg::sys::running_processes());
+            // Constructed here, not passed in: `main.rs` is the one place a
+            // real winget mutation is ever allowed to happen, same as
+            // `d.scoop` for the scoop half of this call. Every test uses
+            // `FakeWingetMutator` instead.
+            let wm = RealWingetMutator;
             let mut ex = match dotpkg::execute::execute(
                 d.scoop.root(),
                 steps,
                 &d.scoop,
+                &wm,
                 &mut d.state,
                 &sample,
                 &opts,

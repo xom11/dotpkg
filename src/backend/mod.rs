@@ -42,7 +42,7 @@ pub struct Scan {
 ///
 /// Before this task, `update::run` held these as plain local variables and
 /// handed `scoop_root`/`declared` straight to the free functions
-/// `bucket::choose_bucket` and `bucket::resolve_latest`. Task 13 moves that
+/// `bucket::choose_bucket` and `bucket::resolve_latest`. Phase 4 Task 13 moves that
 /// call onto `Backend`, so the same values need a home that travels with the
 /// trait call instead of living only in `update::run`'s stack frame --
 /// `offline`, `declared` and `scoop_root` are exactly those three, moved
@@ -154,7 +154,7 @@ impl ResolveCtx<'static> {
 /// known; nothing here reaches the network. Mutating methods arrive in Phase 2.
 ///
 /// `resolve_latest` and `resolve_installed` are the seam Phase 4 exists to
-/// prove: before Task 13, `update::run` named `bucket::resolve_latest`
+/// prove: before Phase 4 Task 13, `update::run` named `bucket::resolve_latest`
 /// directly, so "a new backend slots in without touching the planner" was a
 /// promise the code did not keep. Both methods are per-package, not
 /// per-scan, because unlike `scan` (unconditionally reads everything on
@@ -221,7 +221,7 @@ pub enum ScanOutcome {
 /// one: a declared, locked package with nothing in `installed` because the
 /// scan failed reads exactly like a declared, locked package that is
 /// genuinely not installed. When Task 6 wrote that, the consequence for winget
-/// was a wrong report line; Task 13 gave winget an executor, so the
+/// was a wrong report line; Phase 4b Task 13 gave winget an executor, so the
 /// consequence now is a real `Action::Install` for a package that may already
 /// be sitting there, converged. This function was written one task ahead of
 /// its own danger, and `ScanOutcome::Unscannable` is that other half's answer:

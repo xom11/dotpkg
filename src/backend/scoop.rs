@@ -322,7 +322,7 @@ impl Backend for Scoop {
         Ok(out)
     }
 
-    /// `update`'s resolver. Moved from `update::run` unchanged (Task 13):
+    /// `update`'s resolver. Moved from `update::run` unchanged (Phase 4 Task 13):
     /// same precedence in `bucket::choose_bucket` (existing lock entry, then
     /// `[scoop.opts]`, then a search), same `bucket::resolve_latest` --
     /// deliberately without `--full-history`, see that function's own doc
@@ -393,7 +393,7 @@ impl Backend for Scoop {
     }
 
     /// `adopt`'s pin-liveness check. Moved from `adopt::adopt_one` unchanged
-    /// (Task 13): the same bucket hint precedence (an existing lock entry,
+    /// (Phase 4 Task 13): the same bucket hint precedence (an existing lock entry,
     /// then `install.json`'s `bucket` -- a legitimate hint only here, because
     /// `adopt` targets packages dotpkg has never touched), the same
     /// `adopt::resolve_installed` search over the bucket's full history --

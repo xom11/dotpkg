@@ -441,7 +441,7 @@ struct WriteFailure {
 /// The bucket-choice-then-history-search sequence this used to hold inline is
 /// gone: it is exactly what `Scoop::resolve_installed` (`src/backend/
 /// scoop.rs`) already does, moved onto the `Backend` trait unchanged by
-/// Task 13 but never actually CALLED from here until this rewiring -- which
+/// Phase 4 Task 13 but never actually CALLED from here until this rewiring -- which
 /// is what made it dead code despite being tested directly. A reviewer
 /// line-compared the two before this change and found them equivalent except
 /// for which spelling one error message names (`name`, the declared

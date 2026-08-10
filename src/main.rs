@@ -133,7 +133,7 @@ fn refuse(err: anyhow::Error) -> ! {
 /// outstanding work the user asked for and did not get. Either of those means
 /// 0 would tell a scheduled task the machine is fine when it is not.
 ///
-/// It had a third parameter, `has_reported_only`, from Task 14 until Task 13:
+/// It had a third parameter, `has_reported_only`, from Phase 4 Task 14 until Phase 4b Task 13:
 /// a winget package that differed from the lock and that dotpkg could not act
 /// on floored the code too. Winget acts now, so such a package is an
 /// `Install`/`Upgrade`/`Downgrade`/`Prune` that either succeeds (0) or fails
@@ -161,7 +161,7 @@ fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> 
 /// producing `Step::Winget(WingetStep::Set { .. })` this prompt would have
 /// gone on saying "0 installed" for a run that installs a winget package,
 /// with no compiler error to force anyone to notice. Naming every leaf turned
-/// that day into a compile error instead -- and that day is Task 13, which
+/// that day into a compile error instead -- and that day is Phase 4b Task 13, which
 /// answered it below.
 ///
 /// **`WingetStep::Set` counts as an install, in both of its meanings.** A
@@ -189,6 +189,40 @@ fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
             Step::Winget(WingetStep::Set { .. }) => (replaces, installs + 1),
             Step::Winget(WingetStep::Remove { .. }) => (replaces, installs),
         })
+}
+
+/// The warning for a ready outcome that no executor step claimed, or `None`
+/// when every one of them was routed.
+///
+/// Every ready outcome must become exactly one step -- one `ScoopStep` per
+/// `ReadyToFetch`, one `Remove` per `ReadyToRemove`, one `WingetStep::Set` per
+/// `ReadyToSet` -- with `gate_removals` moving some of them into `held` rather
+/// than dropping them. So `routed < ready` can only mean a `plan_to_steps` arm
+/// did not claim something `prepare` made ready: `apply::plan_to_steps`'s
+/// "routing bug" arm, a package the plan promised and rendered as `ready`, that
+/// the machine will never get. That is `is_ok()`-invisible by construction (a
+/// ready outcome raises neither failure count), so without this it is printed
+/// nowhere at all.
+///
+/// A warning, not a refusal: no real input can produce it today, and refusing a
+/// run over a can't-happen bug would be worse than reporting it.
+///
+/// Lifted out of `main` for the same reason `floor_exit_code` was -- it is
+/// unreachable from `tests/cli.rs` by construction (the whole point is that no
+/// real plan produces it), so a function is the only way to pin the sentence at
+/// all. `saturating_sub`, not `-`: the `if` above it already makes underflow
+/// unreachable, and a subtraction that panics in a debug build if that guard is
+/// ever loosened is not what this warning should turn into.
+fn unrouted_warning(ready: usize, routed: usize) -> Option<String> {
+    if routed >= ready {
+        return None;
+    }
+    Some(format!(
+        "warning: {} package(s) were prepared and shown as ready above, but no executor \
+         step was built for them, so they will NOT be changed. This is a routing bug in \
+         dotpkg, not a problem with your packages.",
+        ready.saturating_sub(routed)
+    ))
 }
 
 /// Prints what each scan could not read, attributed to its own backend, then
@@ -264,18 +298,27 @@ fn print_scan_warnings_and_merge(
 /// that reintroduces exactly this silent data loss, and
 /// `reconcile_ghosts_leaves_winget_untouched_when_its_scan_failed` below is
 /// what catches it.
+/// Each dropped record is returned with **the backend it was dropped from**.
+/// This function has reconciled both backends since Phase 4 Task 14, but its
+/// return type did not say which was which, so `render_execution` printed every
+/// dropped winget record as `note scoop <id>` -- a false word in user-facing
+/// output, older than Phase 4b Task 13 and fixed with it.
 fn reconcile_ghosts(
     state: &mut State,
     scoop: &Scoop,
     winget_scan: &ScanOutcome,
-) -> Result<Vec<Name>> {
+) -> Result<Vec<(String, Name)>> {
     let after_scoop = <Scoop as Backend>::scan(scoop)?;
     let present: Vec<_> = after_scoop
         .installed
         .iter()
         .map(|i| i.name.clone())
         .collect();
-    let mut dropped = state.reconcile(dotpkg::model::SCOOP, &present);
+    let mut dropped: Vec<(String, Name)> = state
+        .reconcile(dotpkg::model::SCOOP, &present)
+        .into_iter()
+        .map(|n| (dotpkg::model::SCOOP.to_string(), n))
+        .collect();
 
     if let ScanOutcome::Scanned(after_winget) = winget_scan {
         let present: Vec<_> = after_winget
@@ -283,7 +326,12 @@ fn reconcile_ghosts(
             .iter()
             .map(|i| i.name.clone())
             .collect();
-        dropped.extend(state.reconcile(dotpkg::model::WINGET, &present));
+        dropped.extend(
+            state
+                .reconcile(dotpkg::model::WINGET, &present)
+                .into_iter()
+                .map(|n| (dotpkg::model::WINGET.to_string(), n)),
+        );
     }
     Ok(dropped)
 }
@@ -466,33 +514,17 @@ fn main() -> Result<()> {
             // so "installs nothing, deletes something" is the one shape
             // reachable today with a not-ok preparation.
             let (steps, held) = dotpkg::apply::gate_removals(steps, preparation.is_ok());
-            for app in &held {
+            for (backend, app) in &held {
                 eprintln!(
-                    "note: {app} was ready to be removed, but is held: this run also has \
-                     package(s) that could not be prepared, and a removal only proceeds \
-                     when the whole preparation is ok. Fix them and rerun to let it through."
+                    "note: {backend} {app} was ready to be removed, but is held: this run \
+                     also has package(s) that could not be prepared, and a removal only \
+                     proceeds when the whole preparation is ok. Fix them and rerun to let \
+                     it through."
                 );
             }
 
-            // Every ready outcome must become exactly one step -- one
-            // `ScoopStep` per `ReadyToFetch`, one `Remove` per
-            // `ReadyToRemove`, one `WingetStep::Set` per `ReadyToSet` -- with
-            // `gate_removals` moving some of them into `held` rather than
-            // dropping them. So this can only fail if a `plan_to_steps` arm
-            // did not claim something `prepare` made ready, which is
-            // `apply::plan_to_steps`'s "routing bug" arm: a package the plan
-            // promised, rendered `ready` in the table above, that the machine
-            // will never get. It is `is_ok()`-invisible by construction (a
-            // ready outcome raises neither failure count), so without this it
-            // is printed nowhere at all.
-            let routed = steps.len() + held.len();
-            if routed < preparation.ready_count() {
-                eprintln!(
-                    "warning: {} package(s) were prepared and shown as ready above, but no \
-                     executor step was built for them, so they will NOT be changed. This is \
-                     a routing bug in dotpkg, not a problem with your packages.",
-                    preparation.ready_count() - routed
-                );
+            if let Some(w) = unrouted_warning(preparation.ready_count(), steps.len() + held.len()) {
+                eprintln!("{w}");
             }
 
             // A converged machine: nothing to install, nothing to remove,
@@ -563,13 +595,14 @@ fn main() -> Result<()> {
             // it happens, but the closing table is what a user actually
             // reads at the end of a run -- and until now it disagreed,
             // reporting "0 held" while a prune really was held.
-            for app in &held {
-                ex.results.push((
-                    app.clone(),
-                    dotpkg::execute::ItemResult::Held(
+            for (backend, app) in &held {
+                ex.results.push(dotpkg::execute::ItemOutcome {
+                    backend: backend.clone(),
+                    name: app.clone(),
+                    result: dotpkg::execute::ItemResult::Held(
                         "removal held: another package in this run could not be prepared".into(),
                     ),
-                ));
+                });
             }
 
             // A package skipped at prepare time for a reason that could
@@ -581,9 +614,12 @@ fn main() -> Result<()> {
             // here, not inside `execute` itself, because `execute` only ever
             // sees the steps a preparation actually produced.
             let outstanding_skips = preparation.outstanding_skips();
-            for (app, why) in outstanding_skips.iter().cloned() {
-                ex.results
-                    .push((app, dotpkg::execute::ItemResult::Held(why)));
+            for (backend, app, why) in outstanding_skips.iter().cloned() {
+                ex.results.push(dotpkg::execute::ItemOutcome {
+                    backend,
+                    name: app,
+                    result: dotpkg::execute::ItemResult::Held(why),
+                });
             }
 
             // Report only what a fresh scan confirms -- for every backend
@@ -820,7 +856,7 @@ mod tests {
         // `Remove` into one of the two counts, or putting `WingetStep::Set`
         // back into `replaces` or into neither, must turn this red.
         //
-        // `WingetStep::Set` counted as neither until Task 13 -- deliberately,
+        // `WingetStep::Set` counted as neither until Phase 4b Task 13 -- deliberately,
         // as a decision written down rather than a silent default, because
         // nothing produced one yet. It does now, and a prompt that said "0
         // installed" for a run that installs a winget package would be the
@@ -857,6 +893,35 @@ mod tests {
             "one scoop replace; one scoop install plus one winget Set are two \
              installs; neither `Remove` moves either count"
         );
+    }
+
+    #[test]
+    fn an_unrouted_ready_package_is_warned_about_and_a_fully_routed_run_is_silent() {
+        // New user-facing output, in a codebase that pins the strings it
+        // prints. It cannot be reached from `tests/cli.rs` -- the whole point
+        // is that no real plan produces it -- so this is the only place the
+        // sentence can be pinned at all.
+        let w = unrouted_warning(3, 1).expect("two ready packages became no step");
+        assert!(w.starts_with("warning: 2 package(s)"), "got {w}");
+        assert!(
+            w.contains("routing bug in dotpkg, not a problem with your packages"),
+            "the user must be told this is not their fault: {w}"
+        );
+        assert!(
+            w.contains("will NOT be changed"),
+            "and what the consequence is: {w}"
+        );
+
+        // The silent cases, which are every real run: all routed, and the
+        // converged machine with nothing ready at all. Without these, a
+        // version that always warned would pass the assertions above.
+        assert_eq!(unrouted_warning(2, 2), None, "everything was routed");
+        assert_eq!(unrouted_warning(0, 0), None, "a converged machine");
+        // `held` removals count as routed, so a run whose only ready action is
+        // a held prune must also stay silent -- `routed` is `steps + held`.
+        assert_eq!(unrouted_warning(1, 1), None, "one ready, one held");
+        // Cannot happen, must not panic: `saturating_sub` rather than `-`.
+        assert_eq!(unrouted_warning(1, 5), None, "more routed than ready");
     }
 
     #[test]
@@ -1071,10 +1136,18 @@ mod tests {
 
         let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
 
+        // Each dropped record names the backend it came from. Without that,
+        // `render_execution` printed `note scoop <winget id>` for the winget
+        // half -- false since Phase 4 Task 14 taught this function both
+        // backends, and only fixed when Phase 4b Task 13 gave every execution line a
+        // real backend column.
         assert_eq!(
             dropped,
-            vec![Name::new("scoop-ghost"), Name::new("winget-ghost")],
-            "both ghosts, scoop first: {dropped:?}"
+            vec![
+                (dotpkg::model::SCOOP.to_string(), Name::new("scoop-ghost")),
+                (WINGET.to_string(), Name::new("winget-ghost")),
+            ],
+            "both ghosts, each with its own backend, scoop first: {dropped:?}"
         );
         assert!(
             state.owns(dotpkg::model::SCOOP, &Name::new("fzf")),

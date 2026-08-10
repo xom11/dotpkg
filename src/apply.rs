@@ -425,8 +425,8 @@ impl Preparation {
     /// already fails `is_ok()` on its own). Two variants have been the reason
     /// these counts differed and both are gone:
     /// `SkipReason::BackendNotImplemented` (deleted with the stub loop it
-    /// existed for when Task 14 gave winget a real planner view) and
-    /// `SkipReason::ReportedOnly` (deleted by Task 13 when winget got an
+    /// existed for when Phase 4 Task 14 gave winget a real planner view) and
+    /// `SkipReason::ReportedOnly` (deleted by Phase 4b Task 13 when winget got an
     /// executor and stopped having anything to report-only about). Nothing has
     /// taken their place. The match in `is_outstanding` stays exhaustive with
     /// no wildcard for exactly this reason: the day a
@@ -438,14 +438,25 @@ impl Preparation {
     /// silently been left out of it): a skip's *kind* decides whether it
     /// belongs here, and that decision lives in `is_outstanding`, not in
     /// this method's name.
-    pub fn outstanding_skips(&self) -> Vec<(Name, String)> {
+    ///
+    /// Each entry carries its **backend** as well as its name, because
+    /// `main.rs` pushes these into `Execution::results` for the closing table
+    /// and that table names a backend per line. A winget package skipped for
+    /// `Running` or `Opaque` has been reachable since Phase 4 Task 14, so
+    /// without the backend here the table has been calling those packages
+    /// `scoop` ever since -- see `execute::ItemOutcome`.
+    pub fn outstanding_skips(&self) -> Vec<(String, Name, String)> {
         self.prepared
             .iter()
             .filter_map(|p| match (&p.action, &p.outcome) {
                 (Action::Skip { reason, .. }, Outcome::Skipped { why })
                     if is_outstanding(reason) =>
                 {
-                    Some((action_name(&p.action), why.clone()))
+                    Some((
+                        action_backend(&p.action).to_string(),
+                        action_name(&p.action),
+                        why.clone(),
+                    ))
                 }
                 _ => None,
             })
@@ -461,7 +472,7 @@ impl Preparation {
 /// Exhaustive on purpose, with no wildcard arm: a `SkipReason` this match
 /// does not name is a compile error, not a silent "does not float" default.
 /// That shape has already earned itself twice -- `SkipReason::ReportedOnly`
-/// arrived (Task 14) and was deleted again (Task 13, when winget got an
+/// arrived (Phase 4 Task 14) and was deleted again (Phase 4b Task 13, when winget got an
 /// executor), and on both days the floor-or-not answer had to be a decision
 /// made here rather than an oversight the match would have let slip through.
 fn is_outstanding(reason: &SkipReason) -> bool {
@@ -487,7 +498,9 @@ fn is_outstanding(reason: &SkipReason) -> bool {
 /// uninstalls, or otherwise changes anything already on the machine. The only
 /// filesystem writes are inside `staging_root`, and the only commands ever
 /// run are `scoop download` and `winget show`, neither of which mutates
-/// installed software.
+/// installed software. `winget show` is run **once per winget action, twice
+/// when a pin has fallen out of the index** -- see `check_pin_is_live` for what
+/// that costs.
 ///
 /// A per-package failure is recorded in that package's `Outcome` and the walk
 /// continues -- one bad package must never hide, or stop, the others.
@@ -535,9 +548,30 @@ pub fn prepare(
 /// the lock -- the plan is the thing the user is shown and says yes to, so it
 /// is the thing preparation must confirm.
 ///
-/// **A missing `winget.exe` lands here, and lands as `Failed` -- deliberately,
-/// and this is the whole answer to it.** `Winget::scan` routes
-/// `CmdError::NotFound` to an empty `Scan` plus a warning, because a machine
+/// **Cost: one `winget show` subprocess per winget action in the plan, run
+/// serially, and two when the pin has fallen out of the index** --
+/// `version_liveness`'s `NO_VERSION_FOUND` branch asks `show --versions` as
+/// well, to say how deep the publisher's retention goes. The nearest measured
+/// figure for a `show` invocation on a real machine is ~1.09 s
+/// (`docs/measurements-2026-08-09-winget.md`), so a plan with ten winget
+/// changes spends roughly ten seconds in `--prepare` before anything is
+/// attempted. Nothing here is parallelised or cached, and no measurement of
+/// this loop itself exists yet.
+///
+/// **A transient winget failure refuses the whole run, scoop included.**
+/// `version_liveness` returns `Err` for *any* nonzero exit code, not only the
+/// two it names, so a winget that is momentarily unhappy -- a locked index, a
+/// source mid-update -- becomes `Outcome::Failed`, which fails
+/// `Preparation::is_ok`, which exits 2 with no scoop action performed either.
+/// That is fail-closed on purpose: the alternative is installing a version
+/// dotpkg could not confirm, and `--keep-going` is the documented way to let
+/// the ready packages through. It is nonetheless a **new failure mode** this
+/// task introduced, and a retry policy is the obvious future refinement.
+///
+/// **A missing `winget.exe` lands here, and lands as `Failed` -- deliberately.
+/// This is the whole answer for the three mutating actions; a `Prune` is safe
+/// for a different reason, named at the end of this comment.** `Winget::scan`
+/// routes `CmdError::NotFound` to an empty `Scan` plus a warning, because a machine
 /// with no winget is a legitimate machine; the cost is that "winget is not
 /// installed" and "winget found nothing installed" are spelled the same way in
 /// `installed`, so a declared *and locked* winget package on such a machine
@@ -553,6 +587,15 @@ pub fn prepare(
 /// step to keep going with. Reported per package rather than as one
 /// whole-backend error because that is what the rest of this function already
 /// is, and because the same run's scoop half is none of winget's business.
+///
+/// **The `Prune` direction never reaches this function, and is safe for a
+/// different reason** -- so do not read the paragraph above as covering it. A
+/// `Prune` is `Intent::NoArtifactNeeded`, ready by definition, and on a machine
+/// with no `winget.exe` no winget `Prune` is ever emitted in the first place:
+/// the scan is empty, and `plan_backend`'s undeclared loop only iterates
+/// `installed`. That is `backend::scan_or_warn`'s own argument, in its own doc
+/// comment, and it is the half of the problem `ScanOutcome::Unscannable`
+/// deliberately does *not* need to cover.
 fn check_pin_is_live(action: &Action, winget: &dyn WingetCmd) -> Outcome {
     let (name, version) = match action {
         Action::Install { name, version, .. } => (name, version),
@@ -958,7 +1001,13 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
 /// the one decision in the whole driver that a deleted line would make
 /// silently permissive -- and a silently permissive prune is exactly the
 /// mistake this project's tests exist to catch before a machine does.
-pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<Name>) {
+///
+/// Held removals come back with their **backend**, taken off the `Step` itself
+/// so it cannot disagree with what would have run: `main.rs` pushes each into
+/// `Execution::results`, and that table names a backend per line. A held
+/// *winget* removal became reachable the moment Phase 4b Task 13 let `plan_to_steps`
+/// emit `WingetStep::Remove`.
+pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<(String, Name)>) {
     if preparation_ok {
         return (steps, Vec::new());
     }
@@ -966,7 +1015,7 @@ pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<
     let mut held = Vec::new();
     for step in steps {
         if step.is_remove() {
-            held.push(step.app().clone());
+            held.push((step.backend().to_string(), step.app().clone()));
         } else {
             kept.push(step);
         }
@@ -1122,7 +1171,7 @@ mod tests {
         // The one place the two backends' preparations part company, and the
         // reason it is a `classify` decision rather than a `stage_and_fetch`
         // one: winget has no local manifest, so asking `Scoop::stage` for one
-        // is not "not implemented yet", it is meaningless. Before Task 13 this
+        // is not "not implemented yet", it is meaningless. Before Phase 4b Task 13 this
         // never came up -- a winget difference was a `Skip`.
         for a in [
             Action::Install {
@@ -1163,7 +1212,7 @@ mod tests {
 
     #[test]
     fn a_declared_unlocked_winget_package_now_fails_the_run_exactly_as_a_scoop_one_does() {
-        // **This reverses a test, on purpose.** Until Task 13 a declared,
+        // **This reverses a test, on purpose.** Until Phase 4b Task 13 a declared,
         // unlocked winget package was `SkipReason::ReportedOnly(Divergence::
         // NotLocked)` and classified to `Intent::Skip`, deliberately: `apply`
         // could not have acted on it even *with* a pin, so failing the whole
@@ -1615,7 +1664,7 @@ mod tests {
 
     #[test]
     fn prepare_refuses_to_stage_a_backend_it_has_no_preparation_for() {
-        // This test used `WINGET` as its unpreparable backend until Task 13,
+        // This test used `WINGET` as its unpreparable backend until Phase 4b Task 13,
         // when winget got a preparation of its own (`Intent::NeedsLiveness`)
         // and stopped being one. The guard it pins is unchanged and still
         // needed, so the backend is now a third one that does not exist: a
@@ -2042,7 +2091,7 @@ mod tests {
         // which fails `is_ok()` on its own). Two variants have played the
         // "Skipped but not outstanding" role and could be shown failing to
         // float through `prepare()`'s real pipeline -- `BackendNotImplemented`
-        // (deleted by Task 14) and `ReportedOnly` (deleted by Task 13, when
+        // (deleted by Phase 4 Task 14) and `ReportedOnly` (deleted by Phase 4b Task 13, when
         // winget got an executor); nothing has taken their place, so this is
         // now the only way to pin the `false` arm at all.
         assert!(is_outstanding(&SkipReason::Running));
@@ -2070,7 +2119,7 @@ mod tests {
         // `is_outstanding` says so in isolation (see the direct unit test
         // above).
         //
-        // Three, not four: `ReportedOnly` was the fourth until Task 13 deleted
+        // Three, not four: `ReportedOnly` was the fourth until Phase 4b Task 13 deleted
         // it along with the rest of winget's report-only path. The count lives
         // in this comment and in the assertion below rather than only in the
         // test's name, because a stale count in prose is exactly the failure
@@ -2120,13 +2169,24 @@ mod tests {
         assert_eq!(
             outstanding,
             vec![
-                (Name::new("kanata"), "running -- stop it first".to_string()),
                 (
+                    SCOOP.to_string(),
+                    Name::new("kanata"),
+                    "running -- stop it first".to_string()
+                ),
+                (
+                    SCOOP.to_string(),
                     Name::new("zellij"),
                     "installed, but its state could not be read -- see the warnings above"
                         .to_string()
                 ),
+                // The backend is asserted, not just the name and the reason:
+                // `main.rs` pushes these into `Execution::results`, whose
+                // closing table names a backend per line, and it printed
+                // "scoop" for this winget package until Phase 4b Task 13 -- see
+                // `execute::ItemOutcome`.
                 (
+                    WINGET.to_string(),
                     Name::new("Discord.Discord"),
                     "this backend could not be scanned -- see the warnings above; nothing \
                      was attempted for it"
@@ -2899,8 +2959,15 @@ mod tests {
             Step::Scoop(ScoopStep::Remove {
                 app: Name::new("aichat"),
             }),
-            Step::Scoop(ScoopStep::Remove {
-                app: Name::new("kanata"),
+            // A winget removal in the same list: `WingetStep::Remove` became
+            // reachable at Phase 4b Task 13, and `is_remove()` must gate it exactly as
+            // it gates scoop's -- a gate that only recognised one backend's
+            // removals would be silently permissive for the other, which is the
+            // one mistake this function's own doc comment is about.
+            Step::Winget(WingetStep::Remove {
+                id: Name::new("OpenAI.Codex"),
+                version: "0.145.0".into(),
+                guard: vec!["codex".into()],
             }),
         ];
         let (kept, held) = gate_removals(steps, false);
@@ -2913,7 +2980,15 @@ mod tests {
             })],
             "a non-removal step must still run"
         );
-        assert_eq!(held, vec![Name::new("aichat"), Name::new("kanata")]);
+        // Each held removal carries the backend that would have performed it,
+        // because `main.rs` prints it and puts it in the closing table.
+        assert_eq!(
+            held,
+            vec![
+                (SCOOP.to_string(), Name::new("aichat")),
+                (WINGET.to_string(), Name::new("OpenAI.Codex")),
+            ]
+        );
     }
 
     #[test]

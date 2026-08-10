@@ -88,7 +88,7 @@ impl Plan {
     /// How many actions this run will actually perform. Printed in the one
     /// line a user reads before saying yes to `apply`, so it counts only the
     /// four action shapes that really change the machine: an `Action::Skip`
-    /// is never one of them, whatever its reason. Until Task 13 a winget
+    /// is never one of them, whatever its reason. Until Phase 4b Task 13 a winget
     /// difference was itself a `Skip` (`SkipReason::ReportedOnly`) and this
     /// comment explained why counting it would have put a false number in
     /// that line; winget now `Acts`, so a winget difference is an
@@ -125,12 +125,12 @@ impl Plan {
 }
 
 /// What a backend's declared-package pass may turn a version difference
-/// into. Added by Task 14, which gave winget a real planner view before it had
+/// into. Added by Phase 4 Task 14, which gave winget a real planner view before it had
 /// any executor: scoop `Acts` -- an `Install`/`Upgrade`/`Downgrade`/`Prune`
 /// really happens -- and winget had a second variant, for a backend that could
 /// only describe the difference.
 ///
-/// **One variant since Task 13**, which gave winget an executor. Both backends
+/// **One variant since Phase 4b Task 13**, which gave winget an executor. Both backends
 /// this crate has now act, so that second variant and everything reachable
 /// only through it -- `SkipReason::ReportedOnly`, the `Divergence` type, and
 /// the four rendered sentences that told the user their winget packages could
@@ -158,7 +158,7 @@ pub enum Capability {
 }
 
 /// One backend's slice of the inputs. `plan()` runs the same pass over each
-/// backend it has a view for -- both scoop and winget, and since Task 13 both
+/// backend it has a view for -- both scoop and winget, and since Phase 4b Task 13 both
 /// with `Capability::Acts`, so one declared/undeclared pass installs,
 /// upgrades, downgrades and prunes for either of them.
 struct BackendView<'a> {
@@ -317,7 +317,7 @@ fn plan_backend(
             // either backend (Task 15 taught `update::run` to resolve winget
             // too), and the user must go run it.
             //
-            // Both backends `Act` since Task 13, so this is no longer a fork
+            // Both backends `Act` since Phase 4b Task 13, so this is no longer a fork
             // -- it is still matched exhaustively, because a backend that
             // only reports could not act on this package even *with* a pin
             // and must not fail the whole run over a lock entry that does not
@@ -466,7 +466,7 @@ pub fn plan(
     let mut reports = Vec::new();
 
     // One pass per backend, both real since Task 14 and both `Acts` since
-    // Task 13: a declared winget package that differs from the lock is an
+    // Phase 4b Task 13: a declared winget package that differs from the lock is an
     // `Install`/`Upgrade`/`Downgrade` and an owned undeclared one is a
     // `Prune`, exactly as scoop's is, and `apply` really performs them.
     // `[winget.opts]` does not exist, so `empty_opts` stands in for it --

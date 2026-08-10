@@ -1,10 +1,10 @@
 //! A recording fake for `WingetCmd`, shared by every winget-adjacent
 //! integration test binary (`winget_scan.rs` today; `winget_resolve.rs` from
-//! Task 13 onward) so that none of them ever spawns `winget.exe` -- the whole
+//! Phase 4 Task 13 onward) so that none of them ever spawns `winget.exe` -- the whole
 //! reason `WingetCmd` exists as a seam.
 //!
 //! Not every binary that pulls this in via `mod common;` uses every
-//! constructor here (`script`, in particular, is Task 13's), so this module
+//! constructor here (`script`, in particular, is Phase 4 Task 13's), so this module
 //! carries its own `#![allow(dead_code)]` the same way `tests/common/mod.rs`
 //! does for its own git helpers.
 #![allow(dead_code)]

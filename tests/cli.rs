@@ -1259,7 +1259,7 @@ fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
 }
 
 #[test]
-fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_and_holds_the_scoop_prune() {
+fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_is_reached() {
     // **This test is inverted, on purpose, and its old name was
     // `a_declared_unlocked_winget_package_does_not_block_a_legitimate_scoop_
     // prune`.** It was written when a declared, unlocked winget package
@@ -1268,13 +1268,23 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_and_holds_the_sc
     // -- `aichat`'s entirely unrelated prune included -- punished the user for
     // a lock entry that could not have helped anyone.
     //
-    // Task 13 removed the premise. Winget has an executor now, so `Git.Git`
-    // without a pin is the same thing a scoop package without a pin is: work
-    // dotpkg was asked to do and may not invent a version for. Refusing is the
-    // correct answer, and quietly installing nothing would be the "degrade
-    // silently" failure the spec forbids. What has NOT changed is that `aichat`
-    // must be left alone -- `gate_removals` holds every removal while any
-    // package could not be prepared, and this is that path end to end.
+    // Phase 4b Task 13 removed the premise. Winget has an executor now, so
+    // `Git.Git` without a pin is the same thing a scoop package without a pin
+    // is: work dotpkg was asked to do and may not invent a version for.
+    // Refusing is the correct answer, and quietly installing nothing would be
+    // the "degrade silently" failure the spec forbids.
+    //
+    // **What this pins is the refusal path, and nothing else.** `main.rs`
+    // prints its "could not be prepared" message and `exit(2)`s *before*
+    // `gate_removals` is ever called, so no removal is held here and
+    // `gate_removals` does not run at all -- an earlier revision of this
+    // comment claimed this was that path end to end, which was a false claim
+    // about coverage. `aichat` survives because **nothing ran**, not because a
+    // prune was held. The held-removal path has its own end-to-end coverage in
+    // this file, and needs `--keep-going` to be reached at all:
+    // `keep_going_holds_a_ready_prune_back_when_another_package_could_not_be_
+    // prepared` and `a_held_prune_appears_in_the_closing_table_not_only_as_a_
+    // stderr_note`.
     let f = Fixture::new(
         "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n[winget]\npackages = [\"Git.Git\"]\n",
         r#"{"scoop":{"fzf":"installed","aichat":"adopted"}}"#,
@@ -1313,9 +1323,19 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_and_holds_the_sc
         !all.contains("FAILED"),
         "nothing may be attempted when the preparation is refused: {all}"
     );
+    // Not "a held prune left it alone" -- the prune was never reached to be
+    // held. This is the same fact the `FAILED` sentinel above asserts, from the
+    // machine's side instead of the output's.
     assert!(
         f.scoop.path().join("apps").join("aichat").exists(),
-        "a held prune must leave the app alone"
+        "a refusal must leave every package untouched"
+    );
+    // And the run really did refuse before `gate_removals`, not after it: that
+    // function's own "was ready to be removed, but is held" note is the thing
+    // this path skips.
+    assert!(
+        !all.contains("was ready to be removed, but is held"),
+        "the refusal happens before any removal is held: {all}"
     );
 }
 

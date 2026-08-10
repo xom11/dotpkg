@@ -432,7 +432,7 @@ pub struct Found {
 /// `parse_list`'s style -- if either the `Found` line or the `Version:` line
 /// is missing, rather than returning a `Found` with an empty field: an empty
 /// `Found` would silently be a package named `""` at version `""`, and
-/// Task 13's `resolve_installed`/`resolve_latest` would go on to compare that
+/// Phase 4 Task 13's `resolve_installed`/`resolve_latest` would go on to compare that
 /// against real data.
 pub fn parse_show(stdout: &str) -> Result<Found> {
     let lines = strip_cr(stdout);
@@ -460,7 +460,7 @@ pub fn parse_show(stdout: &str) -> Result<Found> {
 ///
 /// Retention is a publisher policy, not a winget guarantee -- measured from
 /// 8 (`BurntSushi.ripgrep.MSVC`) to 828 (`JanDeDobbeleer.OhMyPosh`) -- so
-/// `vs.len()` is itself information: Task 13 uses it to say how deep the
+/// `vs.len()` is itself information: Phase 4 Task 13 uses it to say how deep the
 /// index goes when a pin has fallen off the end ("this publisher keeps eight
 /// releases" is more help than "the manifest is gone").
 ///
@@ -815,7 +815,7 @@ impl<C: WingetCmd> Backend for Winget<C> {
 /// **no `--exact`**, for the same measured reason as `resolve_latest`
 /// (`PROVENANCE.md`, `parse_show`'s own doc comment): `--exact` is what makes
 /// `--id` case-sensitive, so a folded or wrong-case spelling gets
-/// `NO_APPLICATIONS_FOUND` for a package that exists. Task 13's brief wrote
+/// `NO_APPLICATIONS_FOUND` for a package that exists. Phase 4b Task 13's brief wrote
 /// this call as `show -e --id ... -v ...`; the `-e` is deliberately **not**
 /// here, because this is the argv shape the crate's exit-code trust was
 /// measured against and adding a flag no measurement covers would hide a
@@ -829,6 +829,14 @@ impl<C: WingetCmd> Backend for Winget<C> {
 /// help than "the manifest is gone". `NO_APPLICATIONS_FOUND` means the
 /// package itself is gone -- a different fact, so a different message, never
 /// conflated with the version-only one.
+///
+/// **Cost: one subprocess on the happy path, two on that `NO_VERSION_FOUND`
+/// branch.** Measured on a14, a `show` invocation is ~1.09 s
+/// (`docs/measurements-2026-08-09-winget.md`), which matters because
+/// `apply::check_pin_is_live` calls this once per winget action in a plan,
+/// serially. The second call is bought deliberately: it turns "the manifest is
+/// gone" into "this publisher currently keeps 8 versions (15.0.0..15.2.0)",
+/// and it only happens on a path that has already failed.
 ///
 /// `Err` is already the whole sentence a user reads, and already names `id`
 /// where naming it helps: every caller puts it straight into a `Resolution`

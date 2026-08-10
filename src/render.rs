@@ -153,8 +153,14 @@ pub fn render_preparation(p: &Preparation) -> String {
 /// user actually reads at the end of the run.
 pub fn render_execution(ex: &Execution) -> String {
     let mut out = String::new();
-    for (name, r) in &ex.results {
-        let line = match r {
+    // `{backend:<6}` read from the item, never the literal `scoop` this
+    // function printed on every line until Phase 4b Task 13. That literal was
+    // true while no `Step::Winget` could reach `execute`, and became a
+    // `FAILED  scoop  Brave.Brave` line the day winget got an executor. See
+    // `execute::ItemOutcome`'s own doc comment.
+    for item in &ex.results {
+        let (backend, name) = (&item.backend, &item.name);
+        let line = match &item.result {
             // `{name:<14} ` -- a literal space after the padded field, the
             // same fix `prepared_line` needed and got at Task 16
             // (`src/render.rs:229`; see its own doc comment for the
@@ -165,16 +171,24 @@ pub fn render_execution(ex: &Execution) -> String {
             // ordinary scoop package: `windows-terminal` is 16 characters,
             // long enough to exhaust the padding entirely and leave nothing
             // to separate it from what follows.
-            ItemResult::Done => format!("  done    scoop  {name:<14} verified on disk"),
-            ItemResult::Failed { why, .. } => format!("  FAILED  scoop  {name:<14} {why}"),
-            ItemResult::Held(why) => format!("  held    scoop  {name:<14} {why}"),
+            ItemResult::Done => {
+                format!("  done    {backend:<6} {name:<14} verified on disk")
+            }
+            ItemResult::Failed { why, .. } => {
+                format!("  FAILED  {backend:<6} {name:<14} {why}")
+            }
+            ItemResult::Held(why) => format!("  held    {backend:<6} {name:<14} {why}"),
         };
         out.push_str(&line);
         out.push('\n');
     }
-    for name in &ex.dropped_ghosts {
+    // Same fix, and this one was already false before Phase 4b Task 13:
+    // `reconcile_ghosts` has reconciled both backends since Phase 4 Task 14,
+    // so a dropped winget ownership record has been printed as scoop's ever
+    // since.
+    for (backend, name) in &ex.dropped_ghosts {
         out.push_str(&format!(
-            "  note    scoop  {name:<14} ownership record dropped: nothing by that name is installed\n"
+            "  note    {backend:<6} {name:<14} ownership record dropped: nothing by that name is installed\n"
         ));
     }
     out.push_str(&format!(
@@ -616,7 +630,7 @@ mod tests {
         // what a14's real `apply --prepare` output showed.
         //
         // It was a report-only skip when the dogfood found it, because that was
-        // all a winget difference could be; Task 13 made the same difference a
+        // all a winget difference could be; Phase 4b Task 13 made the same difference a
         // real `Upgrade` prepared to `ReadyToSet`. The name and the column are
         // what this test is about, so it follows that shape rather than keeping
         // a deleted one alive.
@@ -834,7 +848,7 @@ mod tests {
                     reason: SkipReason::Running,
                 },
                 // A winget skip, to prove the `!` marker is not scoop-only.
-                // It was a report-only skip until Task 13; a declared winget
+                // It was a report-only skip until Phase 4b Task 13; a declared winget
                 // package with no lock entry is the shape that still produces
                 // one, and it is now spelled exactly as scoop's is.
                 Action::Skip {
@@ -1041,7 +1055,7 @@ mod tests {
         // Two reversals, in order. Task 15 made `update::run` resolve winget
         // packages too (`src/update.rs:403-459`), which reversed
         // `a_declared_unlocked_winget_package_is_not_told_to_run_update` into
-        // this test. Task 13 then changed what shape carries the message:
+        // this test. Phase 4b Task 13 then changed what shape carries the message:
         // `SkipReason::ReportedOnly(Divergence::NotLocked)` existed only
         // because refusing the whole run over a missing pin helped nobody for
         // a backend that could not act anyway. Winget acts now, so the planner
@@ -1090,24 +1104,32 @@ mod tests {
 
     // -- render_execution --------------------------------------------------
 
+    /// An `ItemOutcome` for a scoop package. Most tests below are about the
+    /// summary wording or the name column and are scoop-only; the backend
+    /// column has its own test.
+    fn scoop_item(name: &str, result: ItemResult) -> crate::execute::ItemOutcome {
+        crate::execute::ItemOutcome {
+            backend: SCOOP.to_string(),
+            name: Name::new(name),
+            result,
+        }
+    }
+
     #[test]
     fn the_summary_never_claims_more_than_the_run_verified() {
         let ex = Execution {
             results: vec![
-                (Name::new("bat"), ItemResult::Done),
-                (
-                    Name::new("fzf"),
+                scoop_item("bat", ItemResult::Done),
+                scoop_item(
+                    "fzf",
                     ItemResult::Failed {
                         why: "install did not happen".into(),
                         touched: false,
                     },
                 ),
-                (
-                    Name::new("kanata"),
-                    ItemResult::Held("started running".into()),
-                ),
+                scoop_item("kanata", ItemResult::Held("started running".into())),
             ],
-            dropped_ghosts: vec![Name::new("stale")],
+            dropped_ghosts: vec![(SCOOP.to_string(), Name::new("stale"))],
             ..Default::default()
         };
         let out = render_execution(&ex);
@@ -1132,8 +1154,8 @@ mod tests {
         // some were not" here regardless -- a claim this scenario does not
         // support, since nothing on the machine changed at all.
         let ex = Execution {
-            results: vec![(
-                Name::new("fzf"),
+            results: vec![scoop_item(
+                "fzf",
                 ItemResult::Failed {
                     why: "install did not happen".into(),
                     touched: false,
@@ -1174,9 +1196,9 @@ mod tests {
         // claim about a machine that just gained a package.
         let ex = Execution {
             results: vec![
-                (Name::new("bat"), ItemResult::Done),
-                (
-                    Name::new("fzf"),
+                scoop_item("bat", ItemResult::Done),
+                scoop_item(
+                    "fzf",
                     ItemResult::Failed {
                         why: "install did not happen".into(),
                         touched: false,
@@ -1223,7 +1245,7 @@ mod tests {
         // because the fixed column is now one wider (`<14`), the same
         // widening `prepared_line` got.
         let ex = Execution {
-            results: vec![(Name::new("windows-terminal"), ItemResult::Done)],
+            results: vec![scoop_item("windows-terminal", ItemResult::Done)],
             ..Default::default()
         };
         let out = render_execution(&ex);
@@ -1243,7 +1265,7 @@ mod tests {
         // literal, so a padding-width typo in the test itself cannot make
         // this pass for the wrong reason.
         let ex = Execution {
-            results: vec![(Name::new("fzf"), ItemResult::Done)],
+            results: vec![scoop_item("fzf", ItemResult::Done)],
             ..Default::default()
         };
         let out = render_execution(&ex);
@@ -1252,6 +1274,79 @@ mod tests {
             out.contains(&expected),
             "a short name must still be padded out to the column width, not \
              just followed by one bare space: {out}"
+        );
+    }
+
+    #[test]
+    fn every_execution_line_names_the_backend_that_actually_acted_never_a_hardcoded_scoop() {
+        // **The bug this test exists for shipped, briefly, inside Phase 4b Task
+        // 13's own commit.** `render_execution` hardcoded the literal `scoop`
+        // on all four of its line shapes. That was correct for as long as no
+        // `Step::Winget` could reach `execute` -- before Phase 4b Task 13 every winget
+        // action fell into `plan_to_steps`'s routing-bug arm and never became a
+        // step -- and the very change that gave winget an executor turned those
+        // lines into `FAILED  scoop  Brave.Brave`.
+        //
+        // No grep for a deleted sentence could have found it, because the false
+        // word was a backend name, which is why this asserts the column
+        // directly for every shape rather than trusting the plumbing.
+        //
+        // The `note` line was already wrong before Phase 4b Task 13: `reconcile_ghosts`
+        // has dropped ownership records for both backends since Phase 4 Task
+        // 14.
+        let winget_item = |name: &str, result: ItemResult| crate::execute::ItemOutcome {
+            backend: WINGET.to_string(),
+            name: Name::new(name),
+            result,
+        };
+        let ex = Execution {
+            results: vec![
+                winget_item("Brave.Brave", ItemResult::Done),
+                winget_item(
+                    "7zip.7zip",
+                    ItemResult::Failed {
+                        why: "winget install exited 1".into(),
+                        touched: false,
+                    },
+                ),
+                winget_item("Discord.Discord", ItemResult::Held("still running".into())),
+                // One scoop line in the same table, so a mutant that hardcodes
+                // `winget` instead of reading the field cannot pass either.
+                scoop_item("fzf", ItemResult::Done),
+            ],
+            dropped_ghosts: vec![(WINGET.to_string(), Name::new("OpenAI.Codex"))],
+            ..Default::default()
+        };
+        let out = render_execution(&ex);
+        for expected in [
+            format!(
+                "  done    {:<6} {:<14} verified on disk",
+                WINGET, "Brave.Brave"
+            ),
+            format!(
+                "  FAILED  {:<6} {:<14} winget install exited 1",
+                WINGET, "7zip.7zip"
+            ),
+            format!(
+                "  held    {:<6} {:<14} still running",
+                WINGET, "Discord.Discord"
+            ),
+            format!(
+                "  note    {:<6} {:<14} ownership record",
+                WINGET, "OpenAI.Codex"
+            ),
+            format!("  done    {:<6} {:<14} verified on disk", SCOOP, "fzf"),
+        ] {
+            assert!(out.contains(&expected), "missing {expected:?} in:\n{out}");
+        }
+        // The negative control the four assertions above cannot give on their
+        // own: `{:<6}` pads `winget` to exactly its own width, so a line that
+        // still said `scoop` would fail them -- but only because the name
+        // column would shift. This says the false word is simply not there.
+        assert_eq!(
+            out.matches("scoop").count(),
+            1,
+            "exactly one line in this table is scoop's: {out}"
         );
     }
 

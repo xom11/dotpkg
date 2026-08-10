@@ -152,6 +152,19 @@ impl Step {
             Step::Winget(w) => w.app(),
         }
     }
+    /// Which package manager will perform this step.
+    ///
+    /// Read off the variant, so it cannot disagree with what actually runs --
+    /// unlike a backend name carried alongside a step, which could. `execute`
+    /// records it on every `ItemOutcome` so the closing table names the right
+    /// backend; see `ItemOutcome`'s own doc comment for what it used to print
+    /// instead.
+    pub fn backend(&self) -> &'static str {
+        match self {
+            Step::Scoop(_) => crate::model::SCOOP,
+            Step::Winget(_) => crate::model::WINGET,
+        }
+    }
     /// Names a live process might report for this step's package, for
     /// `execute`'s per-step re-sampler. Empty for scoop, whose packages are
     /// already reachable through `Running`'s `dirs` half and whose `bins` the
@@ -422,10 +435,43 @@ pub enum ItemResult {
     Held(String),
 }
 
+/// One package's result, and **which backend it belongs to**.
+///
+/// A struct rather than the `(Name, ItemResult)` tuple this replaced, and the
+/// `backend` is the whole reason: `render_execution` hardcoded the string
+/// `"scoop"` on every line it printed. That was *correct* for as long as no
+/// `Step::Winget` could reach `execute` -- until Phase 4b Task 13, every
+/// winget action fell into `plan_to_steps`'s routing-bug arm and never became
+/// a step at all -- and it became false the moment winget got an executor,
+/// printing `FAILED scoop Brave.Brave` for a winget package. Nothing in the
+/// type system objected, and no grep for a deleted sentence could have found
+/// it, because the false word was a backend name.
+///
+/// A named struct, not a third tuple element: `(Name, &str, ItemResult)` puts
+/// two strings side by side with nothing but position telling them apart,
+/// which is the shape this crate splits types to avoid (see `Step`/`ScoopStep`
+/// and `Outcome::ReadyToFetch`/`ReadyToRemove`).
+///
+/// `backend` is an owned `String` to match `Action::backend` and
+/// `Installed::backend` rather than inventing a third convention -- the two
+/// producers are `Step::backend()` (`&'static str`) and an `Action`'s own
+/// field, and one of them has nothing static to lend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemOutcome {
+    pub backend: String,
+    pub name: Name,
+    pub result: ItemResult,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Execution {
-    pub results: Vec<(Name, ItemResult)>,
-    pub dropped_ghosts: Vec<Name>,
+    pub results: Vec<ItemOutcome>,
+    /// Ownership records dropped because nothing by that name is installed
+    /// any more, each with the backend it was dropped from -- `reconcile_ghosts`
+    /// has reconciled **both** backends since Phase 4 Task 14, so a bare
+    /// `Name` here was already enough to make `render_execution` mislabel a
+    /// winget ghost as scoop's before Phase 4b Task 13 ever ran.
+    pub dropped_ghosts: Vec<(String, Name)>,
     /// `Some(reason)` when `write_recovery` failed. Deliberately not a
     /// refusal -- the run still went ahead, because `execute` does not get
     /// to decide that a missing safety net outweighs the packages the user
@@ -439,13 +485,13 @@ impl Execution {
     pub fn changed(&self) -> usize {
         self.results
             .iter()
-            .filter(|(_, r)| *r == ItemResult::Done)
+            .filter(|o| o.result == ItemResult::Done)
             .count()
     }
     pub fn failed(&self) -> usize {
         self.results
             .iter()
-            .filter(|(_, r)| matches!(r, ItemResult::Failed { .. }))
+            .filter(|o| matches!(o.result, ItemResult::Failed { .. }))
             .count()
     }
     /// How many `Failed` results happened only after the machine was already
@@ -460,13 +506,13 @@ impl Execution {
     pub fn touched(&self) -> usize {
         self.results
             .iter()
-            .filter(|(_, r)| matches!(r, ItemResult::Failed { touched: true, .. }))
+            .filter(|o| matches!(o.result, ItemResult::Failed { touched: true, .. }))
             .count()
     }
     pub fn held(&self) -> usize {
         self.results
             .iter()
-            .filter(|(_, r)| matches!(r, ItemResult::Held(_)))
+            .filter(|o| matches!(o.result, ItemResult::Held(_)))
             .count()
     }
     /// Defined by what the operator must do next, not by what happened
@@ -674,19 +720,24 @@ pub fn execute(
         // Called here, per step -- not hoisted out of the loop. See the
         // function doc for why a snapshot cannot do this job.
         if running().covers_any(&app, step.guard_names()) {
-            ex.results.push((
-                app,
-                ItemResult::Held(
+            ex.results.push(ItemOutcome {
+                backend: step.backend().into(),
+                name: app,
+                result: ItemResult::Held(
                     "started running since the plan was made -- stop it and run again".into(),
                 ),
-            ));
+            });
             continue;
         }
         let r = match run_step(root, m, wm, state, step) {
             StepOutcome::Done => ItemResult::Done,
             StepOutcome::Failed { why, touched } => ItemResult::Failed { why, touched },
         };
-        ex.results.push((app, r));
+        ex.results.push(ItemOutcome {
+            backend: step.backend().into(),
+            name: app,
+            result: r,
+        });
     }
     Ok(ex)
 }

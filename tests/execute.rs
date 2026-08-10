@@ -10,6 +10,22 @@ use dotpkg::state::{Ownership, State};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
+/// An `ItemOutcome` for a scoop package.
+///
+/// `Execution::results` carries the backend per item since Phase 4b Task 13 --
+/// `render_execution` used to hardcode the word `scoop` on every line it
+/// printed, which stopped being true the moment a `Step::Winget` could reach
+/// `execute`. The exit-code tests below are backend-agnostic, so they say
+/// scoop once here rather than at every literal; the backend column itself is
+/// pinned in `src/render.rs`.
+fn scoop_item(name: &str, result: ItemResult) -> ItemOutcome {
+    ItemOutcome {
+        backend: SCOOP.to_string(),
+        name: Name::new(name),
+        result,
+    }
+}
+
 const BODY_A: &str = r#"{"version":"1.0.0","url":"https://good/v1.zip"}"#;
 
 struct Tree(tempfile::TempDir);
@@ -700,9 +716,9 @@ fn exit_code_is_0_for_clean_1_for_every_failure_shape_and_2_for_refused() {
 
     let mixed = Execution {
         results: vec![
-            (Name::new("a"), ItemResult::Done),
-            (
-                Name::new("b"),
+            scoop_item("a", ItemResult::Done),
+            scoop_item(
+                "b",
                 ItemResult::Failed {
                     why: "no".into(),
                     touched: false,
@@ -719,8 +735,8 @@ fn exit_code_is_0_for_clean_1_for_every_failure_shape_and_2_for_refused() {
     );
 
     let untouched_failure = Execution {
-        results: vec![(
-            Name::new("c"),
+        results: vec![scoop_item(
+            "c",
             ItemResult::Failed {
                 why: "install did not happen".into(),
                 touched: false,
@@ -747,8 +763,8 @@ fn exit_code_is_0_for_clean_1_for_every_failure_shape_and_2_for_refused() {
     // The touched/untouched distinction survives only in
     // `render_execution`'s wording -- see `Execution::touched`'s doc comment.
     let touched_but_not_done = Execution {
-        results: vec![(
-            Name::new("d"),
+        results: vec![scoop_item(
+            "d",
             ItemResult::Failed {
                 why: "install did not happen".into(),
                 touched: true,
@@ -778,7 +794,7 @@ fn exit_code_asserts_a_refused_run_changed_nothing() {
     // both be true, because a refusal means `execute` returned `Err` before
     // performing a single step.
     let bad = Execution {
-        results: vec![(Name::new("a"), ItemResult::Done)],
+        results: vec![scoop_item("a", ItemResult::Done)],
         dropped_ghosts: Vec::new(),
         recovery_write_failed: None,
     };
@@ -793,8 +809,8 @@ fn a_held_only_run_is_outstanding_and_exits_1_not_0() {
     // night: a scheduled run would report success forever. `held()` alone,
     // with `failed() == 0` and `changed() == 0`, must still be exit 1.
     let held_only = Execution {
-        results: vec![(
-            Name::new("kanata"),
+        results: vec![scoop_item(
+            "kanata",
             ItemResult::Held("started running since the plan was made".into()),
         )],
         dropped_ghosts: Vec::new(),
@@ -839,7 +855,10 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert!(
-        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        matches!(
+            &ex.results[0].result,
+            ItemResult::Failed { touched: true, .. }
+        ),
         "the uninstall really ran before the install failed -- exit_code must \
          not be able to call this shape untouched: {:?}",
         ex.results
@@ -943,7 +962,10 @@ fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert!(
-        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        matches!(
+            &ex.results[0].result,
+            ItemResult::Failed { touched: true, .. }
+        ),
         "the half-install really left residue on disk: {:?}",
         ex.results
     );
@@ -1026,7 +1048,10 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
 
     assert_eq!(ex.failed(), 1, "{:?}", ex.results);
     assert!(
-        matches!(&ex.results[0].1, ItemResult::Failed { touched: true, .. }),
+        matches!(
+            &ex.results[0].result,
+            ItemResult::Failed { touched: true, .. }
+        ),
         "a different manifest was really installed: {:?}",
         ex.results
     );
@@ -1617,7 +1642,7 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
     )
     .unwrap();
     assert_eq!(ex.held(), 1, "got {:?}", ex.results);
-    assert!(matches!(&ex.results[0].1, ItemResult::Held(_)));
+    assert!(matches!(&ex.results[0].result, ItemResult::Held(_)));
 }
 
 // -- Task 7: root_looks_like_scoop only when a scoop step exists ----------

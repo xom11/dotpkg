@@ -229,12 +229,12 @@ fn a_declared_unlocked_winget_package_is_reported_rather_than_silently_dropped()
     // must not be told `nothing to do`. Silence is the one answer that is
     // indistinguishable from "dotpkg never read your file".
     //
-    // **The reason has changed twice.** Task 14 gave winget a `BackendView`
+    // **The reason has changed twice.** Phase 4 Task 14 gave winget a `BackendView`
     // whose capability was report-only, and this had to be
     // `ReportedOnly(Divergence::NotLocked)` rather than plain
     // `SkipReason::NotLocked` because `NotLocked` fails the whole `apply` run
     // and `apply` could not have installed the package even with a pin --
-    // refusing every unrelated scoop action over it helped nobody. Task 13
+    // refusing every unrelated scoop action over it helped nobody. Phase 4b Task 13
     // gave winget an executor, which removes that whole argument: `apply` may
     // still not resolve a version itself, `dotpkg update` can, and the run
     // must refuse rather than quietly install nothing -- exactly as it does
@@ -306,7 +306,7 @@ fn declaring_winget_packages_does_not_disturb_the_scoop_plan() {
 fn a_declared_locked_uninstalled_winget_package_is_a_real_install_now() {
     // **The capability flip, at the planner level.** This is the `None` arm of
     // the same match `a_declared_locked_package_that_is_absent_is_an_install`
-    // exercises for scoop, and until Task 13 it produced
+    // exercises for scoop, and until Phase 4b Task 13 it produced
     // `Skip { ReportedOnly(Divergence::Install { .. }) }` and
     // `change_count() == 0`, because nothing could install a winget package.
     // Something can now, so it is an `Action::Install` and it counts.
@@ -1333,7 +1333,7 @@ fn a_declared_locked_winget_package_is_not_installed_again_when_the_scan_failed(
     // An empty scan would turn every declared+locked winget package into an
     // `Install` for a package that is already there. It was written one task
     // ahead of the danger: it was harmless while a winget `Install` was only a
-    // report line, and Task 13's `Capability::Acts` is exactly the day it
+    // report line, and Phase 4b Task 13's `Capability::Acts` is exactly the day it
     // stopped being harmless. `SkipReason::Unscannable` is what keeps it safe,
     // and this is the test that says so.
     let p = plan(

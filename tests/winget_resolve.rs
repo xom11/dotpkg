@@ -5,7 +5,7 @@
 //! reason it is duplicated there: each integration test binary is its own
 //! compilation unit).
 //!
-//! From Task 13 onward this file also carries `Winget::resolve_latest` and
+//! From Phase 4 Task 13 onward this file also carries `Winget::resolve_latest` and
 //! `Winget::resolve_installed` -- the two `Backend` trait methods that make
 //! `Backend` a real seam rather than decoration. Those tests DO use
 //! `FakeWinget` (`tests/common/fake_winget.rs`), so `mod common;` is pulled
@@ -130,9 +130,9 @@ fn parse_show_and_parse_versions_agree_on_a_version_string_for_the_same_package(
     );
 }
 
-// -- Winget::resolve_latest / Winget::resolve_installed (Task 13) ---------
+// -- Winget::resolve_latest / Winget::resolve_installed (Phase 4 Task 13) ---------
 //
-// The single check that says whether Task 13 worked lives in
+// The single check that says whether Phase 4 Task 13 worked lives in
 // `src/update.rs`, not here: `update::run` must no longer name
 // `bucket::resolve_latest` directly. These tests are what they became
 // possible to write once that was true -- winget's own two resolvers,

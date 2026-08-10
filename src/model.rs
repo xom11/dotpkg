@@ -253,10 +253,15 @@ impl Running {
             || inst.bins.iter().any(|b| self.names.contains(b))
     }
 
-    /// The name-and-directory halves of `covers`, for a caller that has only a
-    /// package name. The `bins` half cannot be consulted here, so this is
-    /// strictly weaker: use `covers` wherever an `Installed` is available.
-    pub fn covers_name(&self, name: &Name) -> bool {
+    /// The name-and-directory halves of `covers`, factored out for
+    /// `covers_any` to build on -- private, because `covers_any` is now the
+    /// only caller. It used to be `pub` for a caller that had only a package
+    /// name and no guard list; `covers_any` is what that caller reaches for
+    /// today, when it holds a `Step` (a name plus a guard list) rather than an
+    /// `Installed`. The `bins` half cannot be consulted here, so this alone is
+    /// strictly weaker than `covers`; use `covers` wherever an `Installed` is
+    /// available.
+    fn covers_name(&self, name: &Name) -> bool {
         self.dirs.contains(name) || self.names.contains(name.key())
     }
 

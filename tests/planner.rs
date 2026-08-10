@@ -402,21 +402,35 @@ fn a_winget_package_already_at_the_locked_version_produces_no_action_either() {
 }
 
 #[test]
-fn a_running_winget_package_that_differs_from_the_lock_is_skipped_as_running_not_reported() {
-    // Running outranks ReportedOnly, the same way it outranks Upgrade/
-    // Downgrade for scoop: a live process is the more urgent fact regardless
-    // of whether this build could act on the package at all.
+fn a_running_winget_package_is_skipped_for_running_not_reported_only() {
+    // The fixture this replaces used a process named "brave.brave" -- the
+    // whole dotted id. Nothing produces that: Brave's process is brave.exe,
+    // which `sys::normalize` reports as "brave". So the old test was green
+    // against a machine state that cannot exist, and on a real machine the
+    // guard caught 0 of 36 installed winget packages.
+    //
+    // Built through `rows_to_scan` on purpose: a hand-made `Installed` would
+    // let this test pass with `bins` values production never produces.
+    let scan = dotpkg::backend::winget::rows_to_scan(vec![dotpkg::backend::winget::WingetRow {
+        name: "Brave".to_string(),
+        id: "Brave.Brave".to_string(),
+        version: "151.1.93.132".to_string(),
+        available: None,
+        source: Some("winget".to_string()),
+    }]);
+
     let p = plan(
         &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
         &lock::parse(
             "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
         )
         .unwrap(),
-        &[installed_winget("Brave.Brave", "151.1.93.132")],
-        &[],
+        &scan.installed,
+        &scan.opaque,
         &State::default(),
         &Running::new(
-            BTreeSet::from(["brave.brave".to_string()]),
+            // What a real machine reports.
+            BTreeSet::from(["brave".to_string()]),
             Default::default(),
         ),
         &[],
@@ -428,7 +442,46 @@ fn a_running_winget_package_that_differs_from_the_lock_is_skipped_as_running_not
             name: "Brave.Brave".into(),
             reason: SkipReason::Running,
         }],
-        "a running winget package must never turn into a ReportedOnly line"
+        "a running winget package must be Running, never a version change"
+    );
+}
+
+#[test]
+fn an_idle_winget_package_still_reports_its_version_difference() {
+    // The positive control. Without it, a planner that returned
+    // SkipReason::Running for every winget package would satisfy the test
+    // above -- which is exactly the shape that made the old fixture useless.
+    let scan = dotpkg::backend::winget::rows_to_scan(vec![dotpkg::backend::winget::WingetRow {
+        name: "Brave".to_string(),
+        id: "Brave.Brave".to_string(),
+        version: "151.1.93.132".to_string(),
+        available: None,
+        source: Some("winget".to_string()),
+    }]);
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &scan.installed,
+        &scan.opaque,
+        &State::default(),
+        // Nothing running.
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(p.actions.len(), 1, "got {:?}", p.actions);
+    assert!(
+        !matches!(
+            &p.actions[0],
+            Action::Skip {
+                reason: SkipReason::Running,
+                ..
+            }
+        ),
+        "an idle package must not be Running: {:?}",
+        p.actions[0]
     );
 }
 

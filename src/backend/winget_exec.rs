@@ -206,6 +206,119 @@ pub trait WingetMutator {
     fn list_one(&self, id: &Name) -> Result<CmdOut, CmdError>;
 }
 
+/// What a post-mutation rescan of one id established, or admits it could not.
+///
+/// **This is a known structural weakness, not a full verdict.**
+/// `verify::verdict` (scoop's side of this same seam) compares the installed
+/// manifest's *bytes* against the staged file -- a content address, checked
+/// against something the mutation itself did not write. Winget has no
+/// equivalent: there is no manifest, no hash, nothing independent of winget
+/// to check winget's own write against. `winget_verdict` re-runs `winget
+/// list` and reads the answer back from the very tool that just performed
+/// the mutation -- this module's own doc comment names the hazard directly:
+/// "a fake that both performs and reports the mutation proves only that it
+/// is self-consistent." A `WingetState::At` here means "winget now reports
+/// this version", not "this version is, independent of winget, what is on
+/// disk". It is the same kind of gap `bins` being empty already is for this
+/// backend: real, structural, and worth saying plainly rather than dressing
+/// this check up as equal in strength to scoop's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WingetState {
+    /// The rescan found no installed row at all -- the desired end state
+    /// after a `Remove`, not a failure. See `winget_verdict`'s own doc
+    /// comment for why this must be a state, never an error.
+    Absent,
+    /// The rescan found exactly one unambiguous, source-backed row at this
+    /// version.
+    At(String),
+    /// Present, but `rows_to_scan`'s rules say its state cannot be
+    /// established: sourceless, a `"> "`-prefixed version winget will not
+    /// commit to, or two rows disagreeing on version. The string names why.
+    Unconfirmable(String),
+}
+
+/// The rescan that is the verdict for a winget mutation, because winget's own
+/// exit code cannot be: measured, `0x8A15002B` (`NO_AVAILABLE_UPGRADE`) comes
+/// back both when `set` asked for the version already installed (success)
+/// and when it asked for a downgrade winget declined (failure), and
+/// `0x8A150014` (`NO_APPLICATIONS_FOUND`) from `uninstall` means "no
+/// *installed* package", which for a `Remove` step is the desired end state
+/// and is indistinguishable by code from "that id is wrong". So this
+/// function ignores the mutation's own exit code entirely and instead runs
+/// `list_one_argv`'s rescan and judges from what is actually there.
+///
+/// **Re-applies `rows_to_scan`'s three opaque rules on purpose, rather than
+/// writing a second, looser check just for the executor.** An id that comes
+/// back sourceless, `"> "`-prefixed, or version-disagreeing after a mutation
+/// is *"dotpkg cannot confirm this"*, not *"done"* -- a separate, executor-only
+/// check would make this function more credulous than the scanner it is
+/// supposed to agree with.
+///
+/// See `WingetState`'s own doc comment for the asymmetry this leaves: there
+/// is no independent oracle here, unlike `verify::verdict`'s manifest-byte
+/// comparison on the scoop side.
+pub fn winget_verdict(m: &dyn WingetMutator, id: &Name) -> Result<WingetState, CmdError> {
+    let out = m.list_one(id)?;
+    if out.code == crate::backend::winget::NO_APPLICATIONS_FOUND {
+        return Ok(WingetState::Absent);
+    }
+    if out.code != 0 {
+        return Ok(WingetState::Unconfirmable(format!(
+            "winget list exited {}: {}",
+            out.code,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        )));
+    }
+    let rows = match crate::backend::winget::parse_list(&out.stdout) {
+        Ok(rows) => rows,
+        Err(e) => return Ok(WingetState::Unconfirmable(format!("{e:#}"))),
+    };
+    if rows.is_empty() {
+        // Exit 0 with no rows. Measured shape: `list -s msstore` prints the
+        // byte-identical "not found" sentence and exits 0, so a zero code
+        // does not imply a row exists.
+        return Ok(WingetState::Absent);
+    }
+    let scan = crate::backend::winget::rows_to_scan(rows);
+    if let Some(inst) = scan.installed.iter().find(|i| &i.name == id) {
+        return Ok(WingetState::At(inst.version.clone()));
+    }
+    if scan.opaque.iter().any(|o| o == id) {
+        // `rows_to_scan` warns per-id for two of its three opaque rules (a
+        // `"> "`-prefixed version, and disagreeing versions) but not for the
+        // third: a sourceless row only ever adds one AGGREGATE warning after
+        // its loop ("N installed entries have no winget Source ..."),
+        // deliberately, to avoid 84 lines on an ordinary machine. Verified:
+        // for a single sourceless row that aggregate sentence is exactly
+        // what `scan.warnings` holds, and it never names the id -- reading
+        // `"1 installed entries have no winget Source ..."` as the reason
+        // for one specific package is wrong, not just inelegant. So: use the
+        // per-id warning when `rows_to_scan` wrote one (it already names
+        // `id` and, for the greater-prefix case, the exact version text this
+        // function's own caller needs to see), and fall back to a
+        // purpose-written, id-scoped sentence only when it did not.
+        let reason = scan
+            .warnings
+            .iter()
+            .find(|w| w.starts_with(&format!("{id}:")))
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "{id}: winget printed no Source for this row, so its state cannot be \
+                     compared against any index"
+                )
+            });
+        return Ok(WingetState::Unconfirmable(reason));
+    }
+    // A row came back and it is neither this id's `Installed` nor this id's
+    // `opaque` entry. `-e --id` cannot match a different package (measured:
+    // `--id` never fuzzy-matches, with or without `--exact`), so this is a
+    // shape nothing has produced -- reported, never guessed at.
+    Ok(WingetState::Unconfirmable(format!(
+        "winget list -e --id {id} returned rows that do not name {id}"
+    )))
+}
+
 /// The real `winget.exe`, invoked as a subprocess. Only production code
 /// (`main.rs`, once a later task wires it up) may construct this -- every
 /// test uses a fake that implements `WingetMutator` instead.

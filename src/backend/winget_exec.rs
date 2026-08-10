@@ -215,9 +215,9 @@ pub trait WingetMutator {
 /// equivalent: there is no manifest, no hash, nothing independent of winget
 /// to check winget's own write against. `winget_verdict` re-runs `winget
 /// list` and reads the answer back from the very tool that just performed
-/// the mutation -- this module's own doc comment names the hazard directly:
-/// "a fake that both performs and reports the mutation proves only that it
-/// is self-consistent." A `WingetState::At` here means "winget now reports
+/// the mutation -- `src/execute.rs`'s own module doc names the hazard
+/// directly: "a fake that both performs and reports the mutation proves only
+/// that it is self-consistent." A `WingetState::At` here means "winget now reports
 /// this version", not "this version is, independent of winget, what is on
 /// disk". It is the same kind of gap `bins` being empty already is for this
 /// backend: real, structural, and worth saying plainly rather than dressing
@@ -228,8 +228,11 @@ pub enum WingetState {
     /// after a `Remove`, not a failure. See `winget_verdict`'s own doc
     /// comment for why this must be a state, never an error.
     Absent,
-    /// The rescan found exactly one unambiguous, source-backed row at this
-    /// version.
+    /// The rescan found one unambiguous, source-backed entry at this
+    /// version -- either a single row, or several rows that all agreed on
+    /// version and were collapsed into one entry (`rows_to_scan` warns when
+    /// it collapses duplicates; see its own doc comment, reason list item
+    /// after the three opaque rules).
     At(String),
     /// Present, but `rows_to_scan`'s rules say its state cannot be
     /// established: sourceless, a `"> "`-prefixed version winget will not
@@ -274,9 +277,17 @@ pub fn winget_verdict(m: &dyn WingetMutator, id: &Name) -> Result<WingetState, C
         Err(e) => return Ok(WingetState::Unconfirmable(format!("{e:#}"))),
     };
     if rows.is_empty() {
-        // Exit 0 with no rows. Measured shape: `list -s msstore` prints the
-        // byte-identical "not found" sentence and exits 0, so a zero code
-        // does not imply a row exists.
+        // Exit 0 with no rows. Not measured for THIS argv (`-e --id <id>`):
+        // every captured `-e --id` call that matched nothing came back
+        // through `NO_APPLICATIONS_FOUND` instead, handled above, so this
+        // branch is defensive against a shape this crate has never
+        // reproduced, not a confirmed one. The general principle behind it
+        // is measured, though, on a different shape --
+        // `NO_APPLICATIONS_FOUND`'s own doc comment records that `list -s
+        // msstore` prints the byte-identical "not found" sentence and exits
+        // 0, so a zero exit code is known not to guarantee a row exists for
+        // at least one winget argv. Guarding here costs nothing even though
+        // `-e --id` itself has never been seen to take this path.
         return Ok(WingetState::Absent);
     }
     let scan = crate::backend::winget::rows_to_scan(rows);

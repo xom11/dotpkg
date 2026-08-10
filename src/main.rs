@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use dotpkg::backend::winget_exec::RealWingetMutator;
 use dotpkg::backend::{
     scoop::Scoop,
-    winget::{RealWinget, Winget},
+    winget::{installed_at_user_scope, RealWinget, Winget},
     Backend, Scan, ScanOutcome,
 };
 use dotpkg::execute::{ScoopStep, Step, WingetStep};
@@ -545,6 +545,50 @@ fn main() -> Result<()> {
                     "this run would remove {removals} package(s) and --yes was passed. \
                      Removals need --allow-prune as well."
                 ));
+            }
+
+            // After `gate_removals` (a prune is only ever reachable through it,
+            // and a held one must not be asked about) and before `execute`, so
+            // a refusal lands before the recovery file is written, before the
+            // confirmation prompt asks about a run that cannot happen, and
+            // before one single step runs. `refuse` exits 2, which this
+            // project's exit codes mean as "the machine was not touched".
+            //
+            // Last of the refusals rather than first, deliberately: this is the
+            // only one that spawns subprocesses -- one `winget list` per winget
+            // removal, ~1 s each -- and the two above it (the converged-machine
+            // return and the `--yes`-without-`--allow-prune` gate) decide from
+            // the step list alone. Same reasoning as the mass-prune and
+            // lock-coherence guards running before the machine is scanned at
+            // all: a guard that needs nothing should not wait behind one that
+            // needs a subprocess. Every guard here is still ahead of every
+            // mutation, which is the property that matters.
+            //
+            // The closure is the only place a `None` from the scope query is
+            // turned into a decision, and it turns it into "let it through" --
+            // the same rule `sys::elevated()`'s own `None` follows, and it says
+            // so out loud rather than silently. `run_winget_step`'s
+            // `CANNOT_UNINSTALL_ELEVATED` translation is what catches whatever
+            // this lets through: a pre-check plus a translation, not either
+            // alone.
+            let winget_read = RealWinget;
+            let is_user_scope = |id: &Name| match installed_at_user_scope(&winget_read, id) {
+                Some(answer) => answer,
+                None => {
+                    eprintln!(
+                        "warning: could not tell whether {id} is installed for user scope, so \
+                         its removal is being attempted. If winget refuses it, the failure \
+                         will say so and re-running unelevated is the fix."
+                    );
+                    false
+                }
+            };
+            if let Err(why) = dotpkg::apply::refuse_elevated_winget_removal(
+                &steps,
+                dotpkg::sys::elevated(),
+                &is_user_scope,
+            ) {
+                refuse(anyhow::anyhow!("{why}"));
             }
 
             let (replacements, installs) = count_replaces_and_installs(&steps);

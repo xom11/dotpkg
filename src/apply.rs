@@ -1023,6 +1023,94 @@ pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<
     (kept, held)
 }
 
+/// Refuse a run that would attempt a winget removal this crate has *measured*
+/// it cannot perform.
+///
+/// Measured on a14 (`docs/measurements-2026-08-10-winget-write-path.md` §5):
+/// `winget install` of a user-scope package succeeds from an elevated session,
+/// and `winget uninstall` of that same package is then refused with
+/// `0x8A15007D` -- `The package installed for user scope cannot be uninstalled
+/// when running with administrator privileges.` -- repeatably, `--all-versions`
+/// included. The paired positive control, same machine and same argv at medium
+/// integrity, exited `0` and removed it. dotpkg's whole shape is a scheduled
+/// `apply`, so an elevated run can install a package and then be
+/// *structurally* unable to remove it: every prune failing forever, not
+/// transiently.
+///
+/// Called after `gate_removals` and before `execute`, so a refusal happens
+/// before the recovery file is written and before one single step runs -- the
+/// same "fail closed at the point of use" shape as
+/// `execute::root_looks_like_scoop`.
+///
+/// **`elevated` is a parameter, not a `sys::elevated()` call in here.** That
+/// function reads the real process token, so a test's verdict would otherwise
+/// depend on how `cargo test` itself was launched -- the non-discriminating
+/// shape Phase 4's `resolve_root` test had. `is_user_scope` is injected for the
+/// same reason, and because it is a `winget list` subprocess.
+///
+/// **`None` must not refuse.** `sys::elevated()` returns it for "could not
+/// tell", and unconditionally on every non-Windows target. A machine whose
+/// token query failed is a machine dotpkg knows nothing about, and refusing
+/// every winget removal there would be a refusal caused by a missing answer
+/// rather than by a measured hazard. `run_winget_step` still translates
+/// `CANNOT_UNINSTALL_ELEVATED` into a named failure if it happens anyway: a
+/// pre-check plus a translation, not either alone, because the pre-check
+/// cannot be perfect.
+///
+/// **Narrow on purpose: user-scope packages only.** Whether a *machine*-scope
+/// package can be removed while elevated is **unmeasured** -- §5's trio is a
+/// user-scope package throughout -- so refusing on elevation alone would
+/// invent a refusal, and would break the removal an elevated scheduled `apply`
+/// is most likely to be for. The scope query's own basis is measured in both
+/// directions (§15: 19 ids exit `0` under `--scope user` and non-zero under
+/// `--scope machine`; `Microsoft.VisualStudio.2022.BuildTools` does the
+/// reverse).
+///
+/// **Cost: `is_user_scope` is asked once per winget removal, and only on an
+/// elevated run.** Each ask is a ~1 s `winget list` subprocess
+/// (`docs/measurements-2026-08-09-winget.md`), so the two cheap answers come
+/// first: a run that is not elevated (or cannot tell) returns before asking
+/// anything at all, and no scoop step and no `WingetStep::Set` is ever asked
+/// about. Every winget removal in an elevated run *is* asked, without
+/// short-circuiting on the first hit -- to let the run through, every one of
+/// them has to be asked anyway, so stopping early would only ever buy time on
+/// a run that is about to refuse, at the price of naming one package when the
+/// operator needs the whole list to know what de-elevating will fix.
+pub fn refuse_elevated_winget_removal(
+    steps: &[Step],
+    elevated: Option<bool>,
+    is_user_scope: &dyn Fn(&Name) -> bool,
+) -> Result<(), String> {
+    if elevated != Some(true) {
+        return Ok(());
+    }
+    let blocked: Vec<String> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Winget(WingetStep::Remove { id, .. }) => Some(id),
+            // Wildcard-free on winget's side, so a new `WingetStep` variant
+            // has to come back here and say whether it removes anything.
+            // Scoop's three collapse: none of them ever goes near winget.
+            Step::Winget(WingetStep::Set { .. }) | Step::Scoop(_) => None,
+        })
+        .filter(|id| is_user_scope(id))
+        .map(|id| id.to_string())
+        .collect();
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "this run is elevated, and winget refuses to uninstall a package installed for \
+         user scope from an elevated process -- measured exit 0x8A15007D, \"The package \
+         installed for user scope cannot be uninstalled when running with administrator \
+         privileges.\" {} removal(s) in this run are affected: {}. The same uninstall was \
+         measured to succeed from a session that is not elevated, so re-run `dotpkg \
+         apply` without elevation. Nothing has been changed.",
+        blocked.len(),
+        blocked.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

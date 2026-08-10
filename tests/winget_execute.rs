@@ -1,7 +1,8 @@
 mod common;
 
+use common::fake_winget::FakeWinget;
 use common::fake_winget_mutator::FakeWingetMutator;
-use dotpkg::backend::winget::{CmdError, NO_APPLICATIONS_FOUND};
+use dotpkg::backend::winget::{installed_at_user_scope, CmdError, NO_APPLICATIONS_FOUND};
 use dotpkg::backend::winget_exec::{
     list_one_argv, set_argv, winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED,
     NO_AVAILABLE_UPGRADE,
@@ -336,5 +337,104 @@ fn a_set_over_an_adopted_package_keeps_it_adopted() {
         st.ownership(WINGET, &id),
         Some(Ownership::Adopted),
         "a Set over an adopted package must leave it adopted, not claim it"
+    );
+}
+
+// -- Task 15: the scope query the elevation pre-check is backed by ---------
+
+#[test]
+fn the_scope_query_asks_section_15s_argv_and_answers_its_two_measured_exit_codes() {
+    // `apply::refuse_elevated_winget_removal` takes `is_user_scope` as an
+    // injected closure; this is the one function that answers it for real, so
+    // the whole pre-check is only as good as this argv. Both directions are
+    // measured on a14 (`docs/measurements-2026-08-10-winget-write-path.md`
+    // §15), which is why they are asserted together rather than in two tests:
+    // a version that hardcoded either answer would satisfy one half and fail
+    // the other.
+    //
+    // `ajeetdsouza.zoxide` is one of the 19 ids §15 found exiting `0` under
+    // `--scope user` and `0x8A150014` under `--scope machine`, and
+    // `list-single.txt` is that exact `list -e --id ajeetdsouza.zoxide` call's
+    // real 127 bytes (`tests/fixtures/winget/PROVENANCE.md`).
+    let zoxide = Name::new("ajeetdsouza.zoxide");
+    let user = FakeWinget::returning(0, fixture("list-single.txt"));
+    assert_eq!(
+        installed_at_user_scope(&user, &zoxide),
+        Some(true),
+        "exit 0 with the id's own row IS the user-scope answer"
+    );
+    assert_eq!(
+        user.calls(),
+        vec![vec![
+            "list".to_string(),
+            "-e".to_string(),
+            "--id".to_string(),
+            "ajeetdsouza.zoxide".to_string(),
+            "--scope".to_string(),
+            "user".to_string(),
+            "--disable-interactivity".to_string(),
+        ]],
+        "the argv §15 measured, and exactly one call: each one is a ~1 s \
+         subprocess the pre-check pays per winget removal"
+    );
+
+    // The reverse direction, spelled out in §15 against the real machine:
+    // `--scope user` on a machine-scoped package exits 0x8A150014 with the
+    // 53-byte sentence.
+    let build_tools = Name::new("Microsoft.VisualStudio.2022.BuildTools");
+    let machine = FakeWinget::returning(NO_APPLICATIONS_FOUND, fixture("list-not-found.txt"));
+    assert_eq!(
+        installed_at_user_scope(&machine, &build_tools),
+        Some(false),
+        "not installed at user scope -- and a machine-scope removal must NOT be refused"
+    );
+}
+
+#[test]
+fn a_scope_answer_the_measurements_do_not_cover_is_could_not_tell_not_a_verdict() {
+    // `None` travels to `main.rs`, which lets the removal proceed and says so.
+    // That is the same rule `sys::elevated()`'s own `None` follows: a refusal
+    // must be caused by a measured hazard, never by a missing answer -- and
+    // `run_winget_step`'s `CANNOT_UNINSTALL_ELEVATED` translation is what
+    // catches the case this lets through.
+    let id = Name::new("ajeetdsouza.zoxide");
+
+    // The measured trap this crate has been bitten by once already: `list -s
+    // msstore` prints the byte-identical 53-byte "No installed package found"
+    // sentence and exits **0** (`PROVENANCE.md`). Trusting exit 0 alone would
+    // read that as "installed at user scope" and refuse a removal on the
+    // strength of a sentence saying the opposite.
+    let sentence_at_zero = FakeWinget::returning(0, fixture("list-source-filter-empty.txt"));
+    assert_eq!(
+        installed_at_user_scope(&sentence_at_zero, &id),
+        None,
+        "exit 0 with no row for this id is not an answer"
+    );
+
+    // A row for a DIFFERENT id at exit 0: `-e --id` is not supposed to be able
+    // to produce this, so it is not an answer either.
+    let other_row = FakeWinget::returning(0, fixture("list-single-with-available.txt"));
+    assert_eq!(
+        installed_at_user_scope(&other_row, &id),
+        None,
+        "a row for ducaale.xh says nothing about ajeetdsouza.zoxide"
+    );
+
+    // An exit code no scope measurement covers.
+    let unmeasured = FakeWinget::returning(NO_AVAILABLE_UPGRADE, String::new());
+    assert_eq!(
+        installed_at_user_scope(&unmeasured, &id),
+        None,
+        "an exit code §15 never saw must not be read as either scope"
+    );
+
+    // No winget at all. A machine with no `winget.exe` cannot have a winget
+    // removal in its plan, so this is defence in depth rather than a live
+    // path -- but it must not be a refusal.
+    let absent = FakeWinget::failing_to_spawn();
+    assert_eq!(
+        installed_at_user_scope(&absent, &id),
+        None,
+        "winget could not be run: an absence of an answer, not a hazard"
     );
 }

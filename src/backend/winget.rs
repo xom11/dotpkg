@@ -901,6 +901,70 @@ pub(crate) fn version_liveness(
     parse_show(&out.stdout).map_err(|e| format!("{e:#}"))
 }
 
+/// Is `id` installed **at user scope**, as far as winget will say?
+///
+/// The one production answer for `apply::refuse_elevated_winget_removal`'s
+/// injected `is_user_scope`, so the whole pre-check is only as good as this
+/// argv. A free function taking `&dyn WingetCmd` rather than a `Winget<C>`
+/// method, for the same reason `version_liveness` above is one: `main.rs` holds
+/// the seam at that point, not a backend.
+///
+/// `["list", "-e", "--id", <id>, "--scope", "user", "--disable-interactivity"]`
+/// -- the exact argv measured on a14
+/// (`docs/measurements-2026-08-10-winget-write-path.md` §15), and `-e` here for
+/// the same reason as in `list_one_argv`: it is what makes `--id` exact, and
+/// the id handed in comes from `pkg.lock`, which holds the spelling winget
+/// itself produced.
+///
+/// **Three answers, not two.** `Some(true)` and `Some(false)` are the two
+/// shapes §15 measured, in both directions: 19 of the 36 source-backed
+/// installed ids exit `0` under `--scope user` and `0x8A150014` under `--scope
+/// machine`, and `Microsoft.VisualStudio.2022.BuildTools` does the exact
+/// reverse. `None` is "could not tell", and it must not become a refusal --
+/// the same rule `sys::elevated()`'s own `None` follows. A refusal has to be
+/// caused by a measured hazard, never by a missing answer, and
+/// `execute::run_winget_step`'s `CANNOT_UNINSTALL_ELEVATED` translation is
+/// what catches whatever this lets through.
+///
+/// **Exit `0` is not trusted on its own.** `list -s msstore` against a source
+/// with no match prints the byte-identical 53-byte `No installed package found
+/// matching input criteria.` and exits `0` (`NO_APPLICATIONS_FOUND`'s own doc
+/// comment; both fixtures are checked in side by side for exactly this
+/// reason), so a bare `code == 0` would read a sentence saying "not installed"
+/// as "installed at user scope" and refuse a removal on the strength of it.
+/// The row for *this* id has to be there, in the `Id` column, parsed the same
+/// way every other list in this module is.
+///
+/// **Cost: one ~1 s subprocess per call** (`docs/measurements-2026-08-09-winget.md`).
+/// `refuse_elevated_winget_removal` is what keeps that off every other path:
+/// it asks only for a `WingetStep::Remove`, and only when the process is known
+/// to be elevated.
+pub fn installed_at_user_scope(cmd: &dyn WingetCmd, id: &Name) -> Option<bool> {
+    let id_arg = id.to_string();
+    let out = cmd
+        .run(&[
+            "list",
+            "-e",
+            "--id",
+            &id_arg,
+            "--scope",
+            "user",
+            "--disable-interactivity",
+        ])
+        .ok()?;
+    if out.code == NO_APPLICATIONS_FOUND {
+        return Some(false);
+    }
+    if out.code != 0 {
+        return None;
+    }
+    if parse_list(&out.stdout).ok()?.iter().any(|r| r.id == id_arg) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 impl<C: WingetCmd> Winget<C> {
     /// Refresh winget's own index for the one source dotpkg reads --
     /// `["source", "update", "--name", "winget", "--disable-interactivity"]`.

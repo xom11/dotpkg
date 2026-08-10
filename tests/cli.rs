@@ -19,6 +19,12 @@
 //! working directory is a temporary directory, so nothing reads the developer's
 //! own machine and nothing is written outside the fixture.
 
+mod common;
+
+use common::fake_winget_mutator::FakeWingetMutator;
+use dotpkg::execute::{ExecOptions, Step, WingetStep};
+use dotpkg::model::{Name, Running};
+use dotpkg::state::State;
 use std::fs;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -1843,4 +1849,247 @@ fn adopt_rejects_an_unknown_backend_value_rather_than_guessing() {
         "nothing may be written for a backend dotpkg does not recognise"
     );
     f.assert_nothing_was_touched(before);
+}
+
+// -- Task 15: `apply` refuses the winget removal it cannot perform --------
+//
+// Measured (`docs/measurements-2026-08-10-winget-write-path.md` §5): `winget
+// install` of a user-scope package succeeds from an elevated session, and
+// `winget uninstall` of that same package is then refused with `0x8A15007D`,
+// three times over including `--all-versions`. The paired control at medium
+// integrity -- same machine, same package, same argv, one variable changed --
+// exited `0` and removed it. dotpkg's whole shape is a scheduled `apply`, so
+// an elevated run can install a package and be *structurally* unable to
+// remove it: every prune failing forever, not transiently.
+//
+// **None of these four cases can be reached by spawning the binary.** On
+// every non-Windows machine `sys::elevated()` is a hardcoded `None`, and on
+// Windows the answer is a property of how the test runner itself was
+// launched -- so a `Fixture::run` assertion here would be green or red
+// depending on which shell started `cargo test`, which is exactly the
+// non-discriminating shape Phase 4's `resolve_root` test had. The elevation
+// answer and the scope query are therefore parameters of the pre-check, and
+// these tests drive the same three calls `main.rs`'s `apply` arm makes in the
+// same order: `gate_removals`, then the pre-check, then `execute`.
+
+/// One winget removal, the shape `plan_to_steps` emits for a prune.
+fn winget_removal(id: &str) -> Step {
+    Step::Winget(WingetStep::Remove {
+        id: Name::new(id),
+        version: "151.1.93.134".to_string(),
+        guard: vec![],
+    })
+}
+
+/// The scope answer the real `winget list -e --id <id> --scope user` gave for
+/// these two ids on a14, one per direction
+/// (`docs/measurements-2026-08-10-winget-write-path.md` §15): `Brave.Brave`
+/// exits `0` under `--scope user` and `0x8A150014` under `--scope machine`
+/// (19 of the 36 source-backed installed ids behave this way);
+/// `Microsoft.VisualStudio.2022.BuildTools` does the exact reverse.
+///
+/// A closure rather than a constant `true`/`false`, and it panics on any
+/// other id: a pre-check that ignored its `is_user_scope` argument entirely
+/// and refused on elevation alone would satisfy the refusal case below with a
+/// constant, and this makes that visible instead.
+fn measured_scope(id: &Name) -> bool {
+    match id.to_string().as_str() {
+        "Brave.Brave" => true,
+        "Microsoft.VisualStudio.2022.BuildTools" => false,
+        other => panic!("no measured user/machine scope for {other} -- see §15"),
+    }
+}
+
+/// A scoop `Mutator` that panics on every call. `execute`'s signature needs
+/// one, and a winget-only step list must never reach it.
+struct NoScoopMutator;
+
+impl dotpkg::execute::Mutator for NoScoopMutator {
+    fn uninstall(&self, app: &Name) -> anyhow::Result<dotpkg::execute::CommandReport> {
+        panic!("a winget-only run reached scoop's uninstall for {app}")
+    }
+    fn install(
+        &self,
+        manifest: &Path,
+        _arch: Option<&str>,
+    ) -> anyhow::Result<dotpkg::execute::CommandReport> {
+        panic!(
+            "a winget-only run reached scoop's install for {}",
+            manifest.display()
+        )
+    }
+    fn download(
+        &self,
+        manifest: &Path,
+        _arch: Option<&str>,
+    ) -> anyhow::Result<dotpkg::execute::CommandReport> {
+        panic!(
+            "a winget-only run reached scoop's download for {}",
+            manifest.display()
+        )
+    }
+    fn bucket_add(
+        &self,
+        bucket: &dotpkg::config::BucketDecl,
+    ) -> anyhow::Result<dotpkg::execute::CommandReport> {
+        panic!(
+            "a winget-only run reached scoop's bucket add for {}",
+            bucket.name
+        )
+    }
+}
+
+#[test]
+fn an_elevated_run_refuses_a_user_scope_winget_removal_before_anything_happens() {
+    // Fail closed, before acting, the same shape and the same reasoning as
+    // `execute::root_looks_like_scoop`: the refusal happens before the
+    // recovery file is written and before one single step runs.
+    //
+    // The fake mutator is `unreachable()`, so if the pre-check does not fire
+    // this test panics loudly rather than passing for the wrong reason. Its
+    // panic message talks about a test that "declared no winget packages",
+    // which is `FakeWingetMutator`'s own wording for the read-side rule it
+    // usually enforces; here it means the narrower thing this test is about,
+    // that a refused run performs no winget mutation at all.
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    // `main.rs`'s order, unchanged: `gate_removals` first (a prune is only
+    // ever reachable through it), then the pre-check, then `execute`.
+    let (steps, held) = dotpkg::apply::gate_removals(steps, true);
+    assert!(held.is_empty(), "an ok preparation holds nothing back");
+    let refusal =
+        dotpkg::apply::refuse_elevated_winget_removal(&steps, Some(true), &measured_scope);
+
+    let why = match refusal {
+        Err(why) => why,
+        // Deleting the `refusal` binding above and this arm's guard is the
+        // delete-the-pre-check experiment: what is left is the run `main.rs`
+        // would perform, and it reaches a mutator that panics.
+        Ok(()) => {
+            let wm = FakeWingetMutator::unreachable();
+            let _ = dotpkg::execute::execute(
+                Path::new("/dotpkg-test/no-scoop-root"),
+                steps,
+                &NoScoopMutator,
+                &wm,
+                &mut State::default(),
+                &Running::default,
+                &ExecOptions::default(),
+            );
+            unreachable!(
+                "the pre-check allowed an elevated user-scope winget removal, and the run \
+                 reached `execute` without even the fake mutator noticing"
+            );
+        }
+    };
+
+    assert!(
+        why.contains("Brave.Brave"),
+        "name the package that cannot be removed: {why}"
+    );
+    assert!(
+        why.contains("0x8A15007D"),
+        "name the measured exit code, so the refusal is traceable to §5 rather \
+         than reading as dotpkg's own policy: {why}"
+    );
+    assert!(
+        why.contains("user scope"),
+        "say which scope this is about -- a machine-scope removal is NOT refused: {why}"
+    );
+    assert!(
+        why.to_lowercase().contains("elevat"),
+        "say that elevation is the variable the user can change: {why}"
+    );
+}
+
+#[test]
+fn an_elevated_run_allows_a_machine_scope_winget_removal_because_nothing_measured_it() {
+    // The narrowing that keeps this guard honest. Whether a MACHINE-scope
+    // package can be removed while elevated was never measured -- §5's
+    // trio is a user-scope package throughout -- so refusing it would be a
+    // refusal invented rather than measured, and it would break the one
+    // removal an elevated scheduled `apply` is most likely to be for.
+    //
+    // Also the positive control for the test above: a pre-check that refused
+    // on elevation alone, ignoring scope, would satisfy that one and fail
+    // here.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Microsoft.VisualStudio.2022.BuildTools")];
+
+    let r = dotpkg::apply::refuse_elevated_winget_removal(&steps, Some(true), &scope);
+
+    assert!(
+        r.is_ok(),
+        "a machine-scope removal must not be refused: {r:?}"
+    );
+    assert_eq!(
+        asked.get(),
+        1,
+        "exactly one scope query per winget removal -- each one is a ~1 s \
+         `winget list` subprocess"
+    );
+}
+
+#[test]
+fn a_run_that_is_not_elevated_allows_a_user_scope_winget_removal_and_asks_winget_nothing() {
+    // The paired control from §5 itself: the identical package and argv, run
+    // de-elevated in the same session, exited `0` and removed it. A refusal
+    // here would refuse the one run that was measured to WORK.
+    //
+    // And the query count is the point of the second assertion: the scope
+    // query is a `winget list` subprocess measured at roughly a second, so a
+    // pre-check that asked it before looking at the elevation answer would
+    // put that second onto every prune on every machine, for a question
+    // whose answer cannot change the outcome.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    let r = dotpkg::apply::refuse_elevated_winget_removal(&steps, Some(false), &scope);
+
+    assert!(
+        r.is_ok(),
+        "the measured-to-succeed case must not be refused: {r:?}"
+    );
+    assert_eq!(
+        asked.get(),
+        0,
+        "a run that is not elevated must not pay winget's scope query at all"
+    );
+}
+
+#[test]
+fn an_unknown_elevation_answer_allows_a_user_scope_winget_removal_rather_than_refusing() {
+    // `sys::elevated()` returns `None` for "could not tell" -- and returns it
+    // unconditionally on every non-Windows target. A machine whose token
+    // query failed is a machine dotpkg knows nothing about, and refusing
+    // every winget removal there would be a refusal caused by a missing
+    // answer rather than by a measured hazard. `0x8A15007D` is still
+    // translated into a named failure by `run_winget_step` if it does happen:
+    // a pre-check plus a translation, not either alone.
+    let asked = std::cell::Cell::new(0);
+    let scope = |id: &Name| {
+        asked.set(asked.get() + 1);
+        measured_scope(id)
+    };
+    let steps = vec![winget_removal("Brave.Brave")];
+
+    let r = dotpkg::apply::refuse_elevated_winget_removal(&steps, None, &scope);
+
+    assert!(
+        r.is_ok(),
+        "`None` must not refuse -- it is an absence of an answer, not a hazard: {r:?}"
+    );
+    assert_eq!(
+        asked.get(),
+        0,
+        "and an answer that cannot decide anything must not cost a subprocess either"
+    );
 }

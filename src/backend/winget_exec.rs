@@ -148,9 +148,20 @@ pub fn remove_argv(id: &Name, version: &str) -> Vec<String> {
 /// The exact argv for the single-package re-scan a step's verdict is built
 /// from, once a later task writes the code that judges it.
 ///
-/// Mirrors the shape `Winget::scan`'s and `resolve_latest`/
-/// `resolve_installed`'s argvs already use in `src/backend/winget.rs`,
-/// narrowed to one id via `-e --id` the same way those resolvers already do.
+/// **`-e`/`--exact` here, but deliberately not in `resolve_latest` or
+/// `resolve_installed` (`src/backend/winget.rs:696`, `:772`) -- the opposite
+/// choice, for the same underlying measured reason, not the same choice for
+/// a shared one.** Those two resolvers run *before* the canonical spelling
+/// is known: they must omit `--exact` so winget folds case on the way in,
+/// and they read the canonical id back out of the `Found <name> [<Id>]`
+/// line that self-verifying call produces. `list_one_argv` runs *after*
+/// resolution, against the canonical spelling `pkg.lock` already holds --
+/// the exact spelling winget itself echoed back -- so `-e` is safe here
+/// precisely because that spelling is already in hand, and it is
+/// preferable here: an exact match cannot drift onto a different package.
+/// Copying `-e` into a resolver call, or dropping it from this one, would
+/// reintroduce the "not found for a package that exists" defect
+/// `Name`'s own doc comment describes.
 ///
 /// `id.to_string()`, never `id.key()` -- same reasoning as `set_argv`.
 pub fn list_one_argv(id: &Name) -> Vec<String> {

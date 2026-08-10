@@ -1,7 +1,12 @@
+Found an existing package already installed. Trying to upgrade the installed package...
 Found xh [ducaale.xh] Version 0.26.1
-Downloading .../v0.26.1/xh-v0.26.1-x86_64-pc-windows-msvc.zip
+This application is licensed to you by its owner.
+Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
+Downloading https://github.com/ducaale/xh/releases/download/v0.26.1/xh-v0.26.1-x86_64-pc-windows-msvc.zip
 Successfully verified installer hash
 Extracting archive...
+Successfully extracted archive
+Starting package install...
 Command line alias added: "xh"
 Command line alias added: "xhs"
 Successfully installed

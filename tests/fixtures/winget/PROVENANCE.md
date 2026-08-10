@@ -98,43 +98,70 @@ drift; §15 independently re-derived the same 140/125/36/89 by parsing a fresh
 `winget list` capture with the same header-name-keyed column logic
 `src/backend/winget.rs` uses, rather than trusting §14's numbers unchecked.
 
-## 2026-08-10: twelve write-path fixtures, checked in as part of Phase 4b's Task 1
+## 2026-08-10: thirteen write-path fixtures, checked in as part of Phase 4b's Task 1
 
-`docs/measurements-2026-08-10-winget-write-path.md` §§1–9 record the write
-path's stdout — the first time this crate measured `install`/`uninstall`/
-`upgrade` rather than only `list`/`show`. These twelve fixtures turn that
-prose into files `tests/*.rs` can read, with the same CRLF convention as every
-fixture above (`.gitattributes` pins this whole directory `-text`).
+`docs/measurements-2026-08-10-winget-write-path.md` §§1–9 records, in prose,
+the write path's stdout — the first time this crate measured
+`install`/`uninstall`/`upgrade` rather than only `list`/`show`. That prose is
+a curated excerpt of a longer recording session, not the recording itself:
+the raw per-probe capture for every W1 (`list -e --id <package>` write-verb
+failure paths) and W2 (write-path positive controls, one guinea pig,
+`ducaale.xh`) invocation survived on the machine that ran the session, as
+`Start-Process -RedirectStandardOutput` wrote it — CRLF, unedited, one file
+per probe. These thirteen fixtures are copies of those files (`cp`, not
+retyped), not transcriptions of the doc's prose. An initial pass at this task
+*did* transcribe from the doc's prose for six of these files, producing
+content that was either an outright reconstruction (`install-upgraded.txt`,
+built by hand-substituting a version number into a sibling's text),
+substituted a placeholder this project uses elsewhere
+(`install-version-absent.txt`, `uninstall-version-absent.txt`), or came from
+the right shape but the wrong probe (`list-single-with-available.txt`, real
+bytes but from this task's own `--scope` probe rather than the write-path
+round). All four are replaced below with the actual captured bytes; the
+caveats that described them as reconstructed no longer apply to anything in
+this directory and are removed rather than left to describe files they no
+longer describe.
 
-**Confidence varies per fixture, and is recorded honestly below rather than
-presented as uniform.** The measurements doc itself is not uniformly literal:
-`install-version-fresh.txt`'s source block states `stdout 499 bytes` but only
-quotes ~251 bytes of it (the `Downloading .../...` line elides the real URL,
-and the gap suggests a progress indicator was never transcribed either) — so
-even the doc's most detailed block is a curated excerpt, not a byte-for-byte
-capture. Fixtures below are marked **verbatim** (the doc's own text, used
-as-is), **reconstructed** (the doc gives the shape and the varying value, not
-the bytes; templated from a verbatim sibling), or **substituted** (the doc
-elides one value as a placeholder such as `<absent>`; a value this project has
-already used for exactly this purpose elsewhere is reused rather than a new
-one invented).
-
-| fixture | argv | exit | source | confidence |
+| fixture | source file | argv | exit | bytes |
 |---|---|---|---|---|
-| `install-version-fresh.txt` | `install -e --id ducaale.xh --version 0.24.1 --silent --accept-package-agreements --accept-source-agreements --disable-interactivity` | `0` | doc §1's quoted block, verbatim including its own `...` URL elision | **verbatim** (doc's own excerpt is itself curated — see above) |
-| `install-already-installed-no-upgrade.txt` | `install -e --id ducaale.xh --version 0.24.1 --disable-interactivity` | `0x8A15002B` | lines 1–2 verbatim-quoted twice in the doc (Headline, and §2's prose); line 3 (`No newer package versions are available from the configured sources.`) supplied by `task-1-brief.md` directly, not independently present in the committed doc | **verbatim** (line 3 trusted from the brief, per its own "exact values to use verbatim" instruction) |
-| `install-upgraded.txt` | `install -e --id ducaale.xh --version 0.26.1 --disable-interactivity` | `0` | §2 row 2 records only the exit code and "full download + install"; no bytes were preserved for this specific call | **reconstructed** — §1's verbatim template with `0.24.1` replaced by `0.26.1` in both the version line and the download filename |
-| `install-package-absent.txt` | `install -e --id Xyzzy.NoSuch.Dotpkg` | `0x8A150014` | §4's table, byte count (43) independently confirms the single line plus one CRLF terminator, nothing more | **verbatim**, byte-count cross-checked |
-| `install-version-absent.txt` | `install -e --id sharkdp.hyperfine --version 99.99.99` | `0x8A150017` | §6 gives the message template (`No version found matching: …`) against `sharkdp.hyperfine` but elides the actual absent-version string as `<absent>` | **substituted** — `99.99.99` is not invented for this task; it is the same value `docs/measurements-2026-08-09-winget.md`'s `show -e --id ajeetdsouza.zoxide -v 99.99.99` already used for an identical "absent version" probe |
-| `install-no-upgrade-available.txt` | `install -e --id ducaale.xh --no-upgrade --disable-interactivity` | `0x8A150061` | §9's terse log, the only line recorded for this call | **verbatim** of what's recorded; §9 states no byte count, so completeness (unlike §4's rows) cannot be cross-checked |
-| `uninstall-refused-elevated.txt` | `uninstall -e --id ducaale.xh --disable-interactivity` (elevated) | `0x8A15007D` | §5's first quoted block, verbatim; matches `task-1-brief.md`'s own example exactly | **verbatim** |
-| `uninstall-success.txt` | `uninstall -e --id ducaale.xh --disable-interactivity` (de-elevated) | `0` | §5's paired positive-control block, verbatim | **verbatim** |
-| `uninstall-package-absent.txt` | `uninstall -e --id Xyzzy.NoSuch.Dotpkg` | `0x8A150014` | §4's table, byte count (53) independently confirms the single line plus one CRLF terminator | **verbatim**, byte-count cross-checked |
-| `uninstall-version-absent.txt` | `uninstall -e --id ducaale.xh --version 99.99.99` | `0x8A150017` | §8's table has **no stdout column at all** — only exit codes and outcome | **substituted** — the message is inferred from the same `No version found matching: <version>` template §6 and `docs/measurements-2026-08-09-winget.md` establish for `install`/`show`; `uninstall`'s own wording was never captured. `99.99.99` reused for the same reason as `install-version-absent.txt` |
-| `upgrade-nothing-available.txt` | `upgrade -e --id ducaale.xh --disable-interactivity` | `0x8A15002B` | the Headline section quotes `"No available upgrade found."` as winget's literal words for this exit code; §9's terse log confirms the same code for `upgrade (already newest)` | **verbatim** phrase, but its attachment to the `upgrade` verb specifically (rather than `install`) is inferred from the shared exit code, not an independent per-verb quote |
-| `list-single-with-available.txt` | `list -e --id Discord.Discord --disable-interactivity` | `0` | **not** from `docs/measurements-2026-08-10-winget-write-path.md`. That doc's own equivalent (§1's second command, `ducaale.xh` with an `Available` column) was paraphrased as `EXIT 0 version 0.24.1 available 0.26.2`, not preserved as a raw table, and `ducaale.xh` no longer exists on a14 to safely (read-only) recapture. Sourced instead from this same task's live `--scope` probe (`docs/measurements-2026-08-10-winget-write-path.md` §15), captured the same way every other fixture in this directory was — raw stdout via `Start-Process -RedirectStandardOutput` | **verbatim**, real bytes, different round than §§1-9 |
+| `install-version-fresh.txt` | `w2/01-stdout.txt` | `install -e --id ducaale.xh --version 0.24.1 --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` | `0` | 499 |
+| `install-already-installed-no-upgrade.txt` | `w2/02-stdout.txt` | `install -e --id ducaale.xh --version 0.24.1 --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` (run again, same version, already installed) | `0x8A15002B` | 188 |
+| `install-upgraded.txt` | `w2/03-stdout.txt` | `install -e --id ducaale.xh --version 0.26.1 --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` (0.24.1 installed, asked for 0.26.1: a real upgrade, not a template) | `0` | 588 |
+| `install-package-absent.txt` | `w1/01-stdout.txt` | `install -e --id Xyzzy.NoSuch.Dotpkg --disable-interactivity --accept-source-agreements` | `0x8A150014` | 43 |
+| `install-version-absent.txt` | `w1/05-stdout.txt` | `install -e --id sharkdp.hyperfine --version 0.0.0-dotpkg-w1-does-not-exist --disable-interactivity --accept-source-agreements` | `0x8A150017` | 59 |
+| `install-no-upgrade-available.txt` | `w2/05-stdout.txt` | `install -e --id ducaale.xh --no-upgrade --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` | `0x8A150061` | 65 |
+| `uninstall-refused-elevated.txt` | `w2/12-stdout.txt` | `uninstall -e --id ducaale.xh --disable-interactivity --accept-source-agreements` (elevated) | `0x8A15007D` | 127 |
+| `uninstall-success.txt` | `w2/inner-stdout.txt` | `uninstall -e --id ducaale.xh --disable-interactivity --accept-source-agreements` (de-elevated: `runas /trustlevel:0x20000`, inner session `elevated = False`) | `0` | 80 |
+| `uninstall-package-absent.txt` | `w1/03-stdout.txt` | `uninstall -e --id Xyzzy.NoSuch.Dotpkg --disable-interactivity --accept-source-agreements` | `0x8A150014` | 53 |
+| `uninstall-version-absent.txt` | `w2/10-stdout.txt` | `uninstall -e --id ducaale.xh --version 0.0.0-dotpkg-w2-does-not-exist --disable-interactivity --accept-source-agreements` | `0x8A150017` | 59 |
+| `upgrade-nothing-available.txt` | `w2/07-stdout.txt` | `upgrade -e --id ducaale.xh --disable-interactivity --accept-source-agreements --accept-package-agreements --silent` (run again, already at the newest version) | `0x8A15002B` | 99 |
+| `list-single-with-available.txt` | `w2/verify-01.txt` | `list -e --id ducaale.xh --disable-interactivity`, the verify call taken immediately after W2 step 01 (`install --version 0.24.1`) | `0` | 126 |
+| `list-single-ahead-of-pin.txt` | `w2/verify-07.txt` | `list -e --id ducaale.xh --disable-interactivity`, the verify call taken immediately after W2 step 07 (`upgrade`, already newest — package sits at `0.26.2`) | `0` | 97 |
 
-`install-version-absent.txt` and `uninstall-version-absent.txt` are
-byte-identical (`No version found matching: 99.99.99`) because both were built
-from the same substitution against the same template; nothing measured
-distinguishes winget's wording between the two verbs for this error.
+Two things worth naming about the last two rows, because a later task's
+assertions depend on them:
+
+- `list-single-with-available.txt` is **`ducaale.xh` at `0.24.1` with
+  `Available` `0.26.2`** — the exact row `docs/measurements-2026-08-10
+  -winget-write-path.md` §1's second command paraphrases as `EXIT 0 version
+  0.24.1 available 0.26.2`, now present as the raw table rather than a
+  paraphrase.
+- `list-single-ahead-of-pin.txt` is **`ducaale.xh` at `0.26.2` with no
+  `Available` column at all** — winget drops the column once nothing is
+  upgradable (the same behaviour `PROVENANCE.md`'s `list-single.txt`
+  and `list-duplicate-id.txt` entries above already document for other
+  packages), and that absence is itself the signal, not an omission.
+
+`w1-transcript.txt` and `w2-transcript.txt` (kept outside this repo, in the
+session's own scratch directory, not committed — same status as
+`scratch/w3-scope.ps1`) number every probe and record its argv/exit/wall time
+against the same bytes these fixtures now hold; the argv column above is
+copied from those transcripts, not reconstructed from the fixture content.
+The one exception is `verify-01`/`verify-07`: those two files have no
+transcript line of their own (the transcript numbers the 15 write steps, not
+the verify call after each one), so their argv and exit code are inferred
+from content and position — a `list -e --id ducaale.xh` table with no error
+text is only ever exit `0` anywhere else in this dataset, and their byte
+counts (126, then dropping to 97 once the `Available` column disappears
+starting at verify-06) track step 01's install and step 06/07's convergence
+to the newest version exactly.

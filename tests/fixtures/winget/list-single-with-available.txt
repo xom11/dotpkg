@@ -1,4 +1,3 @@
-Name    Id              Version  Available Source
--------------------------------------------------
-Discord Discord.Discord 1.0.9244 1.0.9251  winget
-
+Name Id         Version Available Source
+----------------------------------------
+xh   ducaale.xh 0.24.1  0.26.2    winget

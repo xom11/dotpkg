@@ -187,9 +187,14 @@ pub struct Installed {
     pub arch: Option<String>,
     /// Scoop only.
     pub bucket: Option<String>,
-    /// Lowercased, extension-stripped basenames of every executable this
-    /// package's manifest names. Populated by the backend's scan in Task 3;
-    /// empty for a package whose manifest names none.
+    /// Names a live process might plausibly report for this package,
+    /// lowercased and extension-stripped. Not necessarily an executable name
+    /// that exists -- scoop's are (`declared_executables` in
+    /// `backend::scoop`, read from the manifest); winget's are guesses,
+    /// because winget exposes no manifest at all (`guard_names` in
+    /// `backend::winget`, see its own doc comment for what was measured and
+    /// what is still missed). Empty for a scoop package whose manifest names
+    /// no executable.
     pub bins: Vec<String>,
 }
 
@@ -204,6 +209,11 @@ pub const WINGET: &str = "winget";
 /// elevated kanata, from a medium-integrity dotpkg. `dirs` catches a package
 /// that names no executable in its manifest at all, which on the author's
 /// machine is `nodejs` and `rustup`.
+///
+/// `dirs` is scoop-only by construction: `Scoop::running_apps` is its only
+/// producer, and it only ever inserts path segments found under the scoop
+/// root (`$SCOOP/apps` or `$SCOOP/persist`), so a winget package's name can
+/// never land in it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Running {
     names: BTreeSet<String>,

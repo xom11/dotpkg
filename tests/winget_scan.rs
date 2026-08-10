@@ -213,10 +213,52 @@ fn an_ordinary_single_row_becomes_an_ordinary_installed_entry() {
         "winget does not expose an architecture"
     );
     assert_eq!(scan.installed[0].bucket, None);
-    assert!(
-        scan.installed[0].bins.is_empty(),
-        "and names no executables"
+    assert_eq!(
+        scan.installed[0].bins,
+        vec!["zoxide"],
+        "guard_names(\"ajeetdsouza.zoxide\", \"zoxide\") folds the id's last \
+         segment and the display Name to the same string and deduplicates \
+         them to one entry -- bins is no longer empty for winget"
     );
+}
+
+#[test]
+fn a_winget_installed_entry_carries_guard_names_so_the_running_check_can_fire() {
+    // `Running::covers` has three signals and, for winget, exactly one of
+    // them could ever fire before this: `dirs` is filled only from
+    // `$SCOOP/apps` and `$SCOOP/persist` (so a winget id can never be in
+    // it) and `bins` was always empty, leaving a process named after the
+    // WHOLE dotted id -- which nothing is. Measured: 0 of 36 caught.
+    use dotpkg::model::Running;
+    let scan = rows_to_scan(vec![WingetRow {
+        name: "Brave".to_string(),
+        id: "Brave.Brave".to_string(),
+        version: "151.1.93.132".to_string(),
+        available: None,
+        source: Some("winget".to_string()),
+    }]);
+    let inst = &scan.installed[0];
+    assert_eq!(inst.bins, vec!["brave"], "got {:?}", inst.bins);
+
+    // The real process name on a14, folded and suffix-stripped the way
+    // `sys::running_processes` reports it.
+    let running = Running::new(
+        std::collections::BTreeSet::from(["brave".to_string()]),
+        Default::default(),
+    );
+    assert!(
+        running.covers(inst),
+        "a running Brave must be covered; before this it was not"
+    );
+
+    // The control that must stay green: an unrelated process must NOT cover
+    // it. Without this, a `guard_names` that returned every possible string
+    // would satisfy the assertion above.
+    let unrelated = Running::new(
+        std::collections::BTreeSet::from(["notepad".to_string()]),
+        Default::default(),
+    );
+    assert!(!unrelated.covers(inst), "must not over-match to anything");
 }
 
 #[test]

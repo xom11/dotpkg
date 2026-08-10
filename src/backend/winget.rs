@@ -177,6 +177,43 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
     Ok(rows)
 }
 
+/// Names a live process might plausibly report for a winget package.
+///
+/// winget exposes no executable list anywhere a scan can reach -- `winget
+/// list` has no such column, and the aliases an install creates are announced
+/// only on `install`'s own stdout ("Command line alias added: ..."), at
+/// install time. So these are not executable names; they are the two guesses
+/// measured to work, and they go into `Installed.bins` because that is the
+/// field `Running::covers` consults.
+///
+/// Measured on a14 against the live process table, over the 36 source-backed
+/// installed winget ids: the whole dotted id (`Installed.name.key()`, the
+/// only winget signal that exists today) matched **0**; the id's last dotted
+/// segment matched **4**; the folded display `Name` matched **2**. Both are
+/// returned because they are different signals -- `Google.Chrome` is reached
+/// only by the segment (`chrome`), and neither is reached by the id.
+///
+/// Over-matching is deliberate, per `Running::covers`'s own rule: "A false
+/// positive costs one `!` line the user clears by closing an app; a false
+/// negative costs the app."
+///
+/// **Known residual gap, measured:** installing `ducaale.xh` created TWO
+/// aliases, `xh` and `xhs`, and `xhs` is neither the id, the display name,
+/// nor the last segment of either. A package's second alias is invisible to
+/// this, and no scan-time source for it exists.
+pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let last = id.rsplit('.').next().unwrap_or(id);
+    for raw in [last, display] {
+        let folded = raw.trim().to_ascii_lowercase();
+        if folded.is_empty() || out.contains(&folded) {
+            continue;
+        }
+        out.push(folded);
+    }
+    out
+}
+
 /// Turn `parse_list`'s rows into a `Scan`: one fact per id, or an admission
 /// that no fact could be established.
 ///
@@ -240,13 +277,12 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
 /// function did not keep.
 ///
 /// `arch` and `bucket` are always `None`: winget exposes neither. `bins` is
-/// always empty -- there is no winget-side manifest to read executable names
-/// from -- and that has a consequence: `Running::covers` (`src/model.rs`)
-/// checks three signals (package directory, process name, declared
-/// executables), and with `bins` empty only the first two can ever fire. The
-/// running-process guard is therefore weaker for a winget package than for a
-/// scoop one. Nothing depends on that today because `plan()` does not yet
-/// act on winget packages; recorded here for whoever adds that.
+/// filled by `guard_names` (see its own doc comment) from `group[0]`'s
+/// display `id` and `name` -- not a manifest, because winget has none, but
+/// the two guesses measured to catch a live process. `guard_names` still has
+/// one known residual gap: a package's *second* alias (measured on
+/// `ducaale.xh`, whose install created both `xh` and `xhs`) is invisible to
+/// it, and no scan-time source for that exists.
 pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
     for row in rows {
@@ -307,7 +343,7 @@ pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
             version: versions[0].to_string(),
             arch: None,
             bucket: None,
-            bins: Vec::new(),
+            bins: guard_names(&group[0].id, &group[0].name),
         });
     }
 
@@ -829,5 +865,34 @@ impl<C: WingetCmd> Winget<C> {
             out.stdout.lines().next().unwrap_or("(no output)")
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_names_are_the_two_signals_measured_to_catch_a_real_process() {
+        // Measured on a14 against the live process table: of 36 source-backed
+        // installed winget ids, the whole dotted id caught 0, the id's LAST
+        // dotted segment caught 4, and the display Name column caught 2.
+        // Brave.Brave was running at the time and today's guard missed it.
+        assert_eq!(guard_names("Brave.Brave", "Brave"), vec!["brave"]);
+        // Chrome is the case the display name cannot reach and the last segment
+        // can: the process is chrome.exe, the display name is "Google Chrome".
+        assert_eq!(
+            guard_names("Google.Chrome", "Google Chrome"),
+            vec!["chrome", "google chrome"]
+        );
+        // An id with no dot at all must still yield its own name, not nothing.
+        assert_eq!(guard_names("xh", "xh"), vec!["xh"]);
+        // Case is folded, because `sys::running_processes` lowercases what it
+        // reports and a comparison against unfolded text silently never matches.
+        assert_eq!(guard_names("PhatMT97.VKey", "VKey"), vec!["vkey"]);
+        // An empty display Name must not produce an empty guard name: `names`
+        // is a BTreeSet<String> that could contain "" and match nothing, but a
+        // future caller comparing against it would be comparing against noise.
+        assert_eq!(guard_names("Some.Thing", ""), vec!["thing"]);
     }
 }

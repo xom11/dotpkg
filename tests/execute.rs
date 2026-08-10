@@ -1630,14 +1630,21 @@ fn a_winget_only_run_does_not_need_a_scoop_root() {
     // was never in danger.
     let t = Tree::new(); // no apps/ directory at all
     let fake = Fake::honest(&t);
-    // `unreachable()`, not `returning(...)`: `run_step`'s winget arm is still
-    // the Task-4 stub (`let _ = wm;`), so a correct fix touches `wm` exactly
-    // as often as an incorrect one that forgot the conditional -- zero times
-    // either way, since the stub never reaches it. `returning(...)` would
-    // pass the same way and say nothing; `unreachable()` at least stands as a
-    // canary that starts failing loudly the day this step's stub is replaced
-    // with a real call this test did not intend to exercise.
-    let wm = FakeWingetMutator::unreachable();
+    // `returning(0, "")`, not `unreachable()`. The other ~19 `unreachable()`
+    // fakes in this file guard a STRUCTURAL invariant: a step list with zero
+    // winget steps can never reach the winget arm, no matter what any later
+    // task does -- `run_step`'s match dispatches `Step::Scoop` to
+    // `run_scoop_step` and nothing else, permanently. This test's step IS a
+    // `Step::Winget(WingetStep::Remove{..})`; once the winget executor is
+    // wired, THIS scenario is supposed to call `wm.remove(...)` -- that is
+    // the point of the task that wires it. An `unreachable()` fake here would
+    // not be primed to catch a regression; it would be primed to panic the
+    // day a later task succeeds. The assertion below is about `execute` not
+    // *refusing* the run, which is orthogonal to whether the winget arm is
+    // today's stub or tomorrow's real call -- so the fake must be as
+    // indifferent to that as the assertion is, letting the test survive the
+    // wiring instead of breaking on it.
+    let wm = FakeWingetMutator::returning(0, String::new());
     let mut state = State::default();
     let steps = vec![Step::Winget(WingetStep::Remove {
         id: Name::new("Vivaldi.Vivaldi"),

@@ -230,11 +230,9 @@ fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &s
 /// of them. Comment loss, not line count, is the actual defect class this
 /// guard exists for, and comment loss is what it checks now.
 ///
-/// The heuristic for "what is a comment" on a line: everything from the
-/// first `#` after that line's LAST `"` to the end of the line. This is
-/// scoped deliberately to `pkg.toml`'s own shape here -- a bare key, a
-/// quoted string value, optionally a trailing `# comment` -- not a general
-/// string-literal-aware scanner; see `line_comment`.
+/// What counts as "a comment" on a line, and the heuristic's actual scope
+/// and remaining limit, are `line_comment`'s to document, not repeated here
+/// to avoid the two drifting apart.
 ///
 /// **Known, accepted weakness**: a comment that MOVES to a different line,
 /// without being lost, is not caught -- a multiset remembers count, not
@@ -266,19 +264,41 @@ fn no_comment_was_lost(before: &str, after: &str) -> Result<()> {
 }
 
 /// The comment on one `pkg.toml` line, if it has one: everything from the
-/// first `#` after the line's last `"` to the end of the line.
+/// first `#` that is not inside a quoted string to the end of the line.
 ///
-/// A full-line comment (no `"` on the line at all) is included too, since
-/// `rfind` then finds nothing and the search falls back to the start of the
-/// line. Scoped to this file's own shape -- no package name or key `pkg.toml`
-/// writes ever contains a literal `#` inside a quoted string -- rather than
-/// being a general string-literal-aware scanner: a `#` that DID appear
-/// inside a string value would be misread as a comment start.
+/// A single left-to-right scan tracking whether the cursor is currently
+/// inside a `"..."` string, so a `#` inside a string value (a bucket URL's
+/// `#branch` fragment, which `src/config.rs` permits, is a real example) is
+/// correctly skipped, AND a `#` that starts the comment is correctly found
+/// even when the comment's OWN text goes on to contain a quote (`# see
+/// "docs/x.md"`, `# replaces "extras" bucket`) -- both directions matter:
+/// an earlier version of this function searched only after the line's LAST
+/// `"`, which handled the first case but not the second. A comment whose
+/// text contains a quote made that version's `rfind` land INSIDE the
+/// comment, so it saw nothing after it and returned `None` -- in both
+/// `before` and `after` alike, so the comment never entered
+/// `no_comment_was_lost`'s multiset at all, and its total loss was silently
+/// waved through rather than flagged. Fixed by scanning once, forward,
+/// rather than searching backward from the end.
+///
+/// **Remaining heuristic limit, real but narrow**: TOML's basic strings
+/// allow an escaped quote, `\"`, without ending the string. This scan does
+/// not know that and toggles `in_string` on every `"` including an escaped
+/// one, so a line whose STRING VALUE (a package name or bucket URL, not a
+/// comment) contains `\"` followed later by a `#` could still be misread.
+/// No shape `pkg.toml` actually writes does this -- package names and
+/// bucket URLs never contain a literal quote -- so the limit is accepted
+/// rather than handled.
 fn line_comment(line: &str) -> Option<&str> {
-    let search_from = line.rfind('"').map(|i| i + 1).unwrap_or(0);
-    line[search_from..]
-        .find('#')
-        .map(|i| line[search_from + i..].trim_end())
+    let mut in_string = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_string = !in_string,
+            '#' if !in_string => return Some(line[i..].trim_end()),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Replace `pkg.toml`, keeping the file the user wrote as `pkg.toml.bak`.
@@ -726,6 +746,20 @@ packages = [
             no_comment_was_lost(two_copies, one_dropped).is_err(),
             "one of two identical comments vanishing must be caught, not waved \
              through because its text is still present on the other line"
+        );
+
+        // A comment whose OWN text carries a quote. `line_comment` must find
+        // the `#` by scanning for one that is not inside a string, not by
+        // looking only after the line's LAST `"` -- that would land inside
+        // this comment itself (its closing quote is the last `"` on the
+        // line), see nothing after it, and miss the comment entirely, in
+        // BOTH `before` and `after` alike, so its total loss would go
+        // unnoticed rather than flagged.
+        let quoted_comment = "[winget]\npackages = [\n  \"A.A\",  # keeps \"extras\"\n]\n";
+        let comment_dropped = "[winget]\npackages = [\n  \"A.A\",\n]\n";
+        assert!(
+            no_comment_was_lost(quoted_comment, comment_dropped).is_err(),
+            "a comment containing a quote must still be tracked, and its loss caught"
         );
     }
 }

@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod fake_winget;
+pub mod fake_winget_mutator;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

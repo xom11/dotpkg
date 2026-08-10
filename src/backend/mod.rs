@@ -1,5 +1,6 @@
 pub mod scoop;
 pub mod winget;
+pub mod winget_exec;
 
 use crate::config::Config;
 use crate::lock::Lock;

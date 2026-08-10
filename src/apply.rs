@@ -297,7 +297,31 @@ pub enum Outcome {
     /// Carries the version so `plan_to_steps` builds `WingetStep::Set` from
     /// the version preparation actually confirmed, not from a second reading
     /// of the action or the lock.
-    ReadyToSet { version: String },
+    ///
+    /// **And it carries `id`, which is NOT the action's `name`.** The action's
+    /// name is `pkg.toml`'s spelling -- whatever the user typed, a supported
+    /// state rather than a typo the tool rejects (`update` warns about a case
+    /// mismatch and says "pkg.toml is left as you wrote it"; `adopt`
+    /// deliberately writes the user's spelling). `id` is the canonical spelling
+    /// winget itself echoed back in `Found <name> [<Id>]`, which
+    /// `version_liveness` obtained by deliberately omitting `--exact` so winget
+    /// would fold case on the way in.
+    ///
+    /// Two spellings, and only one of them may reach a mutating argv:
+    /// `set_argv` puts `-e` beside `--id`, and `--exact` is what makes `--id`
+    /// case-sensitive on the write verbs too (measured,
+    /// `docs/measurements-2026-08-10-winget-write-path.md` §6: `install -e --id
+    /// SHARKDP.HYPERFINE --version <x>` returns `0x8A150014` "No package found
+    /// matching input criteria." where the correctly-cased call reaches
+    /// `0x8A150017`). A `Set` built from the declared spelling therefore can
+    /// never install the package, and the rescan -- `list -e --id <the same
+    /// wrong spelling>` -- misses too, so the run reports the package does not
+    /// exist. Every run, forever. The design named this outright: *"a mutating
+    /// call may use `-e --id` only with a spelling winget itself produced."*
+    ///
+    /// Splitting the two here rather than rewriting the action is deliberate:
+    /// the plan the user reads, and `pkg.toml`, keep their own spelling.
+    ReadyToSet { id: Name, version: String },
     /// A per-package failure. Reported; never stops the run.
     Failed { why: String },
     /// Benign: the user can fix this (usually by closing an app) and run
@@ -612,7 +636,16 @@ fn check_pin_is_live(action: &Action, winget: &dyn WingetCmd) -> Outcome {
         }
     };
     match crate::backend::winget::version_liveness(winget, name, version) {
-        Ok(_) => Outcome::ReadyToSet {
+        // `found.id`, never `name`. This call was made WITHOUT `--exact`
+        // precisely so winget would fold case on the way in and hand the
+        // canonical spelling back on the way out, in the same self-verifying
+        // `Found <name> [<Id>]` line -- so the answer to "what may go on a
+        // mutating wire" is already in hand here and must not be thrown away.
+        // `name` is `pkg.toml`'s spelling and stays in the action, the plan and
+        // the file; see `Outcome::ReadyToSet`'s own doc comment for what putting
+        // it on the wire beside `-e` costs.
+        Ok(found) => Outcome::ReadyToSet {
+            id: Name::new(found.id),
             version: version.clone(),
         },
         Err(why) => Outcome::Failed { why },
@@ -787,13 +820,22 @@ pub fn plan_to_steps(
             // that dotpkg does not decide the direction: winget's own refusal
             // of a downgrade is translated where it is measured, not
             // pre-judged here.
+            //
+            // **`id` comes from the outcome, not from the action.** The action's
+            // `name` is `pkg.toml`'s spelling; the outcome's `id` is the
+            // canonical one winget echoed back during the liveness check, and
+            // that is the only spelling `set_argv`'s `-e --id` may carry. See
+            // `Outcome::ReadyToSet`'s own doc comment. `guard_for` still takes
+            // `name`: it looks the scan up by `Name`, which folds case, so
+            // either spelling finds the same row, and `name` is what every other
+            // arm here passes.
             (
                 Action::Install { backend, name, .. }
                 | Action::Upgrade { backend, name, .. }
                 | Action::Downgrade { backend, name, .. },
-                Outcome::ReadyToSet { version },
+                Outcome::ReadyToSet { id, version },
             ) if backend == WINGET => steps.push(Step::Winget(WingetStep::Set {
-                id: name.clone(),
+                id: id.clone(),
                 version: version.clone(),
                 guard: guard_for(name, installed),
             })),
@@ -1245,6 +1287,24 @@ mod tests {
                 out: std::cell::RefCell::new(vec![Ok(crate::backend::winget::CmdOut {
                     code: 0,
                     stdout: format!("Found Brave Browser [Brave.Brave]\r\nVersion: {version}\r\n"),
+                })]),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        /// `show -v` succeeds and echoes back a canonical id that differs from
+        /// the spelling it was asked with -- the ordinary supported state, not a
+        /// typo: `update` warns about the mismatch and says "pkg.toml is left as
+        /// you wrote it", and `adopt` deliberately writes the user's spelling.
+        /// `-v` is answered without `--exact`, so winget folds case on the way
+        /// in and hands the canonical spelling back in the `Found <name>
+        /// [<Id>]` line -- which is the only place that spelling exists.
+        fn live_echoing(canonical: &str, version: &str) -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(vec![Ok(crate::backend::winget::CmdOut {
+                    code: 0,
+                    stdout: format!(
+                        "Found Some Display Name [{canonical}]\r\nVersion: {version}\r\n"
+                    ),
                 })]),
                 calls: std::cell::RefCell::new(Vec::new()),
             }
@@ -2133,6 +2193,10 @@ mod tests {
         assert_eq!(
             prep.prepared[0].outcome,
             Outcome::ReadyToSet {
+                // `FakeWinget::live` echoes `Found Brave Browser [Brave.Brave]`,
+                // and this is that echo -- the canonical spelling, read off
+                // winget's own answer rather than copied from the action.
+                id: Name::new("Brave.Brave"),
                 version: "151.1.93.134".into()
             }
         );
@@ -2154,6 +2218,76 @@ mod tests {
                 "--disable-interactivity".into(),
             ]],
             "exactly one `show`, with this argv"
+        );
+    }
+
+    #[test]
+    fn the_winget_write_argv_carries_the_canonical_id_not_the_declared_spelling() {
+        // **The one place the two spellings must not be confused.** `pkg.toml`
+        // holds whatever the user typed -- a supported state, not a typo the
+        // tool rejects: `update` warns about a case mismatch and says "pkg.toml
+        // is left as you wrote it", and `adopt` deliberately writes the user's
+        // spelling. `plan_backend` builds the action from that declared string,
+        // so the action's `name` here is `git.git`.
+        //
+        // Measured (`docs/measurements-2026-08-10-winget-write-path.md` §6):
+        // `install -e --id SHARKDP.HYPERFINE --version <x>` returns 0x8A150014
+        // "No package found matching input criteria." where the correctly-cased
+        // call reaches 0x8A150017 -- `--exact` is what makes `--id`
+        // case-sensitive, on the write verbs too. So a `set_argv` built from the
+        // declared spelling can NEVER install the package, and the rescan
+        // (`list -e --id <same wrong spelling>`) misses too, so the user is told
+        // the package does not exist. Every run, forever.
+        //
+        // `version_liveness` omits `--exact` deliberately and therefore already
+        // has the answer: winget echoes the canonical id back in `Found <name>
+        // [<Id>]`. That echo is what must reach the wire -- while the plan the
+        // user reads keeps their own spelling, which is the deliberate choice.
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(stage_dir.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Upgrade {
+                backend: WINGET.into(),
+                name: Name::new("git.git"),
+                from: "2.51.0".into(),
+                to: "2.52.0".into(),
+                arch: None,
+            }],
+        };
+        let winget = FakeWinget::live_echoing("Git.Git", "2.52.0");
+        let prep = prepare(
+            &plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            &winget,
+            stage_dir.path(),
+            &Config::default(),
+        );
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
+        assert!(unusable.is_empty(), "{unusable:?}");
+        assert_eq!(steps.len(), 1, "one Upgrade, one Set: {steps:?}");
+
+        // Asserted through `set_argv` rather than against the step's `id`
+        // field, because the argv is the thing winget actually receives and
+        // `set_argv` is what puts `-e` beside it.
+        let Step::Winget(WingetStep::Set { id, version, .. }) = &steps[0] else {
+            panic!("expected a winget Set: {:?}", steps[0]);
+        };
+        let argv = crate::backend::winget_exec::set_argv(id, version);
+        assert!(
+            argv.contains(&"Git.Git".to_string()),
+            "the canonical spelling winget itself echoed back must be on the wire: {argv:?}"
+        );
+        assert!(
+            !argv.contains(&"git.git".to_string()),
+            "the declared spelling must NOT be on the wire beside `-e`: {argv:?}"
+        );
+        // And the plan's own display is untouched: `pkg.toml` and the line the
+        // user reads keep the spelling they wrote.
+        assert_eq!(
+            prep.prepared[0].action, plan.actions[0],
+            "preparation must not rewrite the action the user was shown"
         );
     }
 
@@ -2871,6 +3005,7 @@ mod tests {
                     arch: None,
                 },
                 outcome: Outcome::ReadyToSet {
+                    id: Name::new("Google.Chrome"),
                     version: "141.0.7390.123".into(),
                 },
             }],

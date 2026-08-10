@@ -388,6 +388,20 @@ fn the_scope_query_asks_section_15s_argv_and_answers_its_two_measured_exit_codes
         Some(false),
         "not installed at user scope -- and a machine-scope removal must NOT be refused"
     );
+
+    // The row's `Id` matched as a `Name`, not as bytes. `winget_verdict` -- the
+    // other place a `list` answer is matched back against the id that asked for
+    // it -- compares `&i.name == id`, which folds case, and the two must agree
+    // about what "this row is that package" means. A byte comparison here
+    // returns `None` ("could not tell") for the same row, and `main.rs` reads
+    // `None` as "not blocked": the pre-check fails OPEN, which is the one
+    // direction a guard must not fail in.
+    let folded = FakeWinget::returning(0, fixture("list-single.txt"));
+    assert_eq!(
+        installed_at_user_scope(&folded, &Name::new("AjeetDSouza.Zoxide")),
+        Some(true),
+        "a row whose case differs from the caller's spelling is still that package"
+    );
 }
 
 #[test]

@@ -644,6 +644,7 @@ mod tests {
                     arch: None,
                 },
                 outcome: Outcome::ReadyToSet {
+                    id: Name::new("JanDeDobbeleer.OhMyPosh"),
                     version: "30.6.3".into(),
                 },
             }],

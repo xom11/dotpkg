@@ -958,7 +958,22 @@ pub fn installed_at_user_scope(cmd: &dyn WingetCmd, id: &Name) -> Option<bool> {
     if out.code != 0 {
         return None;
     }
-    if parse_list(&out.stdout).ok()?.iter().any(|r| r.id == id_arg) {
+    // Compared as a `Name`, not as bytes. `winget_exec::winget_verdict` -- the
+    // other place a `list` answer is matched back against the id that asked for
+    // it -- does `&i.name == id`, which folds case, and these two must not
+    // disagree about what "this row is that package" means. A byte comparison
+    // here would return `None` ("could not tell") rather than `Some(true)` for a
+    // row whose case differs from the caller's spelling, which fails this
+    // pre-check **open**: `main.rs` reads `None` as "not blocked" and lets an
+    // elevated user-scope removal through to winget's own refusal. Not reachable
+    // from today's one caller -- `WingetStep::Remove`'s id is `winget list`'s own
+    // `Id` column, so the two spellings are the same bytes by construction -- but
+    // the guard must not depend on that staying true.
+    if parse_list(&out.stdout)
+        .ok()?
+        .iter()
+        .any(|r| Name::new(r.id.as_str()) == *id)
+    {
         Some(true)
     } else {
         None

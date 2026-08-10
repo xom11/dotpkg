@@ -232,6 +232,60 @@ fn print_scan_warnings_and_merge(
     (installed, opaque, unscannable)
 }
 
+/// Drops ghosts -- state entries whose package is no longer there -- for
+/// every backend a run just acted on, not only scoop. Extracted out of the
+/// `apply` handler as its own function, behaviour unchanged, so this exact
+/// sequence (not a reimplementation of it) can be unit tested without
+/// spawning `winget.exe`: `tests/cli.rs` cannot drive this, because
+/// `Fixture::run` strips every `winget`/`winget.exe` file off the `PATH` it
+/// hands the spawned process, and `Winget::scan`'s own `NotFound` arm turns
+/// an absent binary into `Ok(Scan::default())`, not an error -- so `present`
+/// would always be empty there, indistinguishable from "nothing is
+/// implemented" (see `tests/cli.rs`'s own comment at the top of its winget
+/// section). Taking an already-computed `ScanOutcome` rather than a
+/// `Backend` is what makes both outcomes constructible from a test with no
+/// subprocess involved at all.
+///
+/// A run interrupted between a verified uninstall and the state write
+/// leaves an entry with no package behind. It is inert for planning --
+/// `plan()` consults `owns` only while iterating installed packages -- but
+/// it inflates `owned_count`, which is what `mass_prune_guard` reads, so it
+/// is cleaned up here, at the end of the run that made it.
+///
+/// An `Unscannable` winget deliberately reconciles nothing below: a scan
+/// that failed is not evidence that anything is absent, and this is the
+/// direction where acting on that mistake deletes an ownership record
+/// dotpkg needs in order to prune the package later. Do not "simplify" the
+/// `if let ScanOutcome::Scanned(..)` guard below into an unconditional
+/// reconcile, even one that means well (e.g. falling back to some other
+/// already-computed present list when the scan came back `Unscannable`) --
+/// that reintroduces exactly this silent data loss, and
+/// `reconcile_ghosts_leaves_winget_untouched_when_its_scan_failed` below is
+/// what catches it.
+fn reconcile_ghosts(
+    state: &mut State,
+    scoop: &Scoop,
+    winget_scan: &ScanOutcome,
+) -> Result<Vec<Name>> {
+    let after_scoop = <Scoop as Backend>::scan(scoop)?;
+    let present: Vec<_> = after_scoop
+        .installed
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
+    let mut dropped = state.reconcile(dotpkg::model::SCOOP, &present);
+
+    if let ScanOutcome::Scanned(after_winget) = winget_scan {
+        let present: Vec<_> = after_winget
+            .installed
+            .iter()
+            .map(|i| i.name.clone())
+            .collect();
+        dropped.extend(state.reconcile(dotpkg::model::WINGET, &present));
+    }
+    Ok(dropped)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -512,10 +566,16 @@ fn main() -> Result<()> {
                     .push((app, dotpkg::execute::ItemResult::Held(why)));
             }
 
-            // Report only what a fresh scan confirms.
-            let after = <Scoop as Backend>::scan(&d.scoop)?;
-            let present: Vec<_> = after.installed.iter().map(|i| i.name.clone()).collect();
-            ex.dropped_ghosts = d.state.reconcile(dotpkg::model::SCOOP, &present);
+            // Report only what a fresh scan confirms -- for every backend
+            // that acted, not just scoop. A winget entry whose package was
+            // removed outside dotpkg would otherwise sit in state.json
+            // forever, inflating the count `mass_prune_guard` reads. Not
+            // `?` for the winget scan itself: a winget hiccup here must not
+            // stop scoop's ghosts from being cleared, same reasoning as the
+            // prepare-time scan above (`scan_or_warn`'s own doc comment).
+            let winget = Winget::new(RealWinget);
+            let winget_scan = dotpkg::backend::scan_or_warn(&winget);
+            ex.dropped_ghosts = reconcile_ghosts(&mut d.state, &d.scoop, &winget_scan)?;
             d.state.save(&state_path)?;
 
             // A stale recover.cmd from an earlier, failed run is misleading
@@ -945,5 +1005,147 @@ mod tests {
         );
         assert_eq!(merged_opaque, vec![Name::new("zellij")]);
         assert_eq!(unscannable, vec![WINGET], "got {unscannable:?}");
+    }
+
+    // -- reconcile_ghosts ----------------------------------------------------
+    //
+    // Task 8's own test location was corrected here: `tests/cli.rs` cannot
+    // drive this. `Fixture::run` strips every `winget`/`winget.exe` file off
+    // the `PATH` it hands the spawned `dotpkg` process, and a missing
+    // `winget.exe` makes `Winget::scan` return `Ok(Scan::default())`, not an
+    // error -- so `present` would always come back empty there, which
+    // `State::reconcile`'s own refuse-to-drop-everything guard would then
+    // treat exactly like "nothing implemented" (see `tests/cli.rs`'s own
+    // comment on this: "these two tests still cannot exercise the 'winget IS
+    // installed' branch"). `reconcile_ghosts` takes an already-computed
+    // `ScanOutcome`, so both outcomes are constructible here directly, with
+    // no subprocess and no `WingetCmd` fake needed.
+
+    /// A scoop root with one real installed app, in the shape `Scoop::scan`
+    /// reads it. Mirrors `tests/cli.rs`'s `install_app` helper, duplicated
+    /// rather than shared: that helper lives in a separate integration-test
+    /// crate this binary's own unit tests cannot reach.
+    fn scoop_root_with(tmp: &std::path::Path, app: &str, version: &str) {
+        let cur = tmp.join("apps").join(app).join("current");
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::write(
+            cur.join("manifest.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reconcile_ghosts_drops_a_ghost_per_backend_while_each_backends_live_entry_survives() {
+        // `State::reconcile` itself refuses to drop everything when
+        // `present` comes back empty and the map is not (see its own doc
+        // comment) -- so a live entry alongside the ghost, for BOTH
+        // backends, is not optional: without it this test would pass
+        // whether or not the winget half of `reconcile_ghosts` does
+        // anything at all. The scoop ghost is asserted too, not just
+        // winget's, so a change that reconciles winget and silently stops
+        // reconciling scoop cannot slip through unnoticed.
+        let tmp = tempfile::tempdir().unwrap();
+        scoop_root_with(tmp.path(), "fzf", "1.0.0");
+        let scoop = Scoop::new(tmp.path().to_path_buf());
+
+        let mut state = State::default();
+        state.set(
+            dotpkg::model::SCOOP,
+            &Name::new("fzf"),
+            dotpkg::state::Ownership::Installed,
+        );
+        state.set(
+            dotpkg::model::SCOOP,
+            &Name::new("scoop-ghost"),
+            dotpkg::state::Ownership::Installed,
+        );
+        state.set(
+            WINGET,
+            &Name::new("Git.Git"),
+            dotpkg::state::Ownership::Installed,
+        );
+        state.set(
+            WINGET,
+            &Name::new("winget-ghost"),
+            dotpkg::state::Ownership::Installed,
+        );
+
+        let winget_scan = ScanOutcome::Scanned(Scan {
+            installed: vec![installed(WINGET, "Git.Git")],
+            opaque: Vec::new(),
+            warnings: Vec::new(),
+        });
+
+        let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
+
+        assert_eq!(
+            dropped,
+            vec![Name::new("scoop-ghost"), Name::new("winget-ghost")],
+            "both ghosts, scoop first: {dropped:?}"
+        );
+        assert!(
+            state.owns(dotpkg::model::SCOOP, &Name::new("fzf")),
+            "scoop's live entry must survive"
+        );
+        assert!(
+            !state.owns(dotpkg::model::SCOOP, &Name::new("scoop-ghost")),
+            "scoop's ghost must be gone"
+        );
+        assert!(
+            state.owns(WINGET, &Name::new("Git.Git")),
+            "winget's live entry must survive"
+        );
+        assert!(
+            !state.owns(WINGET, &Name::new("winget-ghost")),
+            "winget's ghost must be gone"
+        );
+    }
+
+    #[test]
+    fn reconcile_ghosts_leaves_winget_untouched_when_its_scan_failed() {
+        // The other outcome of Task 6's `ScanOutcome`: a winget scan that
+        // FAILED is not evidence that nothing is installed, and treating it
+        // as if it were would delete an ownership record dotpkg needs in
+        // order to prune the package later. `fzf` is real and present here
+        // (unlike the test above's scoop side, which is a red herring on
+        // its own) precisely so that a mutant which "simplifies" the guard
+        // by reusing scoop's own already-computed `present` list for
+        // winget too -- a realistic copy-paste, since both blocks name
+        // their local variable `present` -- has something non-empty and
+        // wrong to hand `state.reconcile`, and gets caught doing it: see
+        // the report for a genuine RED run against exactly that mutant.
+        let tmp = tempfile::tempdir().unwrap();
+        scoop_root_with(tmp.path(), "fzf", "1.0.0");
+        let scoop = Scoop::new(tmp.path().to_path_buf());
+
+        let mut state = State::default();
+        state.set(
+            dotpkg::model::SCOOP,
+            &Name::new("fzf"),
+            dotpkg::state::Ownership::Installed,
+        );
+        state.set(
+            WINGET,
+            &Name::new("winget-ghost"),
+            dotpkg::state::Ownership::Installed,
+        );
+
+        let winget_scan = ScanOutcome::Unscannable("winget list exited 1".to_string());
+
+        let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
+
+        assert!(
+            dropped.is_empty(),
+            "an unscannable winget must drop nothing at all: {dropped:?}"
+        );
+        assert!(
+            state.owns(WINGET, &Name::new("winget-ghost")),
+            "a failed scan must never be read as \"nothing is installed\""
+        );
+        assert!(
+            state.owns(dotpkg::model::SCOOP, &Name::new("fzf")),
+            "scoop's own half must be unaffected by winget's scan failure"
+        );
     }
 }

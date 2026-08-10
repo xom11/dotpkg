@@ -832,64 +832,96 @@ impl Execution {
     }
 }
 
-/// One `scoop install` line per artifact in the run, written **before** the
-/// first mutation.
+/// One reinstall line per artifact in the run, written **before** the first
+/// mutation.
 ///
 /// A run that dies leaves a file that puts the machine back. A run that only
 /// prints advice leaves nothing once the terminal is gone -- and the terminal
 /// is exactly what a broken `git` or a broken shell takes with it.
 ///
-/// Removals never appear: this file only ever puts software back. Neither
-/// does a winget step yet -- see the `Step::Winget` arm below.
+/// Removals never appear: this file only ever puts software back.
+/// `ScoopStep::Remove` and `WingetStep::Remove` are both skipped for that
+/// reason.
+///
+/// The two backends do NOT carry the same promise, and the file's own header
+/// says so rather than leaving a human whose run just died to assume they do.
+/// A scoop line names a manifest dotpkg **staged and hash-verified on local
+/// disk**; replaying it puts back bytes dotpkg already proved. A winget line
+/// is a **request re-resolved against an index dotpkg does not hold** --
+/// winget, not dotpkg, decides at replay time whether that exact version is
+/// still there to install. Measured
+/// (`docs/measurements-2026-08-09-winget.md` §4): version retention is a
+/// publisher policy, not a winget guarantee, spanning 8 versions
+/// (`BurntSushi.ripgrep.MSVC`) to 828 (`JanDeDobbeleer.OhMyPosh`) -- so a
+/// winget recovery line can fail in a way a scoop one, replaying a file
+/// already on disk, cannot.
 pub fn write_recovery(path: &Path, steps: &[Step]) -> Result<()> {
     use std::fmt::Write as _;
     let mut text = String::from(
         "@echo off\r\nREM Written by dotpkg before it changed anything.\r\n\
-         REM Each line reinstalls one package from the manifest dotpkg staged\r\n\
-         REM and hash-verified. Safe to run more than once.\r\n",
+         REM A scoop line below reinstalls a manifest dotpkg staged and\r\n\
+         REM hash-verified on local disk: replaying it puts back bytes\r\n\
+         REM dotpkg already proved. A winget line is a different promise: \
+         it is a request \
+         re-resolved against an index dotpkg does not hold, and if that \
+         exact version has since fallen out of the index -- a publisher's \
+         call, not a winget guarantee -- the line fails. Safe to run more \
+         than once.\r\n",
     );
     for s in steps {
-        let (staged, arch) = match s {
+        match s {
             Step::Scoop(ScoopStep::Install { staged, arch, .. })
-            | Step::Scoop(ScoopStep::Replace { staged, arch, .. }) => (staged, arch),
-            Step::Scoop(ScoopStep::Remove { .. }) => continue,
-            // A later task adds a winget recovery line once this crate has
-            // measured one to build and an argv builder to build it from.
-            // Skipped here exactly like `ScoopStep::Remove` above: this
-            // function's job is "put software back", and there is nothing
-            // yet to put a winget package back FROM.
-            Step::Winget(_) => continue,
-        };
-        // Built from `install_argv` -- the exact argv the executor itself
-        // runs -- rather than typed out a second time here. A flag added to
-        // `install_argv` (like `-u`, which keeps a scoop self-update out of
-        // the uninstall/install window) then cannot silently drop out of
-        // just this line: measured, hand-duplicating it left a mutation that
-        // deleted `-u` from only the recovery line green across the whole
-        // suite, while the same deletion in `install_argv` itself turned
-        // red immediately.
-        let argv = crate::backend::scoop::install_argv(staged, arch.as_deref());
-        let last = argv.len() - 1;
-        let mut line = String::from("scoop");
-        for (i, part) in argv.iter().enumerate() {
-            line.push(' ');
-            if i == last {
-                // `%` is expanded by cmd even *inside* double quotes, so an
-                // unescaped `%` in a staged path (`C:\Users\a%b\...`) would
-                // make the recovery line reference an undefined batch
-                // variable instead of the manifest dotpkg actually staged.
-                // Doubling it to `%%` is how a batch file spells a literal
-                // `%`. Only the manifest path -- always argv's last element
-                // -- can contain one; the rest is scoop's own flags and an
-                // architecture name.
-                line.push('"');
-                line.push_str(&part.replace('%', "%%"));
-                line.push('"');
-            } else {
-                line.push_str(part);
+            | Step::Scoop(ScoopStep::Replace { staged, arch, .. }) => {
+                // Built from `install_argv` -- the exact argv the executor
+                // itself runs -- rather than typed out a second time here. A
+                // flag added to `install_argv` (like `-u`, which keeps a
+                // scoop self-update out of the uninstall/install window)
+                // then cannot silently drop out of just this line: measured,
+                // hand-duplicating it left a mutation that deleted `-u` from
+                // only the recovery line green across the whole suite, while
+                // the same deletion in `install_argv` itself turned red
+                // immediately.
+                let argv = crate::backend::scoop::install_argv(staged, arch.as_deref());
+                let last = argv.len() - 1;
+                let mut line = String::from("scoop");
+                for (i, part) in argv.iter().enumerate() {
+                    line.push(' ');
+                    if i == last {
+                        // `%` is expanded by cmd even *inside* double
+                        // quotes, so an unescaped `%` in a staged path
+                        // (`C:\Users\a%b\...`) would make the recovery line
+                        // reference an undefined batch variable instead of
+                        // the manifest dotpkg actually staged. Doubling it
+                        // to `%%` is how a batch file spells a literal `%`.
+                        // Only the manifest path -- always argv's last
+                        // element -- can contain one; the rest is scoop's
+                        // own flags and an architecture name.
+                        line.push('"');
+                        line.push_str(&part.replace('%', "%%"));
+                        line.push('"');
+                    } else {
+                        line.push_str(part);
+                    }
+                }
+                let _ = writeln!(text, "{line}\r");
             }
+            Step::Scoop(ScoopStep::Remove { .. }) => continue,
+            Step::Winget(WingetStep::Set { id, version, .. }) => {
+                // Built from `set_argv`, for the same reason the scoop line
+                // is built from `install_argv` and not typed out a second
+                // time: a flag dropped from `set_argv` must be missing here
+                // too, not silently preserved by a hand-written copy.
+                let argv = crate::backend::winget_exec::set_argv(id, version);
+                // No `%`-doubling and no quoting here, unlike the scoop line
+                // above: every element is one of winget's own flags, a
+                // package id, or a dotted version, and none of those three
+                // shapes can contain a space or a `%` the way an arbitrary
+                // staged filesystem path can.
+                let line = format!("winget {}", argv.join(" "));
+                let _ = writeln!(text, "{line}\r");
+            }
+            Step::Winget(WingetStep::Remove { .. }) => continue,
         }
-        let _ = writeln!(text, "{line}\r");
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;

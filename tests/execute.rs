@@ -4,6 +4,7 @@
 mod common;
 
 use common::fake_winget_mutator::FakeWingetMutator;
+use dotpkg::backend::winget_exec::set_argv;
 use dotpkg::execute::*;
 use dotpkg::model::{Name, Running, SCOOP};
 use dotpkg::state::{Ownership, State};
@@ -1732,5 +1733,56 @@ fn a_run_with_even_one_scoop_step_still_needs_a_scoop_root() {
     assert!(
         r.is_err(),
         "a scoop step against a non-scoop root must refuse: {r:?}"
+    );
+}
+
+// -- Task 16: `write_recovery` gains a winget line, and says what it is worth
+
+#[test]
+fn the_recovery_file_carries_a_winget_line_built_from_the_mutators_own_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("recover.cmd");
+    write_recovery(
+        &p,
+        &[
+            Step::Winget(WingetStep::Set {
+                id: Name::new("ducaale.xh"),
+                version: "0.24.1".to_string(),
+                guard: vec![],
+            }),
+            // A removal never appears: this file only ever puts software BACK.
+            Step::Winget(WingetStep::Remove {
+                id: Name::new("Vivaldi.Vivaldi"),
+                version: "8.1.4087.62".to_string(),
+                guard: vec![],
+            }),
+        ],
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&p).unwrap();
+
+    // Built from set_argv, not typed twice: a flag added there must appear
+    // here without anyone remembering.
+    for part in set_argv(&Name::new("ducaale.xh"), "0.24.1") {
+        assert!(text.contains(&part), "missing {part:?} from:\n{text}");
+    }
+    assert!(
+        !text.contains("Vivaldi"),
+        "a removal must never appear in a file that only reinstalls:\n{text}"
+    );
+    // The honest sentence about what a winget line is worth. Asserted on a
+    // phrase that ONLY that sentence can contain -- `text.contains("winget")`
+    // would pass on the argv line itself and prove nothing, which is what the
+    // first draft of this plan asserted.
+    assert!(
+        text.contains("re-resolved against an index dotpkg does not hold"),
+        "the file must say what a winget line is worth, not just contain the \
+         word winget:\n{text}"
+    );
+    // And the control: the scoop half's own promise must still be stated, or a
+    // rewrite that replaced one sentence with the other would pass above.
+    assert!(
+        text.contains("hash-verified"),
+        "the scoop promise must survive alongside the winget one:\n{text}"
     );
 }

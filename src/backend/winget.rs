@@ -267,7 +267,9 @@ pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
 /// **Coverage is bounded and the bound is measured, not guessed:** winget only
 /// creates these directories for `portable` packages -- 4 of 36 installed ids
 /// on a14 -- so every EXE/MSI application is invisible here and reachable only
-/// through `names` or `[winget.guard]`.
+/// through `names`. `config::parse` accepts a `[winget.guard]` entry per
+/// package, but nothing merges it into `names` or anything else this fence
+/// reads, so it does not widen this bound yet.
 ///
 /// **Why a per-id prefix test rather than parsing the directory name.** The
 /// segment is `<id>_<sourceIdentifier>` in all 5 measured cases, but splitting

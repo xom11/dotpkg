@@ -499,6 +499,49 @@ guards = { }
     }
 
     #[test]
+    fn two_guard_values_that_fold_to_the_same_process_name_collapse_to_one() {
+        // `Tailscaled.EXE`, `TAILSCALED`, and `tailscaled` all fold to the
+        // same string through `sys::normalize`. Without the `.contains()`
+        // guard in `parse`, the guard list would carry that name three
+        // times over -- harmless for matching (`Running::covers` only asks
+        // "is this string in the set"), but a phantom duplicate nothing
+        // written in pkg.toml led a reader to expect.
+        let cfg = parse(
+            r#"
+[winget.guard]
+"Tailscale.Tailscale" = ["Tailscaled.EXE", "TAILSCALED", "tailscaled"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.winget.guard.get(&Name::new("Tailscale.Tailscale")),
+            Some(&vec!["tailscaled".to_string()])
+        );
+    }
+
+    #[test]
+    fn two_winget_guard_keys_differing_only_in_case_are_rejected() {
+        // The same hazard `a_duplicate_scoop_opts_key_is_rejected_rather_than_silently_clobbered`
+        // guards against, for `[winget.guard]`'s own keys: TOML cannot
+        // express a literal duplicate key, so serde never sees a collision
+        // -- it is created by `Name`'s folding, inside `fold_map`, same as
+        // `[scoop.opts]`.
+        let err = parse(
+            r#"
+[winget.guard]
+"Tailscale.Tailscale" = ["tailscaled"]
+"tailscale.tailscale" = ["tailscale-ipn"]
+"#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Tailscale.Tailscale") && msg.contains("tailscale.tailscale"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn a_bad_bucket_name_is_blamed_on_pkg_toml_not_on_a_lock_that_is_not_involved() {
         // ensure_plain_component's message used to hardcode "the lock's",
         // which is simply false here -- there is no lock, and the offending

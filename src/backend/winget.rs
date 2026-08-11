@@ -905,13 +905,15 @@ impl<C: WingetCmd> Backend for Winget<C> {
         }
         // Deliberately NOT given `version_liveness`'s `INTERNAL_ERROR` arm
         // (Task 7, measurements-2026-08-11 §5). That arm's message rests on
-        // "0 nonzero exits in 105 invocations", and every reader-side probe
-        // behind that count exercises `show --id <id> -v <ver> …` -- the
-        // argv `version_liveness` calls -- never the flagless `show --id
-        // <id> …` this method calls. Copying the same wording here would
-        // attribute a population this call was never part of. **Reasoned,
-        // not measured**: closing this gap correctly needs its own probe of
-        // this exact argv under contention, not a copy of someone else's.
+        // 105 reader-side calls that split exactly two ways: 85 of
+        // `version_liveness`'s own `show --id <id> -v <ver> …` and 20 of
+        // `list -e --id <id> …` (`is_user_scope`'s argv). Neither is this
+        // method's flagless `show --id <id> …` -- that argv has MEASURABLY
+        // zero calls in that population, not merely an unconfirmed one.
+        // Copying the same wording here would attribute those 105 calls to a
+        // call that was not part of them. Closing this gap correctly needs
+        // its own probe of this exact argv under contention, not a copy of
+        // someone else's.
         if out.code != 0 {
             return Resolution::Failed {
                 why: format!(
@@ -1072,12 +1074,16 @@ pub(crate) fn version_liveness(
     }
     if out.code == INTERNAL_ERROR {
         // `INTERNAL_ERROR` was measured from `source update`, never from
-        // `show`: this argv returned 0 nonzero exits in 105 invocations, 30 of
-        // them against a continuously running `source update`. That the reader
-        // wins the race is a MECHANISM inferred from those numbers, not a
-        // measured property of this call, and this arm exists so that if the
-        // inference is ever wrong the operator gets the cause rather than a
-        // bare exit code. There is no retry: see this arm's own test.
+        // `show` or `list`: those two argvs returned 0 nonzero exits in 105
+        // invocations COMBINED, not 105 of this one call alone. 85 are this
+        // exact `show --id <id> -v <ver>` argv (P2 S2's 40, P2 S4's 15, and
+        // P7's 30 against a continuously running `source update`); the other
+        // 20 are `list -e --id <id>` (`is_user_scope`'s argv, not this
+        // function's). That the reader wins the race is a MECHANISM inferred
+        // from those numbers, not a measured property of this call, and this
+        // arm exists so that if the inference is ever wrong the operator
+        // gets the cause rather than a bare exit code. There is no retry:
+        // see this arm's own test.
         return Err(format!(
             "{}: winget exited {:#x}, which was measured to mean another winget process held \
              the index -- re-run once nothing else is using winget",

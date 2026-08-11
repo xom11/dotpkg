@@ -112,13 +112,23 @@ fn verdict(is_elevated: Option<bool>, in_admins: Option<bool>) -> Option<bool> {
 /// (`SaferComputeTokenFromLevel`'s documented mechanism) -- nobody dumped
 /// this token's group attributes to confirm it, so that is the reasoned
 /// explanation for the `IsInRole` result, not itself an observation.
-/// `CheckTokenMembership` is believed to honour DENY_ONLY the same way
-/// `IsInRole` does -- `WindowsPrincipal.IsInRole` calls it internally -- but
-/// `CheckTokenMembership` is the half of this function that has never
-/// actually run on a Windows machine: what was measured was .NET's
-/// `IsInRole`, on that one token, not this Win32 call. Both gaps -- the
-/// unmeasured ordinary session and the never-run `CheckTokenMembership` --
-/// are open until a Windows run exercises them.
+/// `CheckTokenMembership` honours DENY_ONLY the same way `IsInRole` does.
+/// That was reasoned when this function was written -- `WindowsPrincipal.
+/// IsInRole` calls it internally -- and it has since been **measured**, which
+/// is the only reason the sentence is stated this plainly. On a14, from a
+/// `runas /trustlevel:0x20000` child of an elevated shell, `dotpkg apply
+/// --yes --allow-prune` of a user-scope `ducaale.xh` exited 0, printed `done
+/// winget ducaale.xh verified on disk`, and the package really was gone. The
+/// single-signal version returned exit 2 and a refusal for that same shape.
+/// So `verdict` has now been observed answering `Some(false)` on a token
+/// whose `TokenIsElevated` is 1 -- the direction this whole two-signal
+/// design exists for, and the one an assertion of `Some(true)` can never
+/// reach.
+///
+/// One gap stays open: an ordinary non-elevated interactive session, with no
+/// `runas` at all, is still unmeasured. It is expected to answer `Some(false)`
+/// on the first signal alone, never consulting the second, but that is
+/// reasoned.
 #[cfg(windows)]
 pub fn elevated() -> Option<bool> {
     use std::mem;

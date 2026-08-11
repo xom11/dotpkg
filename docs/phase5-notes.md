@@ -25,14 +25,19 @@ run, and never of the mutation run:
 - the **Windows suite**, on `4bbe3be`, and then a second time on `765e091` (see
   "And then the tree moved twice more" two paragraphs below);
 - the **dogfood**, on `4bbe3be`;
-- the **mutation run**, on neither — it completed **twice**, on `4673517` (70
-  mutants) and on `ee46172` (72), both of them commits *before* `4bbe3be` existed.
+- the **mutation run**, on neither — it completed **twice** while the branch was
+  open, on `4673517` (70 mutants) and on `ee46172` (72), both of them commits
+  *before* `4bbe3be` existed, and then a **third time after the merge**, scoped
+  by file rather than by diff: **618 mutants on `8ed3de0`** (see "The file-scoped
+  mutation run" under Verification). That third run corrected four numbers this
+  file had inherited and never re-derived, and closed none of them.
 
-Why the mutation run's numbers still describe the code that merged is an argument
-about *attributability* rather than a measurement taken on a later tree, and it
-lives where the run is recorded ("The mutation run" under Verification) instead of
-being restated here — collapsing it into "measured on the shipping tree" is exactly
-the move the promise two paragraphs above forbids.
+Why the two branch-time mutation runs' numbers still describe the code that merged
+is an argument about *attributability* rather than a measurement taken on a later
+tree, and it lives where the runs are recorded ("The mutation run" under
+Verification) instead of being restated here — collapsing it into "measured on the
+shipping tree" is exactly the move the promise two paragraphs above forbids. The
+third run needs no such argument: it ran on the merge commit itself.
 
 **Two of the questions the dogfood was meant to settle** came back
 **inconclusive**, and those are recorded as inconclusive and given
@@ -1697,6 +1702,60 @@ evidence about *both*, and it is the one thing a count of 57 or 59 caught cannot
 tell you. The two survivors' current status, their move from `:241` to `:251`
 across the split, and why neither is closed, are still-open item 19.
 
+### The file-scoped mutation run: 618 mutants, and it corrected four inherited numbers
+
+**Measured**, after the merge, on `8ed3de0`, and recorded here because it settles
+questions this file had left open by name.
+
+Both earlier runs were scoped **by diff**, so they could only mutate lines this
+phase changed. This one was scoped **by file** — `-f` for each of the eleven
+`src/*.rs` files the phase touched — which is a superset covering Phase 4 and 4b
+code the phase depends on but never edited:
+
+```
+618 mutants tested in 39m: 27 missed, 516 caught, 75 unviable
+```
+
+**0 `TIMEOUT`, at `-j 4`.** That parallelism is the point, and it was not
+available before. Phase 4 lost a whole run to disk starvation at `-j 4` and
+identified the fix as moving `TMPDIR` to the machine's 1.8 TB volume; Phase 4b
+recorded that the fix *"is NOT available here: `/Volumes/ssd` is TCC-blocked from
+this sandbox. Lowering parallelism is the substitute."* The volume became
+reachable, so this run used it: `TMPDIR=/Volumes/ssd/...`, temp trees peaking
+around 4.3 GiB there while the internal disk never fell below 18 GiB. The
+substitute was no longer needed, and Phase 4's own diagnosis is now confirmed by
+demonstration rather than carried as inference.
+
+**What it corrected.** Four inherited numbers, all in the still-open list above,
+none of them a defect in code and none of them closable here:
+
+| what the record said | measured | where |
+|---|---|---|
+| `sys.rs`: **3** `#[cfg(windows)]` mutants | **4** | `sys.rs:139` ×3, `:163` ×1 |
+| `floor_char_boundary`: **6** | **7** | `winget.rs:43`, `:46`, `:47` |
+| `parse_list`: **6** | **7** | `winget.rs:78`, `:92`, `:108`, `:114`, `:150` |
+| inherited `winget.rs` total: **14** | **16** | 7 + 7 + 1 + 1 |
+
+And it found two survivors **no previous phase recorded at all** — `main.rs:627`
+and `scoop.rs:222` — both in untouched code, both invisible to any diff-scoped
+run by construction.
+
+**Why the corrections were possible and had not been made.** Every one of these
+numbers was inherited and quoted forward without being re-derived, and the reason
+is mechanical rather than careless: no completed run had ever covered the files
+they describe. Phase 4b's own record says so for `sys.rs` — *"NOT COVERED BY
+THIS RUN AT ALL: `src/sys.rs` (I did not pass `-f src/sys.rs`)"* — and its
+`winget.rs` figures came from a diff-scoped pass. **A number nobody can
+re-derive is a number nobody can check**, which is the same lesson this file
+records twice elsewhere, once for `file:line` citations and once for a document
+asserting its own version.
+
+**What it did not do.** It closed nothing. All 27 survivors are either inherited,
+accepted as equivalent, or blocked on the Windows mutation run that has still
+never happened. `package_roots()`'s two are unchanged (item 19), and the four
+`sys.rs` mutants remain a platform gap — now measured to be one rather than
+reasoned to be one.
+
 ### The Windows suite: it ran twice, because the tree moved after the first run
 
 **Measured** on a14 (`zenbook-a14`). Two runs belong here, on the same footing as
@@ -2331,9 +2390,10 @@ this list.
       already `vec![]` — identical, byte for byte, to what the mutant returns.
       No test on this platform can distinguish two functions whose real outputs
       are the same value; that is not a coverage gap, it is arithmetic. Same
-      bucket as this file's own three `#[cfg(windows)]` `sys.rs` mutants above:
-      "inert on macOS ... a platform gap, not a test gap, only resolvable by a
-      mutation run *on* Windows."
+      bucket as this file's own four `#[cfg(windows)]` `sys.rs` mutants below:
+      inert on macOS, a platform gap rather than a test gap, resolvable only by a
+      mutation run *on* Windows — and for those four, that bucket is now
+      **measured** rather than reasoned, by the file-scoped run.
     - **`vec![Default::default()]` is not equivalent, only unreached.** It
       returns `vec![PathBuf::new()]`, one element whose folded prefix is `"/"`.
       On a Unix-like machine every absolute path folds to a `/`-prefixed string
@@ -2397,22 +2457,38 @@ so the next phase inherits a named list rather than a surprise.
 
 - **An ordinary non-elevated Windows session with no `runas`** has never been
   measured (item 15 above).
-- **Three `#[cfg(windows)]` mutants in `sys.rs`** — two in `elevated()`'s
-  `Some(true)` / `Some(false)` returns, one in a `!=`/`==` inside it. Not test
-  gaps: that body is not compiled off Windows, so no macOS mutation run can
-  exercise them. Resolvable only by a mutation run *on* Windows. **Unchanged by
-  Task 9**, and worth being explicit about why: the suite ran on Windows, but a
-  *suite* run is not a *mutation* run, and no `cargo mutants` invocation has ever
-  happened on a Windows machine in this project. `package_roots()`'s two survivors
-  (item 19) are now blocked on the same missing run, so the Windows mutation run is
-  a single gate holding five mutants rather than three.
+- **Four `#[cfg(windows)]` mutants in `sys.rs`, not three — and this is the
+  first time any run has actually observed them.** **Measured** by the
+  file-scoped run described in "The file-scoped mutation run" below: three
+  function replacements at `src/sys.rs:139` (`elevated` → `None`,
+  → `Some(false)`, → `Some(true)`) and one `!=`→`==` at `:163`, all inside the
+  `#[cfg(windows)] pub fn elevated()` body. `docs/phase4b-notes.md:593` records
+  **three**, and this file repeated it; the count was never wrong in kind, only
+  in number, because no run had ever covered the file. Phase 4b says so itself:
+  *"NOT COVERED BY THIS RUN AT ALL: `src/sys.rs` (I did not pass `-f
+  src/sys.rs`)"*. Task 9's own diff-scoped run did not reach them either, since
+  this phase changed no line in that function.
+
+  The characterisation survives the correction and is now **measured rather than
+  reasoned**: they are a platform gap, not a test gap. On macOS the
+  `cfg(not(windows))` arm returns `None` unconditionally, so the `None`
+  replacement is an *equivalent* mutant there; and nothing on macOS asserts a
+  value, so `Some(false)` and `Some(true)` survive for the same reason. Only a
+  mutation run *on* Windows can distinguish any of the four. **No `cargo
+  mutants` invocation has ever happened on a Windows machine in this project** —
+  the suite ran there twice, but a *suite* run is not a *mutation* run.
+  `package_roots()`'s two survivors (item 19) are blocked on the same missing
+  run, so the Windows mutation run is a single gate holding **six** mutants.
 - **The accepted equivalent mutant on the `outstanding_skips` check** that Phase
   4b recorded at `main.rs:773`; the call is at `main.rs:856` on this tree.
   Closing it needs a fake scoop binary (which a standing test policy forbids) or
   a production change.
-- **14 mutants in `src/backend/winget.rs`, in Phase 4 code** —
-  `floor_char_boundary` (6), `parse_list` (6), `parse_versions` (1),
-  `RealWinget::run` (1). This phase added **699** lines to that file (against 15
+- **16 mutants in `src/backend/winget.rs`, in Phase 4 code, not 14** —
+  **measured**: `floor_char_boundary` (**7**), `parse_list` (**7**),
+  `parse_versions` (1), `RealWinget::run` (1). `docs/phase4b-notes.md:606`
+  records 6 and 6 for the first two, giving 14; the completed file-scoped run
+  described below lists seven each. The **functions** Phase 4b named were right;
+  two of its four counts were not. This phase added **699** lines to that file (against 15
   deleted) and closed none of them — `git diff --numstat 1d633c6 --
   src/backend/winget.rs`, measured by Task 9c on `4bbe3be` and unchanged since:
   `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is empty, so the
@@ -2425,30 +2501,41 @@ so the next phase inherits a named list rather than a surprise.
   retry-delay test, its fake's instant recorder, and the reworded
   `INTERNAL_ERROR` arm — and Task 9b's `ee46172` then added a further **88 net**
   (`+90/-2`) for the `package_roots` split.
-  - **What is known about the 14, and what is not — because this item used to
-    answer that question two ways in one paragraph.** The **four functions and the
-    6/6/1/1 split above are Phase 4b's record**, carried unchanged from
-    `docs/phase4b-notes.md`, and that is the only breakdown anything measured
-    supports. **Task 9b re-observed the count and nothing more:** a
-    `cargo mutants --file src/backend/winget.rs` run (dispatched to check Task 9b's
-    own fix, not this list) reported 14 missed before it was interrupted partway
-    through and never printed a summary line. This document then wrote that
-    re-observation up as finding them "all in these same two functions", which
-    **cannot be right beside the split above**: four functions are named, and
-    `floor_char_boundary` plus `parse_list` account for 6 + 6 = **12**, not 14.
-    The ledger records the same two-function attribution
-    (`progress.md:144`), so the disagreement is between the ledger and Phase 4b's
-    breakdown, not a transcription slip here.
-  - **Not reconciled by choosing a number, because no evidence on hand can.** An
-    interrupted run is not authoritative about *which* functions its survivors sat
-    in any more than about how many there were; and the split it would have to be
-    checked against is inherited, not re-derived here. So: the **count 14 is
-    corroborated** by a run that did not finish, the **6/6/1/1 attribution stands
-    on Phase 4b's record alone**, and the two-function claim is **withdrawn** —
-    it was never measured, it is arithmetically inconsistent with the split it was
-    printed next to, and settling it needs a completed file-scoped run that no
-    task in this phase produced.
+  - **Settled by measurement, and the settlement corrects the inherited record.**
+    This item previously said that the question needed "a completed file-scoped
+    run that no task in this phase produced". That run has since been produced —
+    see "The file-scoped mutation run" in Verification — and it resolves every
+    open thread here:
+    - **The two-function claim was wrong**, as its own arithmetic said it must
+      be. `parse_versions` and `RealWinget::run` each contribute one survivor, so
+      the survivors sit in **four** functions, exactly the four Phase 4b named.
+      The claim came from a run that never finished, and the ledger carried the
+      same error; both are withdrawn.
+    - **Two of Phase 4b's four counts were low.** `floor_char_boundary` and
+      `parse_list` have **seven** survivors each, not six, so the inherited total
+      is **16, not 14**. Nothing closed them and nothing reopened them; the
+      earlier number was simply never re-derived, because no completed run had
+      covered the file since Phase 4b's own, which was scoped by diff.
+    - **What that says about the earlier disagreement:** it was not between the
+      ledger and Phase 4b's breakdown, as this file previously concluded. Both
+      were wrong, in different ways and for the same underlying reason — an
+      inherited number that no one re-measured, quoted forward twice.
 - **Two mutants in `winget_exec.rs`, inside `RealWingetMutator::run`** — a
   `NotFound == -> !=` and an `unwrap_or(-1) -> unwrap_or(1)`. Covering them means
   spawning a real `winget.exe` from the test suite, which this project does not
-  do.
+  do. **Measured** at `winget_exec.rs:376` and `:385` by the file-scoped run,
+  confirming Phase 4b's record for this pair unchanged.
+- **Two survivors no previous phase recorded at all**, both in code this phase
+  did not touch, both surfaced only because the file-scoped run covered whole
+  files rather than a diff. **Measured:**
+  - `src/main.rs:627` — `replace > with <`. Distinct from the accepted
+    equivalent mutant above, which is at `:856`.
+  - `src/backend/scoop.rs:222` — `replace match guard e.kind() ==
+    std::io::ErrorKind::NotFound with true` in `<impl Backend for Scoop>::scan`.
+    This is the `NotFound`-idiom shape `docs/phase3-notes.md`'s still-open item 4
+    named as a family; a mutation survivor is a stronger statement about it than
+    the reading that named it, and it belongs to the same untouched-code bucket
+    as the rest of this list.
+
+  Neither is in this phase's scope. They are here because a list that omits what
+  a run found reads as a list of everything there is.

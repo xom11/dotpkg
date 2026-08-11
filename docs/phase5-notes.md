@@ -1082,6 +1082,15 @@ triages whatever remains.
   the two branches was verified by reading against the measurement document
   instead. Likely the right call — `std::env::var` mutation across parallel Rust
   tests is its own hazard — but recorded rather than silently accepted.
+  **Partially closed by Task 9b** (commit `ee46172`): the path construction was
+  extracted into `package_roots_with(local_appdata: Option<&str>, program_files:
+  Option<&str>)`, a pure function taking the two variables as plain values
+  instead of reading `std::env` itself, with four new tests asserting the exact
+  paths — including the `"Microsoft"` segment on the user-scope branch and its
+  absence on the machine-scope one — with no environment mutation anywhere.
+  `package_roots()` itself now just reads the two variables and delegates, and
+  stays genuinely untested; that residual moved, it did not close. See "Still
+  open" item 19 for what a mutation run confirmed about it.
 - **`ScriptedWinget` is a second `WingetCmd` fake in the crate**;
   `src/apply.rs`'s test module already has `FakeWinget`. A reviewer may fairly
   call that duplication. It stands because `FakeWinget` lives in a different
@@ -1120,9 +1129,9 @@ triages whatever remains.
 
 Items 1-15 are `docs/phase4b-notes.md`'s list renumbered one for one, with each
 item's status stated against it: 2, 9 and 11 are the three this phase rewrote, 10
-is the one it deliberately did not close, and the rest are unchanged. Items 16-18
+is the one it deliberately did not close, and the rest are unchanged. Items 16-19
 are new in this phase — 16 from Task 8, 17 and 18 from the whole-branch review
-and the fix wave that answered it.
+and the fix wave that answered it, and 19 from Task 9b.
 
 1. **Downgrading a winget package.** *Decided, not deferred.* Unchanged from
    Phase 4b: measured, `install --version <older>` cannot do it, and the
@@ -1242,6 +1251,57 @@ and the fix wave that answered it.
     attached, and the fix wave that found it was a correction pass. The cheap
     version is one `mod common;` in `tests/prepare.rs`; the durable version is a
     single fixture-repo constructor that no caller can bypass.
+19. **Both survivors of Task 9's `--in-diff` mutation run are now on
+    `package_roots()` itself, not on the logic Task 9b extracted from it, and
+    neither is closed.** Task 9b (commit `ee46172`) split `package_roots()` into
+    that thin, still-untested wrapper and a new pure function,
+    `package_roots_with`, that takes the two environment values as plain
+    `Option<&str>` parameters and does the actual path construction. The same
+    `--in-diff` mutation run, re-run against `ee46172`, reports **72 mutants
+    tested in 3m: 2 missed, 59 caught, 11 unviable** (`mutants.out`, complete —
+    `start_time`/`end_time` both present, `missed.txt` holding exactly these two
+    lines, `caught.txt` 59 lines, `unviable.txt` 11 lines):
+    ```
+    MISSED src/backend/winget.rs:251:5: replace package_roots -> Vec<std::path::PathBuf> with vec![]
+    MISSED src/backend/winget.rs:251:5: replace package_roots -> Vec<std::path::PathBuf> with vec![Default::default()]
+    ```
+    The two survivors are the same pair as before, moved from `winget.rs:241`
+    (the old, undivided function) to `winget.rs:251` (the new delegating
+    `package_roots()`) — 57 caught became 59 (the two new `package_roots_with`
+    mutants, both now caught), and the 2 missed stayed 2, on the wrapper. Nothing
+    in the suite calls `package_roots()`: every test that reaches the winget path
+    signal goes through `apply::sample_fence_with_roots` with fabricated roots
+    instead (see "The Windows suite..." above), so no test observes either
+    mutation. The two mutants are not the same *kind* of gap and are
+    characterised separately for that reason:
+    - **`vec![]` is an equivalent mutant on macOS, not merely uncovered.**
+      `LOCALAPPDATA` and `ProgramFiles` are both unset on every macOS run of this
+      suite, so `package_roots()`'s real, correct output on this platform is
+      already `vec![]` — identical, byte for byte, to what the mutant returns.
+      No test on this platform can distinguish two functions whose real outputs
+      are the same value; that is not a coverage gap, it is arithmetic. Same
+      bucket as this file's own three `#[cfg(windows)]` `sys.rs` mutants above:
+      "inert on macOS ... a platform gap, not a test gap, only resolvable by a
+      mutation run *on* Windows."
+    - **`vec![Default::default()]` is not equivalent, only unreached.** It
+      returns `vec![PathBuf::new()]`, one element whose folded prefix is `"/"`.
+      On a Unix-like machine every absolute path folds to a `/`-prefixed string
+      too, so this mutant is not distinguishable *by that property* on macOS
+      either — but the real reason no test catches it is simpler and platform-
+      independent: nothing calls `package_roots()` at all, so nothing is ever in
+      a position to notice its return value is wrong.
+    - **Both are resolvable the same way: a mutation run *on* Windows**, where
+      `LOCALAPPDATA`/`ProgramFiles` are genuinely set and `main.rs`'s production
+      call path (`apply::sample_fence` → `package_roots()`) is live, so a test
+      exercising that path would see a real, non-empty, correctly-shaped answer
+      that either mutant would visibly break.
+    **What the split did close:** the part of the original gap that was about
+    *logic*, not *plumbing*. `package_roots_with` is now pinned by four tests —
+    both values present, each absent alone, both absent — each asserting the
+    exact resulting paths. The `"Microsoft"` segment the user-scope root carries
+    and the machine-scope one does not is one of the things they pin: swapping
+    which branch gets it, or swapping the two parameters, turns a test red, with
+    no `std::env` mutation anywhere in any of them.
 
 ### Inherited verification debt, carried unchanged
 
@@ -1266,7 +1326,12 @@ so the next phase inherits a named list rather than a surprise.
   read 534 until the whole-branch review (Minor 2) re-derived **535** against
   `c8c7f0d`; the fix wave that answered the review then added 76 more — the new
   retry-delay test, its fake's instant recorder, and the reworded
-  `INTERNAL_ERROR` arm.
+  `INTERNAL_ERROR` arm. **Re-observed, not re-measured, by Task 9b:** a
+  `cargo mutants --file src/backend/winget.rs` run (dispatched to check Task 9b's
+  own fix, not this list) found the same 14 mutants missed, all in these same
+  two functions, before the run was interrupted partway through and never
+  printed its own summary line — so this is a re-observation consistent with
+  the count above, not a fresh, complete, authoritative one.
 - **Two mutants in `winget_exec.rs`, inside `RealWingetMutator::run`** — a
   `NotFound == -> !=` and an `unwrap_or(-1) -> unwrap_or(1)`. Covering them means
   spawning a real `winget.exe` from the test suite, which this project does not

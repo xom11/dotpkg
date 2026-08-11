@@ -214,6 +214,112 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
     out
 }
 
+/// The directories winget installs a `portable` package into, one per scope.
+///
+/// **Measured** (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md`
+/// §3): the user-scope root held 5 package directories on a14, and the
+/// machine-scope root did not exist at all -- as did neither
+/// `%ProgramFiles%\WinGet\Links` nor its `(x86)` sibling. The machine-scope
+/// entry below is therefore **reasoned, not measured**: it is where a
+/// machine-scope portable would live, and no such install has been observed.
+///
+/// Returns an empty vector wherever these variables are unset, which is every
+/// non-Windows platform. `running_ids` is a no-op on an empty root list, so
+/// nothing needs a `cfg`.
+///
+/// **Structural:** nothing calls this yet. Wiring it into the scan/guard path
+/// is a later task in this same plan; until then this and `running_ids` are
+/// unreachable from anything but their own tests, hence the `allow`s.
+#[allow(dead_code)]
+pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        out.push(
+            std::path::PathBuf::from(local)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Packages"),
+        );
+    }
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        out.push(std::path::PathBuf::from(pf).join("WinGet").join("Packages"));
+    }
+    out
+}
+
+/// Which of `scanned` has a live process running out of its own winget package
+/// directory -- the winget analogue of `Scoop::running_apps`, and the signal
+/// three documents said could never fire for winget.
+///
+/// **This is the only signal that would catch a process whose name resembles
+/// nothing about its package.** Measured on a14: `kanata`'s process is
+/// `kanata_windows_tty_winIOv2_arm64`, and scoop's fence catches it purely
+/// because its executable lives under `$SCOOP/apps/kanata/`. `guard_names`
+/// would miss it entirely. Nothing gave winget that protection until this
+/// function.
+///
+/// **Coverage is bounded and the bound is measured, not guessed:** winget only
+/// creates these directories for `portable` packages -- 4 of 36 installed ids
+/// on a14 -- so every EXE/MSI application is invisible here and reachable only
+/// through `names` or `[winget.guard]`.
+///
+/// **Why a per-id prefix test rather than parsing the directory name.** The
+/// segment is `<id>_<sourceIdentifier>` in all 5 measured cases, but splitting
+/// on `_` assumes a winget id contains none, which is **unmeasured**, and the
+/// failure direction is the dangerous one: a truncated segment matches no
+/// installed id, so the fence misses and a running package can be replaced.
+/// Testing `scanned` against the segment assumes nothing about winget's naming
+/// and can only fail toward "no match".
+///
+/// The `_` boundary is load-bearing rather than decorative. a14 still carries
+/// `PhatMT97.VKey.Classic_...` from an uninstalled package, whose folded
+/// segment begins with installed `phatmt97.vkey`; a bare `starts_with` would
+/// report a package running that is not installed. A bare `<id>` segment with
+/// no suffix is accepted too, which is **reasoned, not measured** -- all 5
+/// observed directories carry a suffix.
+///
+/// **Structural:** see `package_roots`'s doc comment for why this carries the
+/// same `allow(dead_code)` -- nothing calls this until a later task.
+#[allow(dead_code)]
+pub(crate) fn running_ids(
+    roots: &[std::path::PathBuf],
+    procs: &[crate::sys::Process],
+    scanned: &[Name],
+) -> std::collections::BTreeSet<Name> {
+    fn fold(p: &std::path::Path) -> String {
+        p.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
+    }
+
+    let mut out = std::collections::BTreeSet::new();
+    for root in roots {
+        let prefix = format!("{}/", fold(root));
+        for p in procs {
+            // A process whose path cannot be read is `names`' job, not this
+            // function's: 22 of 223 on a14.
+            let Some(exe) = p.exe.as_deref() else {
+                continue;
+            };
+            let Some(rest) = fold(exe).strip_prefix(&prefix).map(str::to_string) else {
+                continue;
+            };
+            let Some(seg) = rest.split('/').next().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            for id in scanned {
+                let key = id.key();
+                let hit = seg == key
+                    || seg
+                        .strip_prefix(key)
+                        .is_some_and(|tail| tail.starts_with('_'));
+                if hit {
+                    out.insert(id.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Turn `parse_list`'s rows into a `Scan`: one fact per id, or an admission
 /// that no fact could be established.
 ///
@@ -1025,6 +1131,118 @@ impl<C: WingetCmd> Winget<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::Process;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    #[test]
+    fn running_ids_catches_a_package_whose_process_runs_from_its_winget_package_dir() {
+        // Measured on a14 (measurements-2026-08-11 §1): exactly one live
+        // process ran from under WinGet\Packages, and this is its real path.
+        let roots = vec![PathBuf::from(
+            r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages",
+        )];
+        let procs = vec![Process {
+            name: "vkey".to_string(),
+            exe: Some(PathBuf::from(
+                r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages\PhatMT97.VKey_Microsoft.Winget.Source_8wekyb3d8bbwe\VKey.exe",
+            )),
+        }];
+        let scanned = vec![Name::new("PhatMT97.VKey")];
+        assert_eq!(
+            running_ids(&roots, &procs, &scanned),
+            BTreeSet::from([Name::new("PhatMT97.VKey")])
+        );
+    }
+
+    #[test]
+    fn running_ids_requires_the_underscore_boundary_so_a_dead_sibling_dir_matches_nothing() {
+        // Measured: PhatMT97.VKey.Classic_... still exists on disk holding only
+        // a config.toml, has no <id>_<hash>.db and no ARP key, and is absent
+        // from `winget list`. Its folded segment starts with the folded id
+        // "phatmt97.vkey" and must NOT match, because what follows is '.' and
+        // not '_'. Without the boundary check this test goes green while the
+        // fence claims a package is running that is not even installed.
+        let roots = vec![PathBuf::from(
+            r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages",
+        )];
+        let procs = vec![Process {
+            name: "whatever".to_string(),
+            exe: Some(PathBuf::from(
+                r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages\PhatMT97.VKey.Classic_Microsoft.Winget.Source_8wekyb3d8bbwe\config.exe",
+            )),
+        }];
+        let scanned = vec![Name::new("PhatMT97.VKey")];
+        assert_eq!(running_ids(&roots, &procs, &scanned), BTreeSet::new());
+    }
+
+    #[test]
+    fn running_ids_ignores_a_process_whose_path_cannot_be_read() {
+        // Measured: 22 of 223 live processes reported no readable path. That is
+        // the blind spot `Running.names` covers and this function must not
+        // pretend to; a path-only implementation that unwrapped `exe` would
+        // panic, and one that treated None as a match would be worse.
+        let roots = vec![PathBuf::from(
+            r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages",
+        )];
+        let procs = vec![Process {
+            name: "vkey".to_string(),
+            exe: None,
+        }];
+        let scanned = vec![Name::new("PhatMT97.VKey")];
+        assert_eq!(running_ids(&roots, &procs, &scanned), BTreeSet::new());
+    }
+
+    #[test]
+    fn running_ids_only_answers_for_ids_the_scan_actually_found() {
+        // The dead-directory case from the other side: a live process under a
+        // package dir for an id that is not installed produces nothing,
+        // because `covers` is only ever asked about an `Installed`.
+        let roots = vec![PathBuf::from(
+            r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages",
+        )];
+        let procs = vec![Process {
+            name: "zoxide".to_string(),
+            exe: Some(PathBuf::from(
+                r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages\ajeetdsouza.zoxide_Microsoft.Winget.Source_8wekyb3d8bbwe\zoxide.exe",
+            )),
+        }];
+        assert_eq!(running_ids(&roots, &procs, &[]), BTreeSet::new());
+    }
+
+    #[test]
+    fn running_ids_folds_case_on_both_sides() {
+        // The real directory is mixed case ("PhatMT97.VKey_...") and
+        // `Name::key()` is the lowercased form. A comparison that folds only
+        // one side silently never matches -- the exact trap `guard_names`' own
+        // doc comment records for process names.
+        let roots = vec![PathBuf::from(r"C:\ROOT\Packages")];
+        let procs = vec![Process {
+            name: "x".to_string(),
+            exe: Some(PathBuf::from(
+                r"c:\root\packages\AJEETDSOUZA.ZOXIDE_Microsoft.Winget.Source_x\zoxide.exe",
+            )),
+        }];
+        let scanned = vec![Name::new("ajeetdsouza.zoxide")];
+        assert_eq!(
+            running_ids(&roots, &procs, &scanned),
+            BTreeSet::from([Name::new("ajeetdsouza.zoxide")])
+        );
+    }
+
+    #[test]
+    fn running_ids_returns_nothing_when_no_root_exists() {
+        // Off Windows `package_roots()` finds no environment variables and
+        // returns an empty vector; the function must be a no-op, not a panic.
+        let procs = vec![Process {
+            name: "vkey".to_string(),
+            exe: Some(PathBuf::from("/usr/bin/vkey")),
+        }];
+        assert_eq!(
+            running_ids(&[], &procs, &[Name::new("PhatMT97.VKey")]),
+            BTreeSet::new()
+        );
+    }
 
     #[test]
     fn guard_names_are_the_two_signals_measured_to_catch_a_real_process() {

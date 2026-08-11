@@ -31,6 +31,10 @@ enum Command {
         config: PathBuf,
         #[arg(long, default_value = "pkg.lock")]
         lock: PathBuf,
+        /// List every installed-but-unmanaged package instead of collapsing
+        /// them to one line per backend.
+        #[arg(long)]
+        show_unmanaged: bool,
     },
     /// Bring the machine to the state pkg.toml and pkg.lock describe.
     Apply {
@@ -72,6 +76,10 @@ enum Command {
         /// state directory. Must be an absolute path if given.
         #[arg(long)]
         state: Option<PathBuf>,
+        /// List every installed-but-unmanaged package instead of collapsing
+        /// them to one line per backend.
+        #[arg(long)]
+        show_unmanaged: bool,
     },
     /// Re-resolve pkg.toml against the buckets and rewrite pkg.lock. The only
     /// command that asks what is newest, and the only one that fetches.
@@ -442,7 +450,11 @@ fn present_after(scan: &Scan) -> Vec<Name> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Status { config, lock } => {
+        Command::Status {
+            config,
+            lock,
+            show_unmanaged,
+        } => {
             let declared = dotpkg::config::load(&config)?;
             let locked = dotpkg::lock::load_or_empty(&lock)?;
 
@@ -495,7 +507,7 @@ fn main() -> Result<()> {
                 &running,
                 &unscannable,
             );
-            print!("{}", dotpkg::render::render(&plan));
+            print!("{}", dotpkg::render::render(&plan, show_unmanaged));
         }
         Command::Apply {
             config,
@@ -507,6 +519,7 @@ fn main() -> Result<()> {
             keep_going,
             clone_missing_buckets,
             state,
+            show_unmanaged,
         } => {
             let state_path = state.unwrap_or_else(State::default_path);
             if !state_path.is_absolute() {
@@ -546,7 +559,7 @@ fn main() -> Result<()> {
                 &d.running,
                 &unscannable,
             );
-            print!("{}", dotpkg::render::render(&plan));
+            print!("{}", dotpkg::render::render(&plan, show_unmanaged));
 
             if clone_missing_buckets {
                 for (name, why) in d.scoop.clone_missing_buckets(&d.declared, &d.scoop) {

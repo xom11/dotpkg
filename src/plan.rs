@@ -165,6 +165,23 @@ impl Plan {
             .filter(|a| matches!(a, Action::Downgrade { backend, .. } if backend == WINGET))
             .count()
     }
+
+    /// How many installed-but-unmanaged packages this plan reports, across
+    /// every backend.
+    ///
+    /// Printed as its own clause in the summary line for
+    /// `refused_downgrade_count`'s stated reason: a printed line counted in no
+    /// number at all reads as "0 change(s), 0 skipped" above facts the user can
+    /// see. That argument is stronger here, because `render` collapses these
+    /// lines and the collapse is what removes the 36 lines that carried the
+    /// fact (measured on a14:
+    /// `docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §4).
+    pub fn unmanaged_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|a| matches!(a, Action::Unmanaged { .. }))
+            .count()
+    }
 }
 
 /// What a backend's declared-package pass may turn a version difference

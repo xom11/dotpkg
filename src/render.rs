@@ -5,8 +5,24 @@ use crate::plan::{Action, Plan, SkipReason};
 
 /// The plan is the product here: `status` is this and nothing else, and in
 /// Phase 2 `apply` prints exactly this before asking for confirmation.
-pub fn render(plan: &Plan) -> String {
+///
+/// `show_unmanaged` controls only how `Action::Unmanaged` is rendered, not
+/// which actions exist: false (the default a caller should wire up) collapses
+/// every backend's `Unmanaged` actions into one line per backend plus a hint
+/// to pass this flag; true prints today's one-line-per-package form and no
+/// hint. Measured on a14 (`docs/measurements-2026-08-11-phase5-guard-
+/// unmanaged-retry.md` §4): a real machine with 0 declared winget packages
+/// prints 36 `? winget` lines every run, and that volume -- not a missing
+/// dependency vocabulary -- is what this collapses.
+pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
     let mut out = String::new();
+    // Backend name paired with how many `Action::Unmanaged` entries carried
+    // it, built in the same pass as the main loop below rather than by a
+    // second scan over `plan.actions` -- so "the order backends first
+    // appeared" is the literal iteration order, not one this function
+    // re-derives. Only populated, and only consulted, when `show_unmanaged`
+    // is false.
+    let mut unmanaged_counts: Vec<(String, usize)> = Vec::new();
     for a in &plan.actions {
         let line = match a {
             Action::Install {
@@ -119,12 +135,28 @@ pub fn render(plan: &Plan) -> String {
                 };
                 format!("  ! {backend:<6} {name:<14} {why}")
             }
+            // Per backend, not merged into one running total: `{backend:<6}`
+            // is what tells a reader which tool to go look at, and folding
+            // scoop and winget into one count would repeat `docs/phase4-
+            // notes.md`'s still-open minor about the merged `opaque` list
+            // losing its own backend attribution.
             Action::Unmanaged {
                 backend,
                 name,
                 version,
             } => {
-                format!("  ? {backend:<6} {name:<14} {version:<24} (unmanaged -- no action)")
+                if show_unmanaged {
+                    format!("  ? {backend:<6} {name:<14} {version:<24} (unmanaged -- no action)")
+                } else {
+                    match unmanaged_counts.iter_mut().find(|(b, _)| b == backend) {
+                        Some((_, n)) => *n += 1,
+                        None => unmanaged_counts.push((backend.clone(), 1)),
+                    }
+                    // Nothing pushed for this action here: the collapsed line
+                    // is emitted once per backend, after the loop, from the
+                    // counts just built.
+                    continue;
+                }
             }
             Action::ArchDrift {
                 backend,
@@ -142,6 +174,25 @@ pub fn render(plan: &Plan) -> String {
         out.push('\n');
     }
 
+    // One collapsed line per backend, in the order each backend's first
+    // `Unmanaged` action appeared -- never merged into a single line, for the
+    // reason given on the arm above. `unmanaged_counts` is empty whenever
+    // `show_unmanaged` is true (the arm above never populates it on that
+    // path), so the hint below is never printed alongside the per-line form.
+    for (backend, n) in &unmanaged_counts {
+        out.push_str(&format!(
+            "  ? {backend:<6}   {n} installed outside dotpkg -- no action\n"
+        ));
+    }
+    if !unmanaged_counts.is_empty() {
+        out.push_str("      pass --show-unmanaged to list them\n");
+    }
+
+    // A plan whose only actions are `Unmanaged` is NOT empty -- `is_empty()`
+    // reads `plan.actions` itself, which still holds them regardless of
+    // `show_unmanaged` -- so this stays the "nothing happened at all" guard
+    // it always was, never mistaking "every action was a report" for "there
+    // were no actions".
     if plan.actions.is_empty() {
         out.push_str("  nothing to do\n");
     } else {
@@ -162,6 +213,18 @@ pub fn render(plan: &Plan) -> String {
                 ", {} winget downgrade(s) that will be refused",
                 plan.refused_downgrade_count()
             ));
+        }
+        // Its own clause, for the same reason `drift_count` and
+        // `refused_downgrade_count` have one: an `Unmanaged` action is
+        // counted by neither `change_count` nor `skip_count`
+        // (`Plan::unmanaged_count`'s own doc comment), and this function
+        // just collapsed every one of them -- printed lines that used to
+        // carry the fact directly -- into the one-line-per-backend form
+        // above (or, with `show_unmanaged`, kept them all on screen). Either
+        // way, a printed fact accounted for in no number at all would read
+        // as "0 change(s), 0 skipped" above a line the user can see.
+        if plan.unmanaged_count() > 0 {
+            summary.push_str(&format!(", {} unmanaged", plan.unmanaged_count()));
         }
         summary.push('\n');
         out.push_str(&summary);
@@ -635,7 +698,141 @@ mod tests {
 
     #[test]
     fn an_empty_plan_says_so_rather_than_printing_nothing() {
-        assert!(render(&Plan::default()).contains("nothing to do"));
+        assert!(render(&Plan::default(), false).contains("nothing to do"));
+    }
+
+    // -- Unmanaged collapsing ------------------------------------------------
+
+    #[test]
+    fn thirty_six_unmanaged_winget_packages_collapse_to_one_line_per_backend() {
+        // 36 is the measured count on a14 (`docs/measurements-2026-08-11-
+        // phase5-guard-unmanaged-retry.md` §4), and the fixture carries 36
+        // real entries: a `vec![]` or a one-entry plan cannot tell the
+        // collapsed form from the per-line form at all.
+        let mut plan = Plan::default();
+        for i in 0..36 {
+            plan.actions.push(Action::Unmanaged {
+                backend: WINGET.to_string(),
+                name: Name::new(format!("Vendor.Pkg{i}")),
+                version: "1.0".to_string(),
+            });
+        }
+        for i in 0..6 {
+            plan.actions.push(Action::Unmanaged {
+                backend: SCOOP.to_string(),
+                name: Name::new(format!("app{i}")),
+                version: "1.0".to_string(),
+            });
+        }
+        let out = render(&plan, false);
+        assert!(
+            out.contains("? winget   36 installed outside dotpkg"),
+            "was:\n{out}"
+        );
+        assert!(
+            out.contains("? scoop    6 installed outside dotpkg"),
+            "was:\n{out}"
+        );
+        assert!(out.contains("--show-unmanaged"), "was:\n{out}");
+        // Collapsed means collapsed: no individual id survives.
+        assert!(!out.contains("Vendor.Pkg17"), "was:\n{out}");
+        assert!(!out.contains("app3"), "was:\n{out}");
+        // The clause is mandatory. `change_count` counts an Unmanaged as
+        // nothing, so without it 42 printed facts sit under "0 change(s), 0
+        // skipped" -- the exact shape `refused_downgrade_count` earned its own
+        // clause to avoid.
+        assert!(
+            out.contains("0 change(s), 0 skipped, 42 unmanaged"),
+            "was:\n{out}"
+        );
+    }
+
+    #[test]
+    fn show_unmanaged_restores_every_line_and_drops_the_hint() {
+        let mut plan = Plan::default();
+        for i in 0..36 {
+            plan.actions.push(Action::Unmanaged {
+                backend: WINGET.to_string(),
+                name: Name::new(format!("Vendor.Pkg{i}")),
+                version: "1.0".to_string(),
+            });
+        }
+        let out = render(&plan, true);
+        assert!(out.contains("Vendor.Pkg17"), "was:\n{out}");
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.contains("(unmanaged -- no action)"))
+                .count(),
+            36
+        );
+        assert!(!out.contains("--show-unmanaged"), "was:\n{out}");
+        // The clause stays: the count is true in both forms.
+        assert!(out.contains("36 unmanaged"), "was:\n{out}");
+    }
+
+    #[test]
+    fn a_single_unmanaged_package_is_still_collapsed_so_there_is_one_shape_not_two() {
+        // Deliberate: no threshold. A threshold is a magic number and gives the
+        // output two shapes a reader has to learn.
+        let mut plan = Plan::default();
+        plan.actions.push(Action::Unmanaged {
+            backend: WINGET.to_string(),
+            name: Name::new("Vendor.One"),
+            version: "1.0".to_string(),
+        });
+        let out = render(&plan, false);
+        assert!(
+            out.contains("? winget   1 installed outside dotpkg"),
+            "was:\n{out}"
+        );
+        assert!(!out.contains("Vendor.One"), "was:\n{out}");
+        assert!(
+            out.contains("0 change(s), 0 skipped, 1 unmanaged"),
+            "was:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_plan_with_no_unmanaged_packages_gains_no_clause_and_no_line() {
+        let mut plan = Plan::default();
+        plan.actions.push(Action::Install {
+            backend: WINGET.to_string(),
+            name: Name::new("Git.Git"),
+            version: "2.0".to_string(),
+            arch: None,
+        });
+        let out = render(&plan, false);
+        assert!(!out.contains("unmanaged"), "was:\n{out}");
+        assert!(out.contains("1 change(s), 0 skipped"), "was:\n{out}");
+    }
+
+    #[test]
+    fn a_plan_whose_only_actions_are_unmanaged_is_not_reported_as_nothing_to_do() {
+        // `plan.actions.is_empty()` gates the "nothing to do" line. A plan
+        // built entirely from `Unmanaged` actions is not empty -- it holds
+        // 36 of them -- so this must print the collapsed line and the
+        // summary clause, never "nothing to do".
+        let mut plan = Plan::default();
+        for i in 0..36 {
+            plan.actions.push(Action::Unmanaged {
+                backend: WINGET.to_string(),
+                name: Name::new(format!("Vendor.Pkg{i}")),
+                version: "1.0".to_string(),
+            });
+        }
+        let out = render(&plan, false);
+        assert!(
+            !out.contains("nothing to do"),
+            "36 unmanaged reports are not nothing: {out}"
+        );
+        assert!(
+            out.contains("? winget   36 installed outside dotpkg"),
+            "was:\n{out}"
+        );
+        assert!(
+            out.contains("0 change(s), 0 skipped, 36 unmanaged"),
+            "was:\n{out}"
+        );
     }
 
     // -- render_preparation ---------------------------------------------
@@ -1068,7 +1265,9 @@ mod tests {
                 },
             ],
         };
-        let out = render(&plan);
+        // `true`: this test reads the individual `? scoop  antigravity` line
+        // below, which the default (`false`) collapses away.
+        let out = render(&plan, true);
         assert!(out.contains("+ scoop  ripgrep"));
         assert!(out.contains("^ winget Brave.Brave"));
         assert!(out.contains("v scoop  fzf"));
@@ -1094,7 +1293,7 @@ mod tests {
                 arch: None,
             }],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(out.contains("1 change(s), 0 skipped"), "{out}");
         assert!(
             !out.contains("architecture drift"),
@@ -1149,7 +1348,7 @@ mod tests {
                 },
             ],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(
             out.contains("(install, arm64)"),
             "an install must say which architecture it will fetch: {out}"
@@ -1192,7 +1391,7 @@ mod tests {
                 },
             ],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(out.contains("(install)"), "got: {out}");
         assert!(out.contains("(upgrade)"), "got: {out}");
         assert!(out.contains("(downgrade, from lock)"), "got: {out}");
@@ -1231,7 +1430,7 @@ mod tests {
                 arch: None,
             }],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(out.contains("^ winget Brave.Brave"), "got: {out}");
         assert!(
             out.contains("151.1.93.132") && out.contains("151.1.93.134"),
@@ -1278,7 +1477,7 @@ mod tests {
                 arch: None,
             }],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(
             out.contains("  ! winget"),
             "a run that will be refused is not a change dotpkg is about to make: {out}"
@@ -1320,7 +1519,7 @@ mod tests {
                 arch: None,
             }],
         };
-        let scoop_out = render(&scoop_plan);
+        let scoop_out = render(&scoop_plan, false);
         assert!(
             scoop_out.contains("  v scoop") && scoop_out.contains("(downgrade, from lock)"),
             "scoop downgrades are real and stay announced as downgrades: {scoop_out}"
@@ -1354,7 +1553,7 @@ mod tests {
                 reason: SkipReason::NotLocked,
             }],
         };
-        let out = render(&plan);
+        let out = render(&plan, false);
         assert!(out.contains("! winget Git.Git"), "got: {out}");
         assert!(
             out.contains("dotpkg update"),
@@ -1381,7 +1580,7 @@ mod tests {
                 reason: SkipReason::NotLocked,
             }],
         };
-        assert!(render(&plan).contains("dotpkg update"));
+        assert!(render(&plan, false).contains("dotpkg update"));
     }
 
     // -- render_execution --------------------------------------------------

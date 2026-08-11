@@ -1235,6 +1235,79 @@ fn status_says_so_when_the_lock_is_one_apply_would_refuse() {
     );
 }
 
+// -- Phase 5 task 5: collapsing Unmanaged, wired into main.rs's own flag ----
+//
+// `render::render`'s own unit tests (`src/render.rs`) pin the collapsing and
+// the summary clause as pure functions of a hand-built `Plan`. What only this
+// file can pin is the wiring: that `main.rs` actually declares `--show-
+// unmanaged` on `Status` and threads it into `render::render` rather than a
+// hardcoded `false` -- a library-linked test binary cannot observe `main.rs`
+// at all, so this is the only place a regression in that wiring could ever
+// turn red.
+
+#[test]
+fn show_unmanaged_restores_the_individual_line_that_the_default_run_collapses() {
+    // No package declared at all, so `status` has nothing to say about
+    // anything except the one undeclared, unowned scoop app this fixture
+    // installs -- `Fixture::new`'s own `ghost` app is unreadable JSON and
+    // lands in `opaque`, never in `installed`, so it cannot become a second
+    // `Action::Unmanaged` and confuse this fixture's count.
+    let f = Fixture::new("", "{}");
+    f.install_app("stray-tool", "1.0.0");
+
+    let default_out = f.run(&["status"]);
+    let shown_out = f.run(&["status", "--show-unmanaged"]);
+
+    assert_eq!(default_out.status.code(), Some(0), "{:?}", default_out);
+    assert_eq!(shown_out.status.code(), Some(0), "{:?}", shown_out);
+
+    let default_stdout = text(&default_out.stdout);
+    let shown_stdout = text(&shown_out.stdout);
+
+    // The default run: one collapsed line naming the backend and the count,
+    // a hint to pass the flag, the summary clause -- and never the package's
+    // own name, which is exactly what "collapsed" promises.
+    assert!(
+        default_stdout.contains("? scoop    1 installed outside dotpkg"),
+        "was:\n{default_stdout}"
+    );
+    assert!(
+        default_stdout.contains("--show-unmanaged"),
+        "the default output must hint at the flag that restores detail: \
+         {default_stdout}"
+    );
+    assert!(
+        !default_stdout.contains("stray-tool"),
+        "collapsed means collapsed -- the package's own name must not \
+         survive: {default_stdout}"
+    );
+    assert!(
+        default_stdout.contains("0 change(s), 0 skipped, 1 unmanaged"),
+        "the summary clause is mandatory, not merely the collapsed line: \
+         {default_stdout}"
+    );
+
+    // `--show-unmanaged`: the individual line comes back, named, and the
+    // hint -- which would now be advice to do what this run already did --
+    // disappears.
+    assert!(shown_stdout.contains("stray-tool"), "was:\n{shown_stdout}");
+    assert!(
+        shown_stdout.contains("(unmanaged -- no action)"),
+        "was:\n{shown_stdout}"
+    );
+    assert!(
+        !shown_stdout.contains("--show-unmanaged"),
+        "the hint must not appear once the flag it advertises was already \
+         passed: {shown_stdout}"
+    );
+    // The clause survives in both forms: the count is true regardless of how
+    // the facts underneath it are displayed.
+    assert!(
+        shown_stdout.contains("0 change(s), 0 skipped, 1 unmanaged"),
+        "was:\n{shown_stdout}"
+    );
+}
+
 // -- Phase 4 task 14: winget wired into the binary --------------------------
 //
 // Before this task nothing outside `src/backend/winget.rs` ever constructed a

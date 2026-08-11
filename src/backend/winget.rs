@@ -778,6 +778,23 @@ pub const NO_APPLICATIONS_FOUND: i32 = -1978335212;
 /// the user.
 pub const NO_VERSION_FOUND: i32 = -1978335209;
 
+/// `0x8A150001` -- winget's generic internal error.
+///
+/// **Measured** (`docs/measurements-2026-08-11-…` §5), and measured for
+/// **`source update` only**: that command exited nonzero 0 of 10 times run
+/// alone and 3 of 10 with one other winget process alive, every failure this
+/// code, returning in 60-72 ms with empty stdout where a success takes
+/// 348-623 ms and prints `Updating source: winget...`. So the failure is
+/// distinguishable on exit code, duration and output presence independently,
+/// and its trigger is a concurrent winget process rather than the network.
+///
+/// **Never observed from `show` or `list`.** Those argvs returned 0 nonzero
+/// exits in 105 invocations, including 30 fired against a continuously running
+/// `source update` loop. "Readers share the index and the updater needs it
+/// exclusively" is a **mechanism inferred from those numbers, not a measured
+/// property of the reader**, and nothing in this crate may state otherwise.
+pub(crate) const INTERNAL_ERROR: i32 = -1978335231; // 0x8A150001
+
 /// One package manager, `winget`, behind the `WingetCmd` seam -- generic so
 /// that `RealWinget` and a test's fake are interchangeable, and so nothing
 /// outside this module needs to know which one it is holding.
@@ -1152,26 +1169,69 @@ impl<C: WingetCmd> Winget<C> {
     /// whole-run, once-per-invocation refresh that only ever makes sense for
     /// winget, the same way per-bucket fetching only ever makes sense for
     /// scoop.
+    ///
+    /// Retries once, and only on `INTERNAL_ERROR`: measured
+    /// (`docs/measurements-2026-08-11-…` §5) as the one transient this call
+    /// actually has, caused by a concurrent winget process rather than the
+    /// network. Every other nonzero exit keeps the old behaviour exactly --
+    /// a retry on a definitive answer only slows a certain failure down.
     pub fn update_source(&self) -> Result<()> {
-        let out = match self.cmd.run(&[
+        // 1 s comes off the measurements rather than being picked: the failure
+        // returns in 60-72 ms and the competing winget call it lost to runs
+        // 407-1117 ms, so a shorter delay retries into the same contention.
+        // 1 s covers the measured maximum and is **not** measured to be
+        // sufficient on a slower machine.
+        self.update_source_with(std::time::Duration::from_secs(1))
+    }
+
+    /// `update_source` with the retry delay injected, so the tests do not
+    /// sleep. The seam this crate has extracted six times before, for the same
+    /// reason: the rule is what needs proving.
+    pub fn update_source_with(&self, retry_delay: std::time::Duration) -> Result<()> {
+        let argv = [
             "source",
             "update",
             "--name",
             "winget",
             "--disable-interactivity",
-        ]) {
-            Ok(out) => out,
-            // Only the new type changes here: any `WingetCmd::run` failure
-            // already turned into an `Err` for this caller, same as before.
-            Err(e) => bail!("winget source update could not be run: {e}"),
-        };
-        anyhow::ensure!(
-            out.code == 0,
+        ];
+        let mut last: Option<CmdOut> = None;
+        for attempt in 0..2 {
+            let out = match self.cmd.run(&argv) {
+                Ok(out) => out,
+                // Only the new type changes here: any `WingetCmd::run` failure
+                // already turned into an `Err` for this caller, same as before.
+                Err(e) => bail!("winget source update could not be run: {e}"),
+            };
+            if out.code == 0 {
+                return Ok(());
+            }
+            // Retry only the measured transient. Any other nonzero exit is a
+            // definitive answer, and retrying one only slows a certain failure.
+            if out.code != INTERNAL_ERROR {
+                last = Some(out);
+                break;
+            }
+            last = Some(out);
+            if attempt == 0 && !retry_delay.is_zero() {
+                std::thread::sleep(retry_delay);
+            }
+        }
+        let out = last.expect("the loop runs at least once");
+        if out.code == INTERNAL_ERROR {
+            anyhow::bail!(
+                "winget source update exited {} twice ({:#x} -- measured to mean another \
+                 winget process held the index): {}",
+                out.code,
+                out.code as u32,
+                out.stdout.lines().next().unwrap_or("(no output)")
+            );
+        }
+        anyhow::bail!(
             "winget source update exited {}: {}",
             out.code,
             out.stdout.lines().next().unwrap_or("(no output)")
-        );
-        Ok(())
+        )
     }
 }
 
@@ -1181,6 +1241,44 @@ mod tests {
     use crate::sys::Process;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    /// A `WingetCmd` answering from a scripted queue, counting its calls.
+    ///
+    /// Modelled on `src/apply.rs`'s `FakeWinget` (`RefCell` queue plus a call
+    /// recorder), which lives in a different module's `#[cfg(test)]` and cannot
+    /// be reached from here. Two fakes for one trait is worse than one, but the
+    /// alternative is making `apply`'s fake `pub(crate)` and dragging its four
+    /// canned constructors along with it.
+    ///
+    /// `calls()` is readable after `Winget::new` moves the fake because this
+    /// module is a child of the one that declares `Winget`, so its private
+    /// `cmd` field is in scope.
+    struct ScriptedWinget {
+        queue: std::cell::RefCell<std::collections::VecDeque<Result<CmdOut, CmdError>>>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl ScriptedWinget {
+        fn new(script: Vec<Result<CmdOut, CmdError>>) -> ScriptedWinget {
+            ScriptedWinget {
+                queue: std::cell::RefCell::new(script.into_iter().collect()),
+                calls: std::cell::Cell::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.get()
+        }
+    }
+
+    impl WingetCmd for ScriptedWinget {
+        fn run(&self, _args: &[&str]) -> Result<CmdOut, CmdError> {
+            self.calls.set(self.calls.get() + 1);
+            self.queue
+                .borrow_mut()
+                .pop_front()
+                .expect("a winget call was made that the script did not anticipate")
+        }
+    }
 
     #[test]
     fn running_ids_catches_a_package_whose_process_runs_from_its_winget_package_dir() {
@@ -1356,5 +1454,77 @@ mod tests {
         // checking against the hex recorded beside it catches that.
         assert_eq!(NO_APPLICATIONS_FOUND as u32, 0x8A150014);
         assert_eq!(NO_VERSION_FOUND as u32, 0x8A150017);
+    }
+
+    #[test]
+    fn the_internal_error_codes_decimal_and_hex_forms_still_agree() {
+        // The sixth constant that would otherwise exist exactly once in the
+        // tree with no test pinning its value -- the defect class
+        // NO_AVAILABLE_UPGRADE fell into, where every test builds its CmdOut
+        // from the constant so a sign flip flips the tests with it. Measured:
+        // 0x8A150001 = 2316632065 = (-1978335231 as u32).
+        assert_eq!(INTERNAL_ERROR as u32, 0x8A150001);
+    }
+
+    #[test]
+    fn update_source_retries_once_on_the_measured_contention_failure() {
+        // Measured (measurements-2026-08-11 §5): `source update --name winget`
+        // exited 0 of 10 times alone and 3 of 10 with another winget process
+        // alive, every failure 0x8A150001 in 60-72 ms with empty stdout. The
+        // consequence today is not a failed run -- update.rs downgrades the
+        // Err to a warning -- it is that `dotpkg update` resolves `latest`
+        // against an index it failed to refresh, 3 times in 10, and only warns.
+        let fake = ScriptedWinget::new(vec![
+            Ok(CmdOut {
+                code: INTERNAL_ERROR,
+                stdout: String::new(),
+            }),
+            Ok(CmdOut {
+                code: 0,
+                stdout: "Updating source: winget...\n".to_string(),
+            }),
+        ]);
+        let w = Winget::new(fake);
+        assert!(w.update_source_with(std::time::Duration::ZERO).is_ok());
+        assert_eq!(w.cmd.calls(), 2);
+    }
+
+    #[test]
+    fn update_source_does_not_retry_any_other_nonzero_exit() {
+        // A retry on a definitive answer only slows a certain failure down.
+        let fake = ScriptedWinget::new(vec![
+            Ok(CmdOut {
+                code: NO_APPLICATIONS_FOUND,
+                stdout: "No package found\n".to_string(),
+            }),
+            Ok(CmdOut {
+                code: 0,
+                stdout: "Updating source: winget...\n".to_string(),
+            }),
+        ]);
+        let w = Winget::new(fake);
+        assert!(w.update_source_with(std::time::Duration::ZERO).is_err());
+        assert_eq!(w.cmd.calls(), 1);
+    }
+
+    #[test]
+    fn update_source_gives_up_after_one_retry() {
+        let fake = ScriptedWinget::new(vec![
+            Ok(CmdOut {
+                code: INTERNAL_ERROR,
+                stdout: String::new(),
+            }),
+            Ok(CmdOut {
+                code: INTERNAL_ERROR,
+                stdout: String::new(),
+            }),
+        ]);
+        let w = Winget::new(fake);
+        let err = w.update_source_with(std::time::Duration::ZERO).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("another winget process"),
+            "was: {err:#}"
+        );
+        assert_eq!(w.cmd.calls(), 2);
     }
 }

@@ -16,10 +16,19 @@ $ dotpkg status
   ! scoop  kanata         running -- stop it first
   ^ winget Git.Git        2.51.0 -> 2.52.0         (upgrade)
   - scoop  aichat         0.30.0                   (prune, owned)
-  ? scoop  antigravity    2.0.6                    (unmanaged -- no action)
+  ? scoop    1 installed outside dotpkg -- no action
+      pass --show-unmanaged to list them
 
-  4 change(s), 1 skipped
+  4 change(s), 1 skipped, 1 unmanaged
 ```
+
+**Installed-but-unmanaged packages collapse to one line per backend**, for both
+backends, because a real machine carries a lot of them: on one measured machine
+winget alone accounted for 36, and thirty-six `?` lines bury the handful that say
+what will actually happen. `--show-unmanaged` lists each one individually
+instead — the same lines earlier versions printed — and the summary carries the
+count either way, so nothing on screen goes uncounted. Nothing dotpkg *does*
+changes: an unmanaged package is a report, never an action.
 
 It reads `pkg.toml` (what you declared), `pkg.lock` (what those declarations
 resolved to), `state.json` (what dotpkg installed, so prune can never reach a
@@ -98,6 +107,43 @@ winget holds the manifest, not dotpkg — so `--prepare` instead confirms with
 - **`dotpkg add` still does not exist for either backend.** Declaring a winget
   package is `pkg.toml`, then `dotpkg update <pkg>`, then `dotpkg apply`.
 
+### winget: naming the processes winget will not name
+
+dotpkg will not replace a package whose process is running: `status` reports it as
+skipped, `apply`'s plan-time check skips it, and the mid-run re-sampler holds the
+step if the process starts after the plan was made. For scoop it works that out on
+its own: the
+manifest names the executables, and a running binary's path sits under the app
+directory. For winget it largely cannot, because winget exposes no way for dotpkg
+to discover a package's process names — `winget list` reports neither executables
+nor aliases. So dotpkg guesses from the id (its last dotted segment, plus the
+display name) and reads the package directory of the `portable` packages that
+have one. Measured on one real machine: the guesses caught 3 of 36 installed
+winget ids, and only 4 of those 36 are `portable` installs with a package
+directory to read at all.
+
+`[winget.guard]` in `pkg.toml` is how you close the rest — it names the processes
+a winget id really runs:
+
+```toml
+[winget.guard]
+"Tailscale.Tailscale"   = ["tailscaled", "tailscale-ipn"]
+"AutoHotkey.AutoHotkey" = ["autohotkey64"]
+"Microsoft.WSL"         = ["wslservice"]
+```
+
+Those three are measured misses on a real machine rather than illustrations: the
+ids yield `tailscale`, `autohotkey` and `wsl`, and none of the three is what the
+machine is actually running. Names are compared case-insensitively with any
+executable suffix removed, so `Tailscaled.EXE` and `tailscaled` are the same
+entry, and a name dotpkg already guessed is not doubled. An entry that matches
+nothing installed and nothing declared warns once per run, because a stale or
+misspelled entry protects nothing and silence about that is worse than the
+warning; so does an entry on a package winget reported with no source at all,
+since dotpkg cannot establish such a package's state and skips it before any
+process check. A `pkg.toml` with no `[winget.guard]` table behaves exactly as
+before.
+
 ### Flags
 
 - `--yes` — Skip the confirmation prompt. Answers that one question and
@@ -117,6 +163,9 @@ winget holds the manifest, not dotpkg — so `--prepare` instead confirms with
   platform state directory. Must be an absolute path if given.
 - `--prepare` — Stage and fetch everything the plan needs, then stop before
   changing anything.
+- `--show-unmanaged` — List every installed-but-unmanaged package instead of
+  collapsing them to one line per backend. Reaches both tables `apply` prints,
+  the plan and the preparation report, so the two cannot disagree.
 - `--allow-empty-config` — Proceed even though `pkg.toml` declares nothing
   while dotpkg owns packages. Only pass this if the empty file is deliberate.
 - `--config <path>`, `--lock <path>` — same as `status`, default `pkg.toml`
@@ -144,6 +193,13 @@ newest, and the only one that fetches. Never touches the machine: no install,
 no uninstall, and the only subprocesses are `git` and the two read-only winget
 calls (`winget source update --name winget`, measured to change nothing on the
 machine it was run against twice, and `winget show`).
+
+The source refresh is retried **once**, after a second, and only on the one exit
+code measured to mean another winget process held the index — measured 0 failures
+in 10 calls alone, 3 in 10 with a second winget process alive. A failure there has
+always been a warning rather than a run-ending error; the retry exists because
+otherwise the run resolves `latest` against an index it failed to refresh and only
+warns about the refresh.
 
 For winget, `pkg.lock`'s key is the **canonical id winget itself echoed back**,
 not the spelling in `pkg.toml`. If the two differ in case, `update` warns and
@@ -245,8 +301,13 @@ fails, say) is reported as what really changed on disk versus what did not
   five of twelve packages surveyed on a real machine declare
   `Microsoft.VCRedist.2015+.x64`. An install that also installs a second
   package leaves that package with no lock entry, no ownership record and no
-  declaration, so the next `status` reports it as unmanaged. Unmeasured and out
-  of scope; a real gap, not a closed question.
+  declaration, so the next `status` counts it among that backend's unmanaged
+  packages. Still a real gap — but a dependency-aware rule was measured and
+  rejected as the fix, not merely deferred: those VCRedist rows do carry
+  `Source: winget`, so they are reported rather than lost, and on a machine
+  declaring no winget packages such a rule would have suppressed none of the 36
+  unmanaged lines. See
+  [carried forward out of Phase 5](docs/phase5-notes.md).
 - **Chocolatey.** Nothing beyond the two backends.
 
 ## Documentation
@@ -271,9 +332,13 @@ fails, say) is reported as what really changed on disk versus what did not
   breakdown the first phase was built from.
 - [Dogfood notes](docs/dogfood-2026-08-08.md) — the first run against a real
   machine.
-- [Carried forward out of Phase 4](docs/phase4-notes.md) and
-  [out of Phase 4b](docs/phase4b-notes.md) — what each phase measured, what it
+- [Carried forward out of Phase 4](docs/phase4-notes.md),
+  [out of Phase 4b](docs/phase4b-notes.md) and
+  [out of Phase 5](docs/phase5-notes.md) — what each phase measured, what it
   only reasoned about, and what it left open.
+- [Phase 5 measurements](docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md)
+  — the running-process fence, the `Unmanaged` flood, and whether winget has a
+  transient failure at all.
 
 ## Build
 

@@ -101,6 +101,23 @@ zoxide.exe                      -> ...\ajeetdsouza.zoxide_...\zoxide.exe
 `C:\Program Files\WinGet\Links` and its `(x86)` sibling are **absent**, so no
 machine-scope portable exists on this machine.
 
+`C:\Program Files\WinGet\Packages` — the machine-scope **package** root itself,
+not its `Links` sibling — was probed in the same pass and is **absent** too. Raw
+probe output, `p1-report.txt:77-78`:
+
+```
+--- dir: C:\Program Files\WinGet\Packages
+ABSENT
+```
+
+*Added by Phase 5 Task 8, in place rather than as a correction entry elsewhere,
+because the gap is this document's.* The section as originally written recorded
+only the two machine-scope `Links` directories as absent, while
+`src/backend/winget.rs`'s `package_roots` cites §3 as **measured** for exactly
+this root's absence — a reviewer read the section and correctly found that it did
+not support the claim. The probe did check it; the document was incomplete, so
+the document was fixed rather than the code comment weakened.
+
 **Coverage is 4 of 36 ids (11%), all `portable`.** Brave, Chrome, Discord,
 Telegram, Obsidian, Vivaldi, Warp, Edge — every EXE/MSI application, which is
 the class the running-process guard exists for — appears in neither `Links` nor

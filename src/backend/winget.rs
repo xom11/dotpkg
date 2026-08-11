@@ -1049,4 +1049,21 @@ mod tests {
         // future caller comparing against it would be comparing against noise.
         assert_eq!(guard_names("Some.Thing", ""), vec!["thing"]);
     }
+
+    #[test]
+    fn the_two_error_codes_decimal_and_hex_forms_still_agree() {
+        // Measured (`docs/measurements-2026-08-10-winget-write-path.md`,
+        // `PROVENANCE.md`): each constant's decimal value came off a real a14
+        // exit code, and the hex in the trailing comment beside its own
+        // definition is winget's `0x8A1500..` spelling of that identical
+        // code, read as a signed `i32`. This is not a restatement of the
+        // same number -- it is the one place anything checks the decimal
+        // against the hex rather than against itself. Every other test in
+        // this crate builds its `CmdOut::code` from the constant, so a sign
+        // flip on the constant's own definition flips every one of those
+        // tests right along with it and the suite stays green; only cross-
+        // checking against the hex recorded beside it catches that.
+        assert_eq!(NO_APPLICATIONS_FOUND as u32, 0x8A150014);
+        assert_eq!(NO_VERSION_FOUND as u32, 0x8A150017);
+    }
 }

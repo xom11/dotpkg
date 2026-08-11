@@ -228,6 +228,35 @@ fn a_pin_whose_version_left_the_index_is_refused_and_says_how_deep_the_index_is(
 }
 
 #[test]
+fn a_failed_depth_lookup_is_not_trusted_even_though_its_stdout_would_parse() {
+    // `versions_out.code == 0` (`src/backend/winget.rs:870`) is what a
+    // failed second call must not be able to fake past: reusing the SAME
+    // fixture the passing test above trusts (`show-versions-zoxide.txt`,
+    // which parses to 11 versions) but attaching it to a NONZERO exit code
+    // is the only way to prove the guard, and not the parser, is under
+    // test -- unparseable stdout would fail the depth lookup either way and
+    // prove nothing about the guard specifically.
+    let fake = FakeWinget::script(vec![
+        (NO_VERSION_FOUND, fixture("show-version-gone.txt")),
+        (1, fixture("show-versions-zoxide.txt")),
+    ]);
+    let w = Winget::new(fake);
+    let inst = installed_winget("ajeetdsouza.zoxide", "0.8.0");
+    let Resolution::Failed { why } = w.resolve_installed(&inst, &ResolveCtx::offline()) else {
+        panic!("0.8.0 is not in the index")
+    };
+    assert!(
+        why.contains("0.8.0") && why.contains("no longer in the winget index"),
+        "the bare, depth-less message: {why}"
+    );
+    assert!(
+        !why.contains("currently keeps"),
+        "a failed depth lookup must not be trusted, even though this exact stdout \
+         would parse to 11 versions if it were: {why}"
+    );
+}
+
+#[test]
 fn a_package_that_left_the_index_entirely_is_a_different_message() {
     // 0x8A150014 and 0x8A150017 are distinct codes for distinct facts.
     let fake = FakeWinget::returning(NO_APPLICATIONS_FOUND, fixture("show-package-gone.txt"));

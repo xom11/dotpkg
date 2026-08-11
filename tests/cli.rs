@@ -700,6 +700,59 @@ fn a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_note() {
     );
 }
 
+#[test]
+fn a_ready_prune_with_nothing_held_back_gets_no_routing_bug_warning() {
+    // `unrouted_warning(preparation.ready_count(), steps.len() + held.len())`
+    // (main.rs:602). A single adopted, undeclared package with nothing else
+    // declared routes to exactly one step and zero held items, so the two
+    // numbers already agree without needing addition's identity element to
+    // save them -- a product would not: with `held.len() == 0`,
+    // `steps.len() * held.len()` is 0 regardless of how many steps there
+    // really are, and the spurious "routing bug" warning would fire on a
+    // run that routed everything correctly.
+    let f = Fixture::new("", r#"{"scoop":{"aichat":"adopted"}}"#);
+    f.install_app("aichat", "0.30.0");
+
+    let out = f.run(&["apply", "--allow-empty-config"]);
+    let stderr = text(&out.stderr);
+
+    assert!(
+        !stderr.contains("routing bug"),
+        "one step, nothing held -- the one ready package was routed: {stderr}"
+    );
+}
+
+#[test]
+fn a_held_prune_with_no_other_steps_gets_no_routing_bug_warning_either() {
+    // The mirror: `held.len() > 0` while `steps.len() == 0` zeroes a
+    // product just as well as the other operand being zero does. Same setup
+    // as `a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_
+    // note` above -- fzf fails to prepare (no scoop binary here), so
+    // aichat's otherwise-ready prune is held rather than routed -- but this
+    // test's own claim is narrower: not that the closing table is right,
+    // but that nothing printed the ROUTING-bug warning along the way, which
+    // a product-shaped `steps.len() + held.len()` would.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n",
+        r#"{"scoop":{"aichat":"adopted"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("aichat", "0.30.0");
+
+    let out = f.run(&["apply", "--keep-going"]);
+    let stderr = text(&out.stderr);
+
+    assert!(
+        stderr.contains("held"),
+        "sanity: the prune really was held, or this test proves nothing: {stderr}"
+    );
+    assert!(
+        !stderr.contains("routing bug"),
+        "one held prune, zero built steps -- the one ready package was still accounted \
+         for: {stderr}"
+    );
+}
+
 // -- fix round 2 ---------------------------------------------------------
 
 #[test]

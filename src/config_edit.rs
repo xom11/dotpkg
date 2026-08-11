@@ -762,4 +762,26 @@ packages = [
             "a comment containing a quote must still be tracked, and its loss caught"
         );
     }
+
+    #[test]
+    fn a_hash_inside_a_quoted_bucket_url_is_not_mistaken_for_a_comment() {
+        // `line_comment`'s own doc comment names this exact shape as real: a
+        // bucket URL's `#branch` fragment, which `src/config.rs` permits,
+        // sitting inside a quoted string on a line that ALSO carries a real
+        // trailing comment. Both mutations this function survived --
+        // deleting `in_string = !in_string` (config_edit.rs:296, so the
+        // tracker never turns true) and widening `'#' if !in_string` to
+        // match unconditionally (config_edit.rs:297) -- produce the
+        // identical wrong answer here: the FIRST `#`, which is the one
+        // inside the URL, rather than the second, which is the real
+        // comment. One fixture with a quote-open, a `#` inside, and a
+        // quote-close closes both.
+        let line = r#"buckets = ["https://example.com/repo#branch"]  # custom bucket"#;
+        assert_eq!(
+            line_comment(line),
+            Some("# custom bucket"),
+            "the `#` inside the quoted URL must be skipped, and the real comment after the \
+             closing quote must be the one found, not sliced out of the URL itself"
+        );
+    }
 }

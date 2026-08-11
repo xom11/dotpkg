@@ -2,7 +2,9 @@ mod common;
 
 use common::fake_winget::FakeWinget;
 use common::fake_winget_mutator::FakeWingetMutator;
-use dotpkg::backend::winget::{installed_at_user_scope, CmdError, NO_APPLICATIONS_FOUND};
+use dotpkg::backend::winget::{
+    installed_at_user_scope, CmdError, NO_APPLICATIONS_FOUND, NO_VERSION_FOUND,
+};
 use dotpkg::backend::winget_exec::{
     list_one_argv, set_argv, winget_verdict, WingetMutator, WingetState, CANNOT_UNINSTALL_ELEVATED,
     NO_AVAILABLE_UPGRADE,
@@ -174,6 +176,48 @@ fn a_machine_ahead_of_its_pin_is_a_named_downgrade_refusal_not_a_bare_failure() 
 }
 
 #[test]
+fn a_version_mismatch_under_a_different_exit_code_gets_the_generic_message_not_the_downgrade_one() {
+    // The other side of the guard the test above pins: `out.code ==
+    // NO_AVAILABLE_UPGRADE` is what selects the "will not downgrade" arm,
+    // and this is a version mismatch under a DIFFERENT code -- so it must
+    // fall through to the generic "asked winget for X, rescan reports Y"
+    // arm instead. This is also the measured gap `run_winget_step`'s own
+    // doc comment names: a machine ahead of its pin AND a pin no longer in
+    // the index exits `NO_VERSION_FOUND` (0x8A150017), not
+    // `NO_AVAILABLE_UPGRADE` -- so a stale pin gets neither "will not
+    // downgrade" nor the `dotpkg update` advice today, and that gap is
+    // exactly what this test's negative assertions pin.
+    let m = FakeWingetMutator::script(vec![
+        (NO_VERSION_FOUND, fixture("install-version-absent.txt")),
+        (0, fixture("list-single-ahead-of-pin.txt")), // reports 0.26.2
+    ]);
+    let mut st = State::default();
+    let step = WingetStep::Set {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m, &mut st, &step) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(!touched, "nothing was changed: {why}");
+            assert!(
+                why.contains("asked winget for 0.24.1") && why.contains("rescan reports 0.26.2"),
+                "the generic message, not the downgrade-specific one: {why}"
+            );
+            assert!(
+                !why.contains("will not downgrade"),
+                "this exit code was never diagnosed as a downgrade refusal: {why}"
+            );
+            assert!(
+                !why.contains("dotpkg update"),
+                "the downgrade advice must not appear for an unrelated exit code: {why}"
+            );
+        }
+        other => panic!("expected the generic failure message, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_removal_whose_rescan_finds_nothing_is_done_even_at_0x8a150014() {
     // Measured: `uninstall` of an absent package exits 0x8A150014 and prints
     // "No installed package found matching input criteria." For a Remove,
@@ -220,6 +264,49 @@ fn the_elevation_refusal_says_what_to_do_about_it() {
         StepOutcome::Failed { why, touched } => {
             assert!(!touched, "the package is still there, untouched: {why}");
             assert!(why.contains("elevat"), "name the cause: {why}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        st.ownership(WINGET, &Name::new("ducaale.xh")),
+        Some(Ownership::Installed),
+        "a failed removal must not release ownership -- the package is still there"
+    );
+}
+
+#[test]
+fn a_stale_removal_version_is_not_mistaken_for_the_elevation_refusal() {
+    // The mirror of the test above: `out.code == CANNOT_UNINSTALL_ELEVATED`
+    // is what selects the elevation explanation, and this removal still
+    // finds the package installed under a DIFFERENT code. Measured
+    // (`docs/measurements-2026-08-10-winget-write-path.md` §8): `uninstall
+    // --version` refuses with `NO_VERSION_FOUND` when the version this
+    // crate believes is installed no longer matches what is actually there
+    // -- a real way for a removal to leave a package behind that has
+    // nothing to do with elevation. Nobody diagnosed elevation here, so the
+    // elevation explanation must not print.
+    let m = FakeWingetMutator::script(vec![
+        (NO_VERSION_FOUND, fixture("uninstall-version-absent.txt")),
+        (0, fixture("list-single-with-available.txt")), // still installed at 0.24.1
+    ]);
+    let mut st = State::default();
+    st.set(WINGET, &Name::new("ducaale.xh"), Ownership::Installed);
+    let step = WingetStep::Remove {
+        id: Name::new("ducaale.xh"),
+        version: "0.24.1".to_string(),
+        guard: vec![],
+    };
+    match run_winget_step(&m, &mut st, &step) {
+        StepOutcome::Failed { why, touched } => {
+            assert!(!touched, "the package is still there, untouched: {why}");
+            assert!(
+                why.contains("did not happen") && why.contains("0.24.1"),
+                "the generic still-installed message: {why}"
+            );
+            assert!(
+                !why.contains("elevat"),
+                "nothing here diagnosed an elevation refusal: {why}"
+            );
         }
         other => panic!("expected Failed, got {other:?}"),
     }

@@ -2971,6 +2971,48 @@ mod tests {
     }
 
     #[test]
+    fn a_prune_from_a_backend_that_is_neither_winget_nor_scoop_does_not_become_a_winget_removal() {
+        // `backend == WINGET` (apply.rs:849) is the only thing standing
+        // between this arm's `Step::Winget(WingetStep::Remove)` and a
+        // routing bug -- but `Action::Prune` + `Outcome::ReadyToRemove`
+        // structurally matches BOTH this arm and the scoop Prune arm above
+        // it (apply.rs:814), so a literal `backend: SCOOP` action never even
+        // reaches THIS arm's guard: the scoop arm's own `backend == SCOOP`
+        // claims it first, every time, mutated or not. Only a THIRD backend
+        // -- one that matches neither guard -- actually exercises this arm's
+        // own check, which is why "chocolatey" (this file's own stand-in for
+        // a backend that is neither, also used by
+        // `prepare_refuses_to_stage_a_backend_it_has_no_preparation_for`
+        // above) is used here rather than "scoop". Under `backend ==
+        // WINGET -> true`, this becomes a `WingetStep::Remove` that would
+        // run `winget uninstall` against a package no winget backend ever
+        // declared.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Prune {
+                    backend: "chocolatey".into(),
+                    name: Name::new("some-package"),
+                    version: "1.0.0".into(),
+                },
+                outcome: Outcome::ReadyToRemove,
+            }],
+        };
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![(
+                Name::new("some-package"),
+                "chocolatey: prepared, but no executor claimed it -- this is a routing bug, \
+                 not a package problem"
+                    .to_string()
+            )],
+            "a non-winget, non-scoop backend's prune must never become a winget removal: \
+             {unusable:?}"
+        );
+    }
+
+    #[test]
     fn a_winget_step_takes_its_guard_names_from_the_scan_not_from_the_id_alone() {
         // The whole reason `plan_to_steps` takes `installed` at all. `Google.
         // Chrome`'s live process is `chrome.exe` and its display Name is
@@ -3033,6 +3075,90 @@ mod tests {
     }
 
     #[test]
+    fn guard_for_needs_both_the_right_backend_and_the_right_name_not_either_alone() {
+        // `guard_for`'s `.find(|i| i.backend == WINGET && &i.name == name)`
+        // (apply.rs:911) survived mutation to `||` because both tests above
+        // pass an `installed` slice with exactly one winget row -- with only
+        // one candidate, "is winget" and "is this name" agree on the same
+        // row, and `&&` vs `||` cannot be told apart. Two fixtures close that,
+        // one per half of the guard.
+        let target = || Preparation {
+            prepared: vec![Prepared {
+                action: Action::Upgrade {
+                    backend: WINGET.into(),
+                    name: Name::new("Google.Chrome"),
+                    from: "141.0.7390.100".into(),
+                    to: "141.0.7390.123".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToSet {
+                    id: Name::new("Google.Chrome"),
+                    version: "141.0.7390.123".into(),
+                },
+            }],
+        };
+
+        // Half 1: a DECOY winget row for a different package, ordered BEFORE
+        // the target's own row. Under `||`, `backend == WINGET` alone is
+        // already true for the decoy, so `find` stops there and hands back
+        // the decoy's `bins` -- another package's process names -- for
+        // `execute`'s per-step re-sampler to check a RUNNING guard against.
+        let decoy_winget = Installed {
+            backend: WINGET.to_string(),
+            name: Name::new("Vivaldi.Vivaldi"),
+            version: "8.1.4087.62".to_string(),
+            arch: None,
+            bucket: None,
+            bins: vec!["vivaldi".to_string()],
+        };
+        let target_winget = Installed {
+            backend: WINGET.to_string(),
+            name: Name::new("Google.Chrome"),
+            version: "141.0.7390.123".to_string(),
+            arch: None,
+            bucket: None,
+            bins: vec!["chrome".to_string(), "google chrome".to_string()],
+        };
+        let (steps, _) = plan_to_steps(&target(), &[decoy_winget, target_winget]);
+        assert_eq!(
+            steps,
+            vec![Step::Winget(WingetStep::Set {
+                id: Name::new("Google.Chrome"),
+                version: "141.0.7390.123".into(),
+                guard: vec!["chrome".to_string(), "google chrome".to_string()],
+            })],
+            "a decoy winget row for a different package must not win just for \
+             being winget and ordered first: {steps:?}"
+        );
+
+        // Half 2: a SCOOP row whose NAME collides with the target, and no
+        // matching winget row at all. Under `||`, `&i.name == name` alone is
+        // already true for the scoop row, so `find` would hand back a scoop
+        // package's `bins` for a winget guard. The correct answer with no
+        // winget row present is `guard_for`'s own id-derived fallback.
+        let colliding_scoop = Installed {
+            backend: SCOOP.to_string(),
+            name: Name::new("Google.Chrome"),
+            version: "1.0.0".to_string(),
+            arch: None,
+            bucket: None,
+            bins: vec!["not-the-winget-bins".to_string()],
+        };
+        let (fallback, _) = plan_to_steps(&target(), &[colliding_scoop]);
+        assert_eq!(
+            fallback,
+            vec![Step::Winget(WingetStep::Set {
+                id: Name::new("Google.Chrome"),
+                version: "141.0.7390.123".into(),
+                guard: vec!["chrome".to_string(), "google.chrome".to_string()],
+            })],
+            "a same-named SCOOP row must not be mistaken for the winget scan \
+             row; with no matching winget row, guard_for must fall back to \
+             the id-derived guess: {fallback:?}"
+        );
+    }
+
+    #[test]
     fn a_winget_install_and_a_winget_upgrade_produce_no_scoop_step_and_are_reported_as_unrouted() {
         // Mirrors the test above for the other two `backend == SCOOP`
         // guards (apply.rs:599 and :618): a winget action ready to fetch
@@ -3085,6 +3211,47 @@ mod tests {
                 ),
             ],
             "a winget install/upgrade must never fall through to a scoop step: {unusable:?}"
+        );
+    }
+
+    #[test]
+    fn a_scoop_action_carrying_a_readytoset_does_not_become_a_winget_step() {
+        // `backend == WINGET` (apply.rs:837) is the only thing standing
+        // between this arm's `Step::Winget(WingetStep::Set)` and a routing
+        // bug: nothing in the type system stops a SCOOP action from
+        // carrying an `Outcome::ReadyToSet` -- scoop's own arms above this
+        // one only match `ReadyToFetch`, so this pairing reaches THIS arm's
+        // guard directly, with no earlier arm to intercept it first (unlike
+        // the Prune/ReadyToRemove shape below, where the scoop arm always
+        // claims a literal `backend: SCOOP` first). Under `backend ==
+        // WINGET -> true`, this becomes a `WingetStep::Set` that would run
+        // `winget install` against a scoop package.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: Name::new("fzf"),
+                    version: "1.0.0".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToSet {
+                    id: Name::new("fzf"),
+                    version: "1.0.0".into(),
+                },
+            }],
+        };
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(
+            unusable,
+            vec![(
+                Name::new("fzf"),
+                "scoop: prepared, but no executor claimed it -- this is a routing bug, not a \
+                 package problem"
+                    .to_string()
+            )],
+            "a scoop action must never become a winget step, even carrying an outcome no real \
+             prepare() call pairs it with: {unusable:?}"
         );
     }
 

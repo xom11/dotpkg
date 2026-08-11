@@ -679,4 +679,54 @@ mod tests {
         let kept = dedupe_installed_for_backend(&all, SCOOP);
         assert_eq!(kept.len(), 2, "distinct names must both survive: {kept:?}");
     }
+
+    // -- Plan::refused_downgrade_count() ------------------------------------
+    //
+    // `render.rs`'s own coverage
+    // (`a_winget_downgrade_is_announced_as_a_refusal_and_is_not_counted_as_a_
+    // change`) only ever builds a plan with exactly ONE winget downgrade, so
+    // a mutant that replaced this whole function's body with the literal `1`
+    // stayed green there. Zero and two are the two values that answer cannot
+    // be, and this exercises the method directly rather than through render.
+
+    fn downgrade(backend: &str, name: &str) -> Action {
+        Action::Downgrade {
+            backend: backend.to_string(),
+            name: Name::new(name),
+            from: "2".to_string(),
+            to: "1".to_string(),
+            arch: None,
+        }
+    }
+
+    #[test]
+    fn refused_downgrade_count_is_the_number_of_winget_downgrades_not_a_fixed_one() {
+        let none = Plan { actions: vec![] };
+        assert_eq!(
+            none.refused_downgrade_count(),
+            0,
+            "no downgrades at all -- nothing is refused"
+        );
+
+        let one_scoop = Plan {
+            actions: vec![downgrade(SCOOP, "fzf")],
+        };
+        assert_eq!(
+            one_scoop.refused_downgrade_count(),
+            0,
+            "a scoop downgrade really happens; it is not refused"
+        );
+
+        let two_winget = Plan {
+            actions: vec![
+                downgrade(WINGET, "Brave.Brave"),
+                downgrade(WINGET, "7zip.7zip"),
+            ],
+        };
+        assert_eq!(
+            two_winget.refused_downgrade_count(),
+            2,
+            "every winget downgrade in the plan is refused, not just the first"
+        );
+    }
 }

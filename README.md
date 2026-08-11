@@ -68,10 +68,27 @@ $ dotpkg apply
   + scoop  ripgrep        14.1.0                   (install)
   v scoop  fzf            0.74.2 -> 0.74.1         (downgrade, from lock)
 
+  ... (plan summary and preparation table omitted -- see below)
+
   1 package(s) will be uninstalled and reinstalled, 1 installed, 0 removed. A
   scoop version change is an uninstall followed by an install, in both
   directions. Continue? [y/N] y
 ```
+
+**That block is abridged, not verbatim**, so the prompt sits next to the plan it
+is about. A real run also prints, between the two:
+
+- the plan's own `N change(s), M skipped` summary line, which `src/render.rs`
+  emits for every non-empty plan — the same line the `status` transcript above
+  ends with; and
+- the whole preparation table, printed before the prompt on a full `apply` run
+  and not only under `--prepare` (`src/main.rs` calls
+  `render::render_preparation` on both paths) — so **both** tables above respect
+  `--show-unmanaged`, as the flag's own entry below says.
+
+The question itself is one unindented line in real output; it is indented and
+wrapped here to fit the page. The `dotpkg status` block above needs no such
+note: `status` prints one table and stops.
 
 `--prepare` stops before the question, after staging and fetching, and
 changes nothing either way. For a winget package there is nothing to stage —

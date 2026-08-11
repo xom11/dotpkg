@@ -1078,9 +1078,13 @@ pub(crate) fn version_liveness(
         // `INTERNAL_ERROR` was measured from `source update`, never from
         // `show` or `list`: those two argvs returned 0 nonzero exits in 105
         // invocations COMBINED, not 105 of this one call alone. 85 are this
-        // exact `show --id <id> -v <ver>` argv (P2 S2's 40, P2 S4's 15, and
-        // P7's 30 against a continuously running `source update`); the other
-        // 20 are `list -e --id <id>`, no `--scope` (`list_one_argv`'s shape,
+        // exact `show --id <id> -v <ver>` argv, under three DISTINCT
+        // conditions rather than one: P2 S2's 40 with no concurrency stated,
+        // P2 S4's 15 with one concurrent `source update`, and P7's 30 against
+        // a continuously running `source update` loop. Only that last 30 were
+        // the continuous case -- §5's table lists the three separately, and
+        // this comment used to run them together. The other 20 are
+        // `list -e --id <id>`, no `--scope` (`list_one_argv`'s shape,
         // the post-mutation verify rescan, not this function's). That the
         // reader wins the race is a MECHANISM inferred from those numbers,
         // not a measured property of this call, and this arm exists so that
@@ -1293,6 +1297,12 @@ mod tests {
     struct ScriptedWinget {
         queue: std::cell::RefCell<std::collections::VecDeque<Result<CmdOut, CmdError>>>,
         calls: std::cell::Cell<usize>,
+        /// When `run` was last entered. Recorded so a test can ask how long
+        /// the code under test spent AFTER its final call to this fake --
+        /// which is the only way, without a second injected seam, to tell
+        /// "slept between the two attempts" from "slept after the last one".
+        /// See `the_retry_delay_is_not_slept_after_the_final_failed_attempt`.
+        last_call: std::cell::Cell<Option<std::time::Instant>>,
     }
 
     impl ScriptedWinget {
@@ -1300,16 +1310,22 @@ mod tests {
             ScriptedWinget {
                 queue: std::cell::RefCell::new(script.into_iter().collect()),
                 calls: std::cell::Cell::new(0),
+                last_call: std::cell::Cell::new(None),
             }
         }
         fn calls(&self) -> usize {
             self.calls.get()
+        }
+        /// How long ago the last `run` happened, or `None` if it never did.
+        fn since_last_call(&self) -> Option<std::time::Duration> {
+            self.last_call.get().map(|t| t.elapsed())
         }
     }
 
     impl WingetCmd for ScriptedWinget {
         fn run(&self, _args: &[&str]) -> Result<CmdOut, CmdError> {
             self.calls.set(self.calls.get() + 1);
+            self.last_call.set(Some(std::time::Instant::now()));
             self.queue
                 .borrow_mut()
                 .pop_front()
@@ -1585,5 +1601,65 @@ mod tests {
         assert!(err.contains("re-run"), "was: {err}");
         // Exactly one call: this arm must not have grown a retry.
         assert_eq!(fake.calls(), 1);
+    }
+
+    #[test]
+    fn the_retry_delay_is_not_slept_after_the_final_failed_attempt() {
+        // The whole-branch review's Minor 6. `update_source_with`'s sleep is
+        // guarded by `attempt == 0 && !retry_delay.is_zero()`, and the three
+        // retry tests above all pass `Duration::ZERO`, so `is_zero()`
+        // short-circuits and `attempt == 0` is never evaluated either way.
+        // Deleting `attempt == 0` therefore left the whole suite green while
+        // adding a real 1 s sleep AFTER the second, already-final failed
+        // attempt -- pure delay on every contended `dotpkg update`, buying
+        // nothing, since the loop is over and the error is about to be built.
+        //
+        // Pinned on the clock rather than by injecting a sleeper, so no new
+        // production seam is added for a test's benefit. Two assertions,
+        // because either one alone is weak:
+        //
+        // - `total >= DELAY` catches deleting the sleep (or the whole `if`)
+        //   outright.
+        // - `since_last_call() < DELAY / 2` is what catches deleting
+        //   `attempt == 0`: with the guard, everything between the second
+        //   `run` and this function's return is `Option::expect`, one integer
+        //   comparison and one `format!` -- microseconds. Without it, that
+        //   same span contains a full `DELAY` sleep.
+        //
+        // `DELAY` is 200 ms, not the production 1 s: enough that the 100 ms
+        // margin on either side of the split cannot be crossed by ordinary
+        // scheduling noise, and small enough that the suite pays 0.2 s once.
+        // That margin is *reasoned*, not measured against a loaded machine --
+        // if this test ever flakes, the fix is a larger `DELAY`, not a wider
+        // threshold, because the threshold is what does the detecting.
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+        let fake = ScriptedWinget::new(vec![
+            Ok(CmdOut {
+                code: INTERNAL_ERROR,
+                stdout: String::new(),
+            }),
+            Ok(CmdOut {
+                code: INTERNAL_ERROR,
+                stdout: String::new(),
+            }),
+        ]);
+        let w = Winget::new(fake);
+        let started = std::time::Instant::now();
+        assert!(w.update_source_with(DELAY).is_err());
+        let total = started.elapsed();
+        let tail = w
+            .cmd
+            .since_last_call()
+            .expect("the fake was called at least once");
+        assert_eq!(w.cmd.calls(), 2);
+        assert!(
+            total >= DELAY,
+            "the one retry must actually wait: total {total:?} < {DELAY:?}"
+        );
+        assert!(
+            tail < DELAY / 2,
+            "nothing may sleep after the final attempt: {tail:?} elapsed \
+             between the last winget call and the returned error"
+        );
     }
 }

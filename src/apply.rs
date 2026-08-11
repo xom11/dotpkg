@@ -873,6 +873,25 @@ pub fn plan_to_steps(
             // `name`: it looks the scan up by `Name`, which folds case, so
             // either spelling finds the same row, and `name` is what every other
             // arm here passes.
+            //
+            // **Uncovered residual, *reasoned only*: the two spellings also
+            // meet in the mid-run fence, and nothing measures whether they
+            // ever differ.** `Running.dirs` holds `winget list`'s `Id`
+            // (`backend::winget_fence_ids` -> `running_ids`, which inserts the
+            // scanned id itself), while the `id` stored here -- what
+            // `Step::app()` returns for this step -- is `winget show`'s `Id`.
+            // `execute`'s per-step re-sampler asks `Running::covers_any(app,
+            // guard)`, whose `dirs` half is `dirs.contains(app)`. `Name`
+            // folds case, so a case-only difference is absorbed; only a
+            // difference that is NOT case would make that half silently
+            // answer "not running" mid-run for a package the plan-time fence
+            // could see. The `bins` half would not compensate: `guard_for`
+            // supplies plausible PROCESS names, a different signal that is
+            // empty unless `[winget.guard]` names the package or
+            // `guard_names` guesses right. Nothing in this phase's
+            // measurement document compares a `winget list` `Id` against the
+            // `winget show` `Id` for the same package, so there is no number
+            // either way: recorded as an unmeasured residual, not as a bug.
             (
                 Action::Install { backend, name, .. }
                 | Action::Upgrade { backend, name, .. }
@@ -1064,7 +1083,7 @@ pub struct Driver {
 /// `main.rs` is unobservable: `tests/cli.rs` spawns the real binary through
 /// `CARGO_BIN_EXE_dotpkg`, and
 /// `a_declared_package_skipped_as_running_is_outstanding_not_success`
-/// (`tests/cli.rs:980`) already drives this very fence end to end -- it copies
+/// (`tests/cli.rs:1000`) already drives this very fence end to end -- it copies
 /// the binary into `<scoop_root>/apps/aichat/current/`, runs it live, and asserts
 /// the `held … running -- stop it first` line. What that test cannot reach is the
 /// **winget** half, and the reason is narrower: `path_without_winget`
@@ -1075,11 +1094,17 @@ pub struct Driver {
 /// Overriding `LOCALAPPDATA` changes which roots `package_roots()` reports but
 /// cannot help: with no scanned ids there is nothing for the path half to match.
 ///
-/// **Measured, suite-wide.** With `main.rs`'s closure calling
+/// **Measured, suite-wide, on Phase 5 Task 2's tree** -- `01df082`, the commit
+/// that created this function, where the suite totalled 598 and still did at
+/// Task 2's last commit `ea13a00`. With `main.rs`'s closure calling
 /// `sample_fence_with_roots(&d.scoop, &d.winget_scan, &[], …)` -- the winget
 /// roots dropped at the call site -- `cargo test --no-fail-fast` reported 598
 /// passed, 0 failed across all fourteen binaries, and no compiler warning of any
-/// kind. That is the whole suite, not a filtered run.
+/// kind. That is the whole suite of that tree, not a filtered run. **The total
+/// is deliberately not restated for the tree this comment ships on**, which is
+/// larger: naming the measured tree is what lets a reader tell "this number is
+/// from an older tree" from "this number is wrong", and re-running the mutation
+/// here would be a new measurement, not a re-labelling of this one.
 ///
 /// This is the same remedy, for the same finding, that `gate_the_run` above
 /// applies: Task 15's review found four driver lines whose *order* and
@@ -1112,9 +1137,10 @@ pub struct Driver {
 /// and that is false:
 ///
 /// - `sample_fence_with_roots` is `pub`, so `main.rs` could call it with `&[]`.
-///   **Measured:** doing exactly that leaves the whole suite green (598 passed, 0
-///   failed) with no warning -- see the measurement above. Nothing but review
-///   catches it.
+///   **Measured on Task 2's tree** (`01df082`, 598 passed / 0 failed): doing
+///   exactly that leaves the whole suite green with no warning -- see the
+///   measurement above, including why that total is not the total here. Nothing
+///   but review catches it.
 /// - `backend::running_set` is also still `pub`, because three
 ///   `tests/scoop_scan.rs` tests call it directly, so that lower-level door is
 ///   open too.
@@ -3373,11 +3399,11 @@ mod tests {
 
     #[test]
     fn a_prune_from_a_backend_that_is_neither_winget_nor_scoop_does_not_become_a_winget_removal() {
-        // `backend == WINGET` (apply.rs:849) is the only thing standing
+        // `backend == WINGET` (apply.rs:912) is the only thing standing
         // between this arm's `Step::Winget(WingetStep::Remove)` and a
         // routing bug -- but `Action::Prune` + `Outcome::ReadyToRemove`
         // structurally matches BOTH this arm and the scoop Prune arm above
-        // it (apply.rs:814), so a literal `backend: SCOOP` action never even
+        // it (apply.rs:858), so a literal `backend: SCOOP` action never even
         // reaches THIS arm's guard: the scoop arm's own `backend == SCOOP`
         // claims it first, every time, mutated or not. Only a THIRD backend
         // -- one that matches neither guard -- actually exercises this arm's
@@ -3478,7 +3504,7 @@ mod tests {
     #[test]
     fn guard_for_needs_both_the_right_backend_and_the_right_name_not_either_alone() {
         // `guard_for`'s `.find(|i| i.backend == WINGET && &i.name == name)`
-        // (apply.rs:911) survived mutation to `||` because both tests above
+        // (apply.rs:974) survived mutation to `||` because both tests above
         // pass an `installed` slice with exactly one winget row -- with only
         // one candidate, "is winget" and "is this name" agree on the same
         // row, and `&&` vs `||` cannot be told apart. Two fixtures close that,
@@ -3617,7 +3643,7 @@ mod tests {
 
     #[test]
     fn a_scoop_action_carrying_a_readytoset_does_not_become_a_winget_step() {
-        // `backend == WINGET` (apply.rs:837) is the only thing standing
+        // `backend == WINGET` (apply.rs:900) is the only thing standing
         // between this arm's `Step::Winget(WingetStep::Set)` and a routing
         // bug: nothing in the type system stops a SCOOP action from
         // carrying an `Outcome::ReadyToSet` -- scoop's own arms above this

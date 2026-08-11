@@ -327,6 +327,42 @@ pub fn render_preparation(p: &Preparation, show_unmanaged: bool) -> String {
                 ", {refused} winget downgrade(s) that will be refused"
             ));
         }
+        // Its own clause too, and **gated on the count rather than on the
+        // flag**, exactly as `render(plan)`'s `unmanaged_count` clause is.
+        // Both halves of that matter:
+        //
+        // - Without the clause at all, `--show-unmanaged` printed N `?` lines
+        //   above `0 of 0 changes ready, 0 failed, 0 skipped, 0 not locked.`
+        //   -- N printed facts accounted for in no number, the shape
+        //   `refused_winget_downgrade_count` above already earned a clause to
+        //   avoid. **Structural:** none of the four counts in the line above
+        //   can see an `Outcome::Report` (`ready_count` matches the three
+        //   `ReadyTo*` shapes, the other three match `Failed`, `Skipped` and
+        //   `NotLocked`), so a report is counted by nothing else here.
+        // - Gating it on `!show_unmanaged` instead would leave the two tables
+        //   of one `apply` run disagreeing about whether the same fact is
+        //   counted, which is the specific failure this pair of functions has
+        //   already been fixed for once (see this function's doc comment).
+        //
+        // Counted on the `(Action::Unmanaged, Outcome::Report)` PAIR -- the
+        // same pair the collapse arm above matches -- so the number and the
+        // lines can never describe different sets. `Plan::unmanaged_count`
+        // matches the action alone because a `Plan` carries no outcomes; that
+        // is the only difference, and today there is no non-`Report`
+        // `Unmanaged` outcome for the two to disagree about.
+        let unmanaged = p
+            .prepared
+            .iter()
+            .filter(|item| {
+                matches!(
+                    (&item.action, &item.outcome),
+                    (Action::Unmanaged { .. }, Outcome::Report)
+                )
+            })
+            .count();
+        if unmanaged > 0 {
+            summary.push_str(&format!(", {unmanaged} unmanaged"));
+        }
         summary.push_str(".\n");
         out.push_str(&summary);
     }
@@ -355,8 +391,13 @@ pub fn render_execution(ex: &Execution) -> String {
         let line = match &item.result {
             // `{name:<14} ` -- a literal space after the padded field, the
             // same fix `prepared_line` needed and got at Task 16
-            // (`src/render.rs:303`; see its own doc comment for the
-            // mechanism). This function used the narrower `{name:<13}` with
+            // (`src/render.rs:493`, the comment on `prepared_line`'s own
+            // `format!`; read it for the mechanism). This citation said `:303`
+            // until the whole-branch review; `:303` was two lines off the
+            // function even before this branch, and this branch's own
+            // `render_preparation` changes then moved it into a different
+            // function entirely.
+            // This function used the narrower `{name:<13}` with
             // no literal separator, the identical shape that turned into
             // a real, dogfood-found glued-together line at `prepared_line`
             // -- one column short, and reachable here the same way, with an
@@ -1245,7 +1286,12 @@ mod tests {
     }
 
     #[test]
-    fn report_lines_render_with_their_own_markers_and_do_not_affect_the_summary() {
+    fn report_lines_render_with_their_own_markers_and_never_inflate_the_change_counts() {
+        // Renamed from `..._and_do_not_affect_the_summary`: since the
+        // `unmanaged` clause was added below, an `Unmanaged` report DOES
+        // affect the summary -- it adds its own clause -- and what stays true
+        // is the narrower claim this test actually checks, that no report is
+        // counted as a change, a failure, a skip or a not-locked.
         let p = Preparation {
             prepared: vec![
                 Prepared {
@@ -1291,6 +1337,16 @@ mod tests {
         assert!(
             out.contains("1 of 1 changes ready"),
             "reports must not count as changes: {out}"
+        );
+        // The one thing a report DOES do to this line, and the reason this
+        // test was renamed: the `Unmanaged` one is accounted for in its own
+        // clause rather than in any of the four counts. The `ArchDrift`
+        // report gets no clause here -- `render_preparation` has no drift
+        // count -- which is why the assertion above is the load-bearing one.
+        assert!(
+            out.contains("0 not locked, 1 unmanaged."),
+            "the unmanaged report needs its own clause, not a share of the \
+             four counts: {out}"
         );
     }
 
@@ -1422,6 +1478,73 @@ mod tests {
             1,
             "one hint total, not one per backend: {out}"
         );
+    }
+
+    #[test]
+    fn render_preparation_counts_unmanaged_reports_on_both_paths_not_only_the_collapsed_one() {
+        // The whole-branch review's Minor 1: the two tables of one `apply`
+        // run disagreed about whether a printed `?` fact is counted.
+        // `render(plan)`'s clause is gated on `Plan::unmanaged_count`, so it
+        // counts on both paths; `render_preparation` had no clause at all, so
+        // under `--show-unmanaged` it printed N individual `?` lines above
+        // `0 of 0 changes ready, 0 failed, 0 skipped, 0 not locked.`
+        //
+        // Asserted on the LITERAL summary text, and on both flag values from
+        // one `Preparation`, because that is the disagreement: a clause gated
+        // on `!show_unmanaged` would satisfy the collapsed half alone.
+        let p = Preparation {
+            prepared: vec![
+                unmanaged_report(SCOOP, "app0"),
+                unmanaged_report(WINGET, "Vendor.Pkg0"),
+                unmanaged_report(WINGET, "Vendor.Pkg1"),
+            ],
+        };
+
+        let collapsed = render_preparation(&p, false);
+        assert!(
+            collapsed
+                .contains("0 of 0 changes ready, 0 failed, 0 skipped, 0 not locked, 3 unmanaged."),
+            "the collapsed path must carry the count: {collapsed}"
+        );
+
+        let shown = render_preparation(&p, true);
+        assert_eq!(
+            shown
+                .lines()
+                .filter(|l| l.contains("(unmanaged -- no action)"))
+                .count(),
+            3,
+            "the flag is what puts the three lines back: {shown}"
+        );
+        assert!(
+            shown.contains("0 of 0 changes ready, 0 failed, 0 skipped, 0 not locked, 3 unmanaged."),
+            "and the count must survive the flag, not be gated on it: {shown}"
+        );
+    }
+
+    #[test]
+    fn render_preparation_gains_no_unmanaged_clause_when_there_are_no_reports() {
+        // The other direction of the same gate: the clause is conditional, so
+        // an ordinary run's summary must read exactly as it did before it
+        // existed. Without this, a clause that printed `, 0 unmanaged` on
+        // every run would pass the test above.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: SCOOP.into(),
+                    name: "ripgrep".into(),
+                    version: "14.1.0".into(),
+                    arch: None,
+                },
+                outcome: ready_to_fetch("ripgrep", "14.1.0"),
+            }],
+        };
+        let out = render_preparation(&p, false);
+        assert!(
+            out.contains("1 of 1 changes ready, 0 failed, 0 skipped, 0 not locked.\n"),
+            "was:\n{out}"
+        );
+        assert!(!out.contains("unmanaged"), "was:\n{out}");
     }
 
     #[test]
@@ -1872,7 +1995,7 @@ mod tests {
 
     #[test]
     fn a_done_package_alongside_an_untouched_failure_still_says_some_changed() {
-        // render.rs:286's `changed() > 0 || touched() > 0` looked like it
+        // render.rs:443's `changed() > 0 || touched() > 0` looked like it
         // might be an equivalent mutant under `>` -> `<`, reasoning that
         // `touched()` is a superset of `changed()` (the comment above the
         // line argues `touched()` catches cases `changed()` misses). But the

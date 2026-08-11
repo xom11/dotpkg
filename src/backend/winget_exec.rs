@@ -151,7 +151,7 @@ pub fn remove_argv(id: &Name, version: &str) -> Vec<String> {
 /// mutation's own exit code.
 ///
 /// **`-e`/`--exact` here, but deliberately not in `resolve_latest` or
-/// `resolve_installed` (`src/backend/winget.rs:696`, `:772`) -- the opposite
+/// `resolve_installed` (`src/backend/winget.rs:867`, `:956`) -- the opposite
 /// choice, for the same underlying measured reason, not the same choice for
 /// a shared one.** Those two resolvers run *before* the canonical spelling
 /// is known: they must omit `--exact` so winget folds case on the way in,

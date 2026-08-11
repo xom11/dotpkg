@@ -137,16 +137,8 @@ impl Fixture {
     fn write_lock_and_bucket_for(&self, app: &str, version: &str) {
         let dir = self.scoop.path().join("buckets").join("main");
         fs::create_dir_all(dir.join("bucket")).unwrap();
-        let git = |args: &[&str]| -> String {
-            let out = Command::new("git")
-                .current_dir(&dir)
-                .args(args)
-                .output()
-                .expect("git must be on PATH for this test");
-            assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
-            text(&out.stdout)
-        };
-        git(&["init", "-q", "-b", "main"]);
+        // THE MEASURED CASE, and it is recorded here rather than in the
+        // constructor because this is the fixture it actually happened to.
         // *Measured* 2026-08-11: a `cargo mutants` baseline run aborted the
         // entire run ("cargo test failed in an unmutated tree, so no mutants
         // were tested") because `apply_prepare_also_sees_the_winget_scan_
@@ -162,11 +154,20 @@ impl Fixture {
         // creates that specific lock file; `gc.auto` is the older, separate
         // auto-gc trigger (its own lock is `gc.pid`, not observed here) but
         // the same failure shape, so both are disabled rather than just the
-        // one actually caught. Every temp repo this suite creates needs this
-        // -- see also `tests/common/mod.rs`'s `Fixture::bucket` and the
-        // three call sites in `tests/prepare.rs`.
-        git(&["config", "gc.auto", "0"]);
-        git(&["config", "maintenance.auto", "0"]);
+        // one actually caught.
+        // Every temp repo this suite creates needs both, which is why the
+        // `git init` and the two `config` calls now live together in
+        // `common::init_repo` and cannot be reached separately.
+        common::init_repo(&dir);
+        let git = |args: &[&str]| -> String {
+            let out = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+            text(&out.stdout)
+        };
         fs::write(
             dir.join("bucket").join(format!("{app}.json")),
             format!(r#"{{"version":"{version}","bin":"tool.exe"}}"#),

@@ -705,6 +705,87 @@ fn a_failed_winget_index_refresh_is_a_warning_not_a_refusal() {
     );
 }
 
+/// The two halves of still-open item 20, pinned where a user would actually
+/// see them.
+///
+/// Item 20 said the retry ships "structurally verified and live-unverified":
+/// six `dotpkg update` rounds against a concurrent winget produced zero
+/// warnings, and zero warnings is the *expected* output of both "the
+/// contention never reproduced" and "it reproduced and the retry absorbed it".
+/// `update_source` returning `Result<()>` is what made those two runs
+/// identical to every observer, dogfood included. `SourceRefresh` is the fix,
+/// and these are the tests that stop it from being decorative.
+///
+/// **This pair costs about one second of wall clock**, and knowingly: the
+/// retry path sleeps `update_source`'s real 1 s delay, because `update::run`
+/// calls `update_source()` and not the delay-injected `update_source_with`.
+/// Threading a `Duration` through `update::run` to save that second would put
+/// a test-only parameter on the one function the binary calls for real, which
+/// is a worse trade than a second.
+#[test]
+fn a_winget_index_refresh_that_only_succeeded_on_the_retry_says_so() {
+    let f = Fixture::new();
+    let fake = FakeWinget::script(vec![
+        // The measured contention: 0x8A150001, empty stdout, 60-72 ms
+        // (docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md §5).
+        (dotpkg::backend::winget::INTERNAL_ERROR, String::new()),
+        (0, "Updating source: winget...\n".to_string()),
+        (0, winget_fixture("show-canonical-echo.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let (u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        false,
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("0x8A150001")),
+        "the one line that makes a successful retry observable at all: {warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("could not refresh")),
+        "an absorbed transient is not a failed refresh: {warnings:?}"
+    );
+    assert_eq!(
+        u.lock.winget.len(),
+        1,
+        "the retry succeeded, so resolution must have proceeded normally"
+    );
+}
+
+#[test]
+fn an_ordinary_winget_index_refresh_says_nothing_at_all() {
+    // THE COUNTERWEIGHT, and without it the test above is satisfied by a
+    // `update_source` that reports `AfterRetry` unconditionally -- which would
+    // put a contention warning in front of every user on every run, in a tool
+    // that just spent a phase deleting lines from its own output. Measured
+    // basis for expecting silence here: 0 nonzero exits in 10 `source update`
+    // calls with no other winget process alive (§5).
+    let f = Fixture::new();
+    let fake = FakeWinget::script(vec![
+        (0, "Updating source: winget...\n".to_string()),
+        (0, winget_fixture("show-canonical-echo.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let (_u, warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"git.git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        false,
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("0x8A150001")),
+        "a refresh that never hit the transient must not mention it: {warnings:?}"
+    );
+}
+
 #[test]
 fn winget_source_update_is_never_called_when_nothing_is_declared_for_it() {
     // The gate: `update` does not reach for the network on winget's behalf

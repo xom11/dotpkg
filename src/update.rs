@@ -407,11 +407,29 @@ pub fn run<C: WingetCmd>(
                  whatever this machine last pulled."
                     .to_string(),
             );
-        } else if let Err(e) = winget.update_source() {
-            warnings.push(format!(
-                "winget: could not refresh its index ({e:#}); resolving against \
-                 whatever it already has."
-            ));
+        } else {
+            match winget.update_source() {
+                // The ordinary path says nothing, which is the point: the
+                // trigger below was measured at 0 of 10 with no other winget
+                // process alive, so a user who is not racing winget sees no
+                // new line at all.
+                Ok(crate::backend::winget::SourceRefresh::FirstTry) => {}
+                // The only thing that has ever been able to observe the retry
+                // firing. A successful retry produces no other output by
+                // design, so without this line "it never happened" and "it
+                // happened and was absorbed" are the same run to a reader --
+                // which is exactly why six dogfood rounds settled nothing.
+                Ok(crate::backend::winget::SourceRefresh::AfterRetry) => warnings.push(
+                    "winget: its index refresh exited 0x8A150001 once (measured to \
+                     mean another winget process held the index) and succeeded on \
+                     one retry; `latest` was resolved against a refreshed index."
+                        .to_string(),
+                ),
+                Err(e) => warnings.push(format!(
+                    "winget: could not refresh its index ({e:#}); resolving against \
+                     whatever it already has."
+                )),
+            }
         }
     }
 

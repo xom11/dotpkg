@@ -2159,6 +2159,16 @@ mod tests {
         // snapshot, so it is not currently exposed. See `tests/cli.rs`'s
         // `write_lock_and_bucket_for` for the measured case where the same
         // unmanaged temp repo shape aborted a `cargo mutants` run.
+        //
+        // THE ONE SITE THAT CANNOT USE `common::init_repo`, and it is written
+        // out by hand for a structural reason rather than an oversight: that
+        // constructor lives in `tests/common/mod.rs`, which is compiled into
+        // the integration-test binaries, and this test lives inside the
+        // library crate, which cannot depend on them. Every one of the other
+        // five temp-repo sites in this workspace goes through the constructor,
+        // so this is the only place the three lines can drift apart -- if a
+        // sixth site ever appears in `src/`, it belongs next to this one and
+        // needs the same two `config` calls.
         git_output(&bucket_dir, &["config", "gc.auto", "0"]);
         git_output(&bucket_dir, &["config", "maintenance.auto", "0"]);
         std::fs::write(

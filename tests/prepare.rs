@@ -1,23 +1,11 @@
+mod common;
+
+use common::{git, init_repo};
 use dotpkg::backend::scoop::Scoop;
 use dotpkg::lock::Pin;
 use dotpkg::model::Name;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
 
 /// Build a real git repository shaped like a scoop bucket: manifests under
 /// `bucket/`, one commit per version. Returns a commit sha per version, in
@@ -32,15 +20,7 @@ fn bucket_repo(
 ) -> Vec<String> {
     let dir = scoop_root.join("buckets").join(bucket);
     fs::create_dir_all(dir.join("bucket")).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
-    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
-    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
-    // background maintenance on this temp repo too, preemptively, so it
-    // cannot race a test here the way it was *measured* racing
-    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
-    // `cargo mutants` run over a write git made, not dotpkg.
-    git(&dir, &["config", "gc.auto", "0"]);
-    git(&dir, &["config", "maintenance.auto", "0"]);
+    init_repo(&dir);
     let mut shas = Vec::new();
     for v in versions {
         // Escaped, because the path-escape tests below pin a version that is
@@ -244,15 +224,7 @@ fn two_commits_of_one_version_stage_to_different_paths() {
     let stage_dir = tempfile::tempdir().unwrap();
     let dir = root.path().join("buckets").join("main");
     fs::create_dir_all(dir.join("bucket")).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
-    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
-    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
-    // background maintenance on this temp repo too, preemptively, so it
-    // cannot race a test here the way it was *measured* racing
-    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
-    // `cargo mutants` run over a write git made, not dotpkg.
-    git(&dir, &["config", "gc.auto", "0"]);
-    git(&dir, &["config", "maintenance.auto", "0"]);
+    init_repo(&dir);
     git(&dir, &["config", "user.email", "t@example.invalid"]);
     git(&dir, &["config", "user.name", "t"]);
 
@@ -326,15 +298,7 @@ fn a_manifest_absent_at_the_pinned_commit_does_not_fall_back_to_the_working_tree
     let stage_dir = tempfile::tempdir().unwrap();
     let dir = root.path().join("buckets").join("main");
     fs::create_dir_all(dir.join("bucket")).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
-    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
-    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
-    // background maintenance on this temp repo too, preemptively, so it
-    // cannot race a test here the way it was *measured* racing
-    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
-    // `cargo mutants` run over a write git made, not dotpkg.
-    git(&dir, &["config", "gc.auto", "0"]);
-    git(&dir, &["config", "maintenance.auto", "0"]);
+    init_repo(&dir);
 
     fs::write(
         dir.join("bucket").join("other.json"),

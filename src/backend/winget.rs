@@ -826,7 +826,40 @@ pub const NO_VERSION_FOUND: i32 = -1978335209;
 /// `source update` loop. "Readers share the index and the updater needs it
 /// exclusively" is a **mechanism inferred from those numbers, not a measured
 /// property of the reader**, and nothing in this crate may state otherwise.
-pub(crate) const INTERNAL_ERROR: i32 = -1978335231; // 0x8A150001
+/// `pub`, like the two exit-code constants above it, so an integration test
+/// can script this exact code instead of re-typing `-1978335231`. A second
+/// copy of a magic number in `tests/` is the drift this crate keeps paying
+/// for, and the value is already public API in every way that matters.
+pub const INTERNAL_ERROR: i32 = -1978335231; // 0x8A150001
+
+/// How `update_source` succeeded: on the first call, or on the one retry.
+///
+/// **This type exists because a successful retry is otherwise unobservable,
+/// and that is not a hypothetical.** The retry shipped structurally verified
+/// and live-unverified: six `dotpkg update` rounds against a concurrent winget
+/// process produced zero warnings, and zero warnings is the *expected* output
+/// of both "the contention never reproduced" and "it reproduced and the retry
+/// absorbed it silently". A `Result<()>` cannot tell those apart, so no
+/// dogfood built on one ever could either -- which is why the answer was a
+/// production change rather than another round on the machine.
+///
+/// `update.rs` is the only reader, and it says something only for
+/// `AfterRetry`. That keeps the ordinary path byte-identical: the trigger was
+/// **measured** at 0 of 10 with no other winget process alive and 3 of 10 with
+/// one (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §5), so
+/// a user who is not racing winget never sees the new line. It is not
+/// narration either -- it reports an event that really happened, and the thing
+/// it names (another winget process holding the index) is the one thing the
+/// user can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRefresh {
+    /// The first `source update` returned 0. The ordinary case.
+    FirstTry,
+    /// The first returned `INTERNAL_ERROR` and the second returned 0 -- the
+    /// measured contention, absorbed. Nothing was lost: the index really was
+    /// refreshed before `latest` was resolved against it.
+    AfterRetry,
+}
 
 /// One package manager, `winget`, behind the `WingetCmd` seam -- generic so
 /// that `RealWinget` and a test's fake are interchangeable, and so nothing
@@ -1244,7 +1277,7 @@ impl<C: WingetCmd> Winget<C> {
     /// winget process rather than the network. Every other nonzero exit keeps
     /// the old behaviour exactly -- a retry on a definitive answer only slows
     /// a certain failure down.
-    pub fn update_source(&self) -> Result<()> {
+    pub fn update_source(&self) -> Result<SourceRefresh> {
         // 1 s is chosen, not measured: the failure itself returns in 60-72 ms,
         // and a successful `source update` -- the call this delay guards --
         // takes 348-623 ms (measurements-2026-08-11-phase5-guard-unmanaged-
@@ -1260,7 +1293,7 @@ impl<C: WingetCmd> Winget<C> {
     /// sleep. The same shape `apply::sample_fence` /
     /// `sample_fence_with_roots` already uses for a different injected value:
     /// the rule is what needs proving, not the literal call.
-    pub fn update_source_with(&self, retry_delay: std::time::Duration) -> Result<()> {
+    pub fn update_source_with(&self, retry_delay: std::time::Duration) -> Result<SourceRefresh> {
         let argv = [
             "source",
             "update",
@@ -1277,7 +1310,11 @@ impl<C: WingetCmd> Winget<C> {
                 Err(e) => bail!("winget source update could not be run: {e}"),
             };
             if out.code == 0 {
-                return Ok(());
+                return Ok(if attempt == 0 {
+                    SourceRefresh::FirstTry
+                } else {
+                    SourceRefresh::AfterRetry
+                });
             }
             // Retry only the measured transient. Any other nonzero exit is a
             // definitive answer, and retrying one only slows a certain failure.
@@ -1627,8 +1664,38 @@ mod tests {
             }),
         ]);
         let w = Winget::new(fake);
-        assert!(w.update_source_with(std::time::Duration::ZERO).is_ok());
+        // Asserts the VALUE, not just `is_ok()`. `is_ok()` cannot tell
+        // "succeeded on the retry" from "succeeded first time" -- which is
+        // precisely the distinction still-open item 20 was about, and the one
+        // `update.rs` now reports to a user. A test that stops at `is_ok()`
+        // leaves that distinction unpinned in the suite, in the same way
+        // `Result<()>` left it unpinned in the binary.
+        assert_eq!(
+            w.update_source_with(std::time::Duration::ZERO).unwrap(),
+            SourceRefresh::AfterRetry,
+            "the retry fired, so it must say so -- this is the value that makes \
+             the event observable at all"
+        );
         assert_eq!(w.cmd.calls(), 2);
+    }
+
+    #[test]
+    fn update_source_reports_a_first_try_success_as_a_first_try_success() {
+        // The counterweight to the test above, and it is what stops
+        // `SourceRefresh` from being a constant. Without it, an
+        // `update_source` that returned `AfterRetry` unconditionally would
+        // satisfy the retry test and put a warning about contention in front
+        // of every user on every run.
+        let fake = ScriptedWinget::new(vec![Ok(CmdOut {
+            code: 0,
+            stdout: "Updating source: winget...\n".to_string(),
+        })]);
+        let w = Winget::new(fake);
+        assert_eq!(
+            w.update_source_with(std::time::Duration::ZERO).unwrap(),
+            SourceRefresh::FirstTry
+        );
+        assert_eq!(w.cmd.calls(), 1);
     }
 
     #[test]

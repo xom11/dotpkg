@@ -639,13 +639,27 @@ nobody checks.
   nothing in the build can notice, because the sentence is still grammatical
   and the line number is still a number.
   - **Instance 1** — *measured* (`git log -S`, `git diff --numstat`). Task 5's
-    `5c4894c` added `Plan::unmanaged_count`, shifting `src/plan.rs` by +17 lines
-    and `tests/cli.rs` by +20. That falsified five citations that were correct
-    when written: `backend::mod.rs`'s `running_set` and `apply_guard_overrides`,
+    `5c4894c` added `Plan::unmanaged_count`, shifting `src/plan.rs` by +17 lines.
+    ~~and `tests/cli.rs` by +20~~ — **corrected 2026-08-12: `5c4894c` grew
+    `tests/cli.rs` by +73/-0, all of it below the cited line, and falsified none
+    of it.** The cited target sits at `:980` at `1d633c6`, still at `:980` after
+    `5c4894c` and after `290653f`, and moves to `:1000` only at `05023fd` — whose
+    `tests/cli.rs` numstat is exactly **20/0**. So four of the five citations
+    below belong to `5c4894c` (the `plan.rs` ones, +17, which checks out) and the
+    fifth belongs to a different commit in a different fix wave. **The +20 was
+    the right shift attributed to the wrong commit, and it read as consistent
+    precisely because it agreed with the +17 already in the sentence** — this
+    file's own motto, inside its own account of the defect class. Five citations
+    were still falsified; the sentence about who falsified them was not. They
+    were correct when written: `backend::mod.rs`'s `running_set` and `apply_guard_overrides`,
     each citing `plan.rs:414`/`:462` and `plan.rs:345` (`running_set` written by
     Task 2's `db1c50f`; `apply_guard_overrides` by Task 4's `6cbdfa6`), and
-    `apply::sample_fence`'s citation of `tests/cli.rs:980` (also Task 2's
-    `01df082`). Caught by the whole-branch review's fix wave (`2a35df2`); see
+    `apply::sample_fence`'s citation of `tests/cli.rs:980` (still Task 2's work,
+    but written by `ea13a00`, not `01df082` — that commit carries no
+    `tests/cli.rs:NNN` citation at all, and the file's own anchor rule at
+    "re-point to whatever line the citation pointed at in the commit that WROTE
+    it" cannot be applied against the wrong sha). Caught by the whole-branch
+    review's fix wave (`2a35df2`); see
     "Sixteen `file:line` citation numbers corrected inside the shipped `.rs`
     files" above for the full table.
   - **Instance 2** — *measured* (content read against `6b2211e`). Task 9b's
@@ -958,14 +972,27 @@ Task 9c with `git diff --numstat 1d633c6 -- src/backend/winget.rs` at each point
 | `4673517` | 611 | 15 | after the fix wave; the tree the citations below were re-pointed against |
 | **`4bbe3be`** | **699** | **15** | **the tree the figure was measured against when Task 9c wrote this row** |
 
-**The single figure for this phase is therefore 699 added against 15 deleted, and
-it still is**: `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is
-empty, so neither `6b2211e` nor `765e091` moves this number. `4bbe3be` is kept as
-the row's label rather than replaced with `765e091` because the row is a
-historical measurement, not a running total. **No row and no sentence in this file
+~~**The single figure for this phase is therefore 699 added against 15 deleted,
+and it still is**~~ — **false, and false when written.** The guarantee was
+checked only across `4bbe3be..765e091`, and `2480393` landed after `765e091` and
+touched `src/backend/winget.rs`. **`git diff --numstat 1d633c6 -- src/backend/winget.rs`
+answers `706 15` on `c7086f0`, and already answered `706 15` on `8ed3de0`,
+`c7086f0`'s own parent** — so the sentence was untrue at the moment the commit
+that carries it was written, which is this file's own defect class 3, in its most
+recent commit. The rows above are historical measurements of the trees they name
+and stay as they are; what is withdrawn is the "and it still is" clause and the
+implication that any of them is a running total. **A figure whose own named
+derivation disagrees with it is worse than no figure**, and the reason this one
+survived two commits is that nobody re-ran the command printed beside it.
+
+`4bbe3be` is kept as the last row's label rather than replaced with a later sha
+because the row is a historical measurement. **No row and no sentence in this file
 claims to name the tree that ships it** — see the standing claim opening
 Verification below for what replaced that, and why replacing it was cheaper than
-keeping it correct.
+keeping it correct. *(Three sentences did still claim it when `8ed3de0` wrote
+that standing claim — at the two Windows-suite headings and in the inherited-debt
+list. They are corrected in place below; the standing claim is what they are now
+measured against rather than a description of what was already true.)*
 
 The other two are kept only because the citation table below needs them: the
 **+171/+184** shift the table's two `winget.rs` rows record was caused by the 535,
@@ -998,7 +1025,7 @@ mistakes:
 **Why this is not bookkeeping.** The four `backend/mod.rs` citations carry the
 structural argument that an `opaque` id can never reach either fence, which is
 the entire reason `winget_fence_ids` may return `installed` only. A maintainer
-who opens `plan.rs:414` finds a comment about scoop's `install.json`, cannot
+who opens `plan.rs:345` finds a comment about scoop's `install.json`, cannot
 verify the claim, and is left to either weaken the claim or "fix" code that is
 correct. `docs/phase5-notes.md` already cited `plan.rs:362-369` correctly, so the
 notes and the code disagreed about one fact in the same tree.
@@ -1718,7 +1745,7 @@ code the phase depends on but never edited:
 
 **0 `TIMEOUT`, at `-j 4`.** That parallelism is the point, and it was not
 available before. Phase 4 lost a whole run to disk starvation at `-j 4` and
-identified the fix as moving `TMPDIR` to the machine's 1.8 TB volume; Phase 4b
+identified the fix as moving `TMPDIR` to the machine's 1.6 TB volume (`docs/phase4-notes.md:204-205`'s own figure; 1.8 came from the phase brief, not the record); Phase 4b
 recorded that the fix *"is NOT available here: `/Volumes/ssd` is TCC-blocked from
 this sandbox. Lowering parallelism is the substitute."* The volume became
 reachable, so this run used it: `TMPDIR=/Volumes/ssd/...`, temp trees peaking
@@ -1740,15 +1767,45 @@ And it found two survivors **no previous phase recorded at all** — `main.rs:62
 and `scoop.rs:222` — both in untouched code, both invisible to any diff-scoped
 run by construction.
 
-**Why the corrections were possible and had not been made.** Every one of these
-numbers was inherited and quoted forward without being re-derived, and the reason
-is mechanical rather than careless: no completed run had ever covered the files
-they describe. Phase 4b's own record says so for `sys.rs` — *"NOT COVERED BY
-THIS RUN AT ALL: `src/sys.rs` (I did not pass `-f src/sys.rs`)"* — and its
-`winget.rs` figures came from a diff-scoped pass. **A number nobody can
-re-derive is a number nobody can check**, which is the same lesson this file
-records twice elsewhere, once for `file:line` citations and once for a document
-asserting its own version.
+**Why the corrections were possible and had not been made — and this explanation
+was wrong. Corrected 2026-08-12
+(`docs/measurements-2026-08-12-phase5-residuals.md` §5).**
+
+The paragraph here used to say "no completed run had ever covered the files they
+describe", and that its `winget.rs` figures "came from a diff-scoped pass". Both
+are false. `docs/phase4b-notes.md` records a **completed file-scoped run — 419
+mutants, 347 caught, 19 missed, 53 unviable** — and says at `:605-608` that the
+14 `winget.rs` mutants "surfaced only because the file-scoped mutation pass
+covered the whole file rather than the diff". This file never mentions that run
+anywhere. *(The `sys.rs` quotation is real but is not in
+`docs/phase4b-notes.md`, which is what the sentence cites: it is in Phase 4b's
+untracked ledger, so no reader of this repo can resolve it.)*
+
+**The real reason is worse and more useful: on Phase 4b's tree the number is not
+a deterministic quantity.** Four attempts at the same scope
+(`-f src/backend/winget.rs --re 'floor_char_boundary' -j 4`) on a worktree at
+`1d633c6` gave: a **baseline abort**, then **3** survivors, then **4**, and the
+whole-file run gave **4** — three completed runs, three *different* sets, with
+only one mutant surviving in all three. Their **union is 6**, the number Phase 4b
+recorded, but no single run produced 6. On `c7086f0` the same scope gives **7,
+the identical set, three runs out of three.**
+
+**The mechanism is this project's own defect class 2, and the logs name it.** At
+`1d633c6` the mutants that flip are killed by `tests/cli.rs` disk-snapshot
+assertions failing with *"the run changed something on disk"* — the
+`assert_nothing_was_touched` comparison this phase **measured** was being raced
+by git's background maintenance. A verdict decided by whether git ran
+housekeeping during that mutant's test run is not a verdict, and the baseline
+abort above is that same flake reproduced live.
+
+**So the correction to make is not "Phase 4b undercounted".** It is that before
+this phase's `gc.auto 0` + `maintenance.auto 0` fix, this count had no single
+true value — 6, 4 and 3 are all samples — and **this phase's own flake fix is
+what made 7 reproducible**. That makes the fix more load-bearing than this file
+claims for it: it did not only unblock a merge gate, it turned an unmeasurable
+number into a measurable one. **A number nobody can re-derive is a number nobody
+can check**; a number that does not survive being re-derived twice was never a
+number at all.
 
 **What it did not do.** It closed nothing. All 27 survivors are either inherited,
 accepted as equivalent, or blocked on the Windows mutation run that has still
@@ -1765,7 +1822,11 @@ section used to close by saying the first run was the only one that would be
 needed. That sentence was true of Task 9's own sequencing, below, and false about
 the branch: two more commits landed afterward, the second one touching a `.rs`
 file, so the tree these notes described moved out from under them and a second
-run followed, on `765e091` — the tree that actually merges.
+run followed, on `765e091`. *(This sentence and the heading below used to call
+`765e091` "the tree that actually merges". They were written by `3dda7e9`,
+whose own parent is `765e091` — the same self-referential shape this file
+records at its second instance, committed again while documenting it. The
+sha is kept, the claim about what it is is not.)*
 
 #### First run, on `4bbe3be`
 
@@ -1785,7 +1846,7 @@ rather than the two counts).
   on_a_real_elevated_windows_session`. **It cannot pass vacuously**: its first
   statement asserts `sys::elevated() == Some(true)` and fails with instructions if
   the session is not elevated, so a run in the wrong kind of shell goes red rather
-  than green (`tests/cli.rs:2600-2607`). The `1 + 51 = 52` also reconciles: macOS
+  than green (`tests/cli.rs:2608-2615`). The `1 + 51 = 52` also reconciles: macOS
   lists 51 tests in the `cli` binary, Windows 52, the difference being this
   `#[cfg(windows)]` test.
 - **This measures `elevated()`'s `Some(true)` direction only**, which still-open
@@ -1847,7 +1908,7 @@ its own tarball cannot be relabelled onto a later commit by arguing the code did
 not meaningfully change; it has to run again on the sha that now matters. It did,
 below.
 
-#### Second run, on `765e091` — the tree that merges
+#### Second run, on `765e091`
 
 **Measured** on a14, the same machine, the same convention. The sha was carried
 inside the tarball as `SHIPPING-SHA.txt` again and echoed back by the runner,
@@ -2227,6 +2288,19 @@ because the previous phase's post-merge audit found exactly this — a gate reco
 as met when it was not — and the fix is that an unobserved path gets a number in
 this list.
 
+**Status after the 2026-08-12 residual round**
+(`docs/measurements-2026-08-12-phase5-residuals.md`), which is what numbering them
+was for: **21 closed** by an isolation experiment with four counterweights, **16
+and 18 closed** in code, **17 measured** for the first time (36 of 36, no
+difference) though not closed, **19's premise corrected** — the Windows gate is
+holding three mutants, not six, and cannot close the other three at all — and
+**20 instrumented**, so it is now open on a dogfood round rather than on a
+production change. Each item carries its own correction below rather than being
+rewritten as if it had always said this. **Three of the six turned out to be
+partly wrong about themselves**, not merely unfinished: 16's stated reason for
+staying open, 18's diagnosis of its own mechanism, and 19's claim about what a
+Windows run could settle.
+
 1. **Downgrading a winget package.** *Decided, not deferred.* Unchanged from
    Phase 4b: measured, `install --version <older>` cannot do it, and the
    alternative would reintroduce a nightly uninstall-and-reinstall loop on every
@@ -2324,15 +2398,26 @@ this list.
     `CheckTokenMembership`, and nobody has watched it do so. An elevated run cannot
     produce that observation no matter how carefully it is done, which is why
     running the suite on Windows did not move this item.
-16. **Neither `pkg.toml`-editing round-trip guard covers `[winget.guard]`** — new
-    in this phase, and a **future-only** risk. `verify_round_trip` and
-    `verify_round_trip_winget` compare the sections `adopt`'s two editors are
-    allowed to touch and never read `after.winget.guard`, so a dropped or mangled
-    guard table would pass both. Harmless today for one reason only, and it is not
-    the guard: nothing in the tool writes `[winget.guard]` at all. It becomes real
-    the moment any editor does — an `add` that writes the table, or a rewrite of
-    `add_*_package` that touches more of the document than it means to. Structural,
-    and the cheap fix is one clause in each guard rather than a new test.
+16. ~~**Neither `pkg.toml`-editing round-trip guard covers `[winget.guard]`**~~ —
+    **closed 2026-08-12, and the reason it was left open was itself wrong.** The
+    item said closing it "means writing test scaffolding for a producer that
+    doesn't exist". No scaffolding was needed: both guards are private `fn`s that
+    the suite **already** exercises directly, bypassing the public editors
+    entirely (`src/config_edit.rs`'s `the_round_trip_guard_rejects_a_result_that_
+    changes_more_than_packages` and its two winget-side siblings). Pinning a
+    guard before a producer exists is the only moment at which the pinning is
+    free.
+    - `verify_round_trip` (the scoop editor) now compares `after.winget ==
+      before.winget`, the whole section rather than its `packages` field. It
+      changes no part of `[winget]`, so wholesale costs nothing and cannot go
+      stale when `WingetSection` grows a third field.
+    - `verify_round_trip_winget` **cannot** do that, because `packages` is the
+      field it exists to change, so every other field has to be named by hand and
+      today that is exactly `guard`. Its doc comment now states that obligation
+      at the site, because a future third field is how this hole reopens.
+    - Both are pinned by a test carrying its own positive control, and **both
+      tests were confirmed to fail** with the production clauses reverted — the
+      check that separates a guard from a test that cannot fail.
 17. **The mid-run fence's `dirs` half compares two different winget spellings,
     and nothing measures whether they ever differ** — new in this phase, found by
     the whole-branch review (Minor 7), **reasoned only**. `Running.dirs` holds
@@ -2346,21 +2431,38 @@ this list.
     plan-time fence could see, and `guard_for`'s `bins` half would not
     compensate: it supplies plausible *process* names, a different signal, empty
     unless `[winget.guard]` names the package or `guard_names` guesses right.
-    **No measurement either way** — nothing in this phase's measurement document
-    compares the two spellings for one package — so this is an uncovered
-    residual, **not a claim that the two ever differ**. `src/apply.rs`'s
-    `plan_to_steps` winget `Set` arm now states it at the site, next to the
-    `set_argv` two-spellings discussion that had covered only the argv half.
-18. **`tests/prepare.rs` duplicates `common::git` instead of importing it** —
-    `tests/prepare.rs:8` versus `tests/common/mod.rs:14`. **Structural.** Surfaced
-    by the background-maintenance fix above, which needed six `git init` sites
-    instead of two because of it, and it is the mechanism by which that defect
-    returns: the next temp-repo test copies whichever helper is nearest and
-    arrives without the two `config` calls. Left open deliberately — collapsing
-    the two helpers is a pure test-infrastructure change with no behaviour
-    attached, and the fix wave that found it was a correction pass. The cheap
-    version is one `mod common;` in `tests/prepare.rs`; the durable version is a
-    single fixture-repo constructor that no caller can bypass.
+    ~~**No measurement either way**~~ — **measured 2026-08-12**
+    (`docs/measurements-2026-08-12-phase5-residuals.md` §3), and the label changes
+    even though the residual does not close. All **36** source-backed installed
+    ids on a14 were surveyed, one `winget show -e --id <id>` each, comparing the
+    bracketed id out of `show`'s `Found <name> [<id>]` line against the `Id`
+    `parse_list` read from `winget list`: **36 byte-identical, 0 differing by
+    case, 0 differing by more than case, 0 that produced no `Found` line.** That
+    is the first evidence either way, and it is still not a guarantee about
+    winget — 36 ids on one machine bounds nothing about the next package. The
+    item stays open as *measured on 36 of 36, no difference observed*, rather
+    than as *reasoned only*. `src/apply.rs`'s `plan_to_steps` winget `Set` arm
+    states it at the site, next to the `set_argv` two-spellings discussion that
+    had covered only the argv half.
+18. ~~**`tests/prepare.rs` duplicates `common::git` instead of importing it**~~ —
+    **closed 2026-08-12, with the durable fix, because the cheap one does not
+    work.** The item's own diagnosis was wrong in a checkable way: it said the
+    duplication is why the background-maintenance fix "needed six `git init`
+    sites instead of two". It is not. Neither `common::git` nor
+    `tests/prepare.rs`'s copy contains a `git init` — both are bare
+    `Command::new("git")` wrappers — so the proposed `mod common;` would have
+    consolidated **zero** of the six sites and left the mechanism intact.
+
+    What was done instead: `common::init_repo` now performs the `git init` **and**
+    the two `config` calls together, and every temp-repo site in `tests/` goes
+    through it — `tests/common/mod.rs`'s `Fixture::bucket`, `tests/cli.rs`'s
+    `write_lock_and_bucket_for`, and `tests/prepare.rs`'s three. The only
+    `git init` left anywhere in `tests/` is inside that constructor, so a caller
+    cannot reach one without the two `config` calls. `tests/prepare.rs` also
+    stops carrying its own `git` helper, which was the item's original complaint.
+    **`src/apply.rs`'s unit test is the one site that cannot use it** — it is
+    inside the library crate, which cannot depend on an integration test's
+    `common` module — and it now says so where it writes the three lines out.
 19. **Both survivors of Task 9's `--in-diff` mutation run are now on
     `package_roots()` itself, not on the logic Task 9b extracted from it, and
     neither is closed.** Task 9b (commit `ee46172`) split `package_roots()` into
@@ -2378,34 +2480,47 @@ this list.
     The two survivors are the same pair as before, moved from `winget.rs:241`
     (the old, undivided function) to `winget.rs:251` (the new delegating
     `package_roots()`) — 57 caught became 59 (the two new `package_roots_with`
-    mutants, both now caught), and the 2 missed stayed 2, on the wrapper. Nothing
-    in the suite calls `package_roots()`: every test that reaches the winget path
-    signal goes through `apply::sample_fence_with_roots` with fabricated roots
-    instead (see "The Windows suite..." above), so no test observes either
-    mutation. The two mutants are not the same *kind* of gap and are
-    characterised separately for that reason:
-    - **`vec![]` is an equivalent mutant on macOS, not merely uncovered.**
-      `LOCALAPPDATA` and `ProgramFiles` are both unset on every macOS run of this
-      suite, so `package_roots()`'s real, correct output on this platform is
-      already `vec![]` — identical, byte for byte, to what the mutant returns.
-      No test on this platform can distinguish two functions whose real outputs
-      are the same value; that is not a coverage gap, it is arithmetic. Same
-      bucket as this file's own four `#[cfg(windows)]` `sys.rs` mutants below:
-      inert on macOS, a platform gap rather than a test gap, resolvable only by a
-      mutation run *on* Windows — and for those four, that bucket is now
-      **measured** rather than reasoned, by the file-scoped run.
-    - **`vec![Default::default()]` is not equivalent, only unreached.** It
-      returns `vec![PathBuf::new()]`, one element whose folded prefix is `"/"`.
-      On a Unix-like machine every absolute path folds to a `/`-prefixed string
-      too, so this mutant is not distinguishable *by that property* on macOS
-      either — but the real reason no test catches it is simpler and platform-
-      independent: nothing calls `package_roots()` at all, so nothing is ever in
-      a position to notice its return value is wrong.
-    - **Both are resolvable the same way: a mutation run *on* Windows**, where
-      `LOCALAPPDATA`/`ProgramFiles` are genuinely set and `main.rs`'s production
-      call path (`apply::sample_fence` → `package_roots()`) is live, so a test
-      exercising that path would see a real, non-empty, correctly-shaped answer
-      that either mutant would visibly break.
+    mutants, both now caught), and the 2 missed stayed 2, on the wrapper.
+    ~~Nothing in the suite calls `package_roots()`~~ — **that was too strong, and
+    the weaker true version is the one with the useful fix.** The suite *does*
+    call it: `tests/cli.rs` spawns the real binary, whose `status` and `apply`
+    paths reach `apply::sample_fence` and therefore `package_roots()`. What is
+    true is that **nothing in the suite *asserts* anything that depends on its
+    return value** — every test that inspects the winget path signal goes through
+    `apply::sample_fence_with_roots` with fabricated roots instead. The
+    distinction matters because the two statements have different fixes, and only
+    the weaker one is about tests. The two mutants are not the same *kind* of gap
+    and are characterised separately for that reason:
+    - ~~**`vec![]` is an equivalent mutant on macOS**, because `LOCALAPPDATA` and
+      `ProgramFiles` are both unset on every macOS run of this suite~~ —
+      **falsified 2026-08-12 on both halves.** `LOCALAPPDATA` is *not* unset:
+      `tests/cli.rs` sets it explicitly on every spawned binary, so
+      `package_roots()`'s real output in those runs is a one-element vector, not
+      `vec![]`. And the equivalence argument fails on its own terms anyway — see
+      the bullet below.
+    - **`vec![Default::default()]` is not equivalent, only unreached.** Unchanged
+      and still correct. It returns `vec![PathBuf::new()]`, one element whose
+      folded prefix is `"/"`; on Windows no path folds to a `/` prefix at all, so
+      it degenerates to the same empty answer there.
+    - ~~**Both are resolvable the same way: a mutation run *on* Windows**~~ —
+      **measured false** (`docs/measurements-2026-08-12-phase5-residuals.md`
+      §4.1). Supplying exactly what Windows supplies — `LOCALAPPDATA` and
+      `ProgramFiles` both set, so `package_roots()` returns a real two-element
+      vector — and re-running the same four mutants on macOS gives **2 missed, 2
+      caught**: the two `package_roots_with` mutants die, the two
+      `package_roots()` mutants survive. **The environment is not what keeps them
+      alive.**
+
+      What keeps them alive is structural and platform-independent: `running_ids`
+      only returns ids present in `scanned`, and no test in this suite produces a
+      non-empty winget scan — `tests/cli.rs` strips winget from the `PATH` of the
+      one binary-under-test spawn site, and every other test hands library
+      functions fabricated data. With `scanned` empty, `running_ids` answers the
+      empty set for *any* roots, so nothing observable depends on
+      `package_roots()`'s value. **A mutation run on Windows cannot close this
+      pair.** What would: one assertion tying `package_roots()` to the
+      environment it reads, which kills `vec![]` on any platform where the
+      variables are set.
     **What the split did close:** the part of the original gap that was about
     *logic*, not *plumbing*. `package_roots_with` is now pinned by four tests —
     both values present, each absent alone, both absent — each asserting the
@@ -2423,32 +2538,96 @@ this list.
     contention never reproduced under `dotpkg update`" from "it reproduced and the
     retry absorbed it invisibly" — a successful retry prints nothing, by design, so
     zero warnings is the expected output of both. **Recorded as inconclusive, not as
-    a pass.** Distinguishing the two needs instrumentation the shipped binary does
-    not have (a counter, or one line saying the retry fired), which is a production
-    change rather than another dogfood round; a second dogfood run under heavier
-    contention would produce the same undistinguishable output. Also still open from
-    item 11: whether `show` or `list` ever return `0x8A150001` under the same
-    contention, and whether 1 s is sufficient on a slower machine.
-21. **The winget path signal ships structurally verified and live-unverified — the
-    one stage that could have isolated it could not.** New in this phase, from Task
-    9's dogfood stage A1. **Structural:** `running_ids` inserts a scanned id into
-    `Running.dirs` when a live process's `exe` lies under `<root>/<id>_…`, and
-    `covers` is `dirs || names || bins`, so one `dirs` entry serves both fences.
-    **Measured, and it is the problem:** the only live process on a14 under a
-    `Packages\<id>_<sourceIdentifier>\` directory is `VKey.exe` (pid 9076), and
-    `guard_names("PhatMT97.VKey", "VKey")` yields `["vkey"]` while the live process
-    folds to `vkey` — so the **`names` half catches it too**, and A1's `! winget
-    PhatMT97.VKey  running -- stop it first` is produced by either signal
-    indistinguishably. The stage confirms **the fence**, not the path signal.
-    **This is not a new discovery, it is a predicted one:** the measurement round
-    already recorded that the path signal adds **zero** new catches on a14, and this
-    is what that costs at verification time — a signal whose only live subject is
-    already covered by a different signal cannot be isolated on that machine.
-    **What would close it:** a `portable` winget package on the machine under test
-    whose process name `guard_names` does **not** derive from its id — measured to
-    exist as a class (`rg` from `BurntSushi.ripgrep.MSVC`, `codex-command-runner`),
-    but none of them was running during the dogfood. Not closable by re-running the
-    same dogfood on the same machine.
+    a pass.**
+
+    **The instrumentation exists as of 2026-08-12, and the decision behind it is
+    recorded here rather than left implicit.** `update_source` /
+    `update_source_with` now return `Result<SourceRefresh>` -- `FirstTry` or
+    `AfterRetry` -- and `src/update.rs` says something only for `AfterRetry`.
+
+    - **What is added:** one warning line naming `0x8A150001` and saying the
+      retry succeeded, so `latest` was resolved against a refreshed index.
+    - **Who sees it:** only someone running `dotpkg update` with a declared
+      winget package, and only when the transient actually fired. `status` never
+      calls this path at all.
+    - **Whether it makes ordinary output noisier: measured not to.** The
+      2026-08-11 document's §5 measured **0** nonzero exits in 10 `source update`
+      calls with no other winget process alive, and **3 of 10** with one, so a
+      user who is not racing winget never sees the line. The question was worth
+      asking -- this phase spent itself deleting lines from `status` -- and the
+      answer is that the event is rare, real, and names the one thing the user
+      can act on. A counter folded into the closing summary was **rejected**:
+      that line is the one a user consents to, and it is exactly where this
+      project's thrice-fixed false-number defect lives.
+    - **Pinned, and the pins were confirmed able to fail:** two unit tests
+      (`AfterRetry` versus `FirstTry`) and two in `tests/update.rs` -- one that
+      the warning appears, one that an ordinary refresh says nothing at all.
+      Reverting the production arm turns the first red; warning unconditionally
+      turns the second red. The pair costs about 1 s of wall clock, knowingly,
+      because `update::run` calls the real `update_source()`; threading a
+      test-only `Duration` into the function the binary calls is the worse trade.
+
+    **What is still missing is the observation itself**, and the item stays open
+    for it: nothing has yet watched that line appear on real hardware, because
+    a14 went offline before the round could run. But it is now open on a
+    *dogfood round* rather than on a production change -- the first time it has
+    been reachable at all. Also still open from item 11: whether `show` or `list`
+    ever return `0x8A150001` under the same contention, and whether 1 s is
+    sufficient on a slower machine.
+21. ~~**The winget path signal ships structurally verified and
+    live-unverified**~~ -- **CLOSED 2026-08-12**
+    (`docs/measurements-2026-08-12-phase5-residuals.md` §1). The signal has now
+    been observed firing on real hardware with both name signals measured dark.
+
+    **What the item said would close it, and it was right:** "a `portable` winget
+    package on the machine under test whose process name `guard_names` does
+    **not** derive from its id". That package is `BurntSushi.ripgrep.MSVC`:
+    `guard_names("BurntSushi.ripgrep.MSVC", "RipGrep MSVC")` is
+    `["msvc", "ripgrep msvc"]` and `Name::key()` is `burntsushi.ripgrep.msvc`,
+    none of which is `rg`.
+
+    **The method, in one line:** hold the lock constant, change only whether the
+    package's process is alive, and prove the two name disjuncts dark while doing
+    it. Eight `dotpkg status` runs across two lock directions -- a refused
+    downgrade and a real upgrade -- flipped between an action line and
+    `! winget BurntSushi.ripgrep.MSVC running -- stop it first` with the live
+    process as the only variable, and the count of live processes folding to
+    `msvc` / `ripgrep msvc` / `burntsushi.ripgrep.msvc` was **0** immediately
+    before and after every one of them. So `dirs` is the only disjunct of
+    `Running::covers` that can have produced the skip.
+
+    **Three traps this cost, all worth carrying forward:**
+    - **`rg` on a14's `PATH` is scoop's, not winget's**, and a14's real
+      `pkg.toml` declares scoop `ripgrep`. Launching it the obvious way would
+      have exercised scoop's path signal and proved nothing about winget's. Every
+      run launched the winget binary by **absolute path**.
+    - **A fourth counterweight nobody asked for, and it is the one that rules out
+      the lazy explanation:** with scoop's `rg` running instead -- same process
+      name, wrong directory -- `status` printed the upgrade and **did not** skip.
+      The match is by path under the winget package root, not by a process
+      happening to be called `rg`.
+    - `rg.exe` lives **one directory below** its package root
+      (`…\BurntSushi.ripgrep.MSVC_…\ripgrep-15.2.0-…\rg.exe`), which does not
+      matter: `running_ids` takes the first path segment after the root, so depth
+      below it is invisible. Worth stating because it looked like it would matter.
+
+    **What did not widen:** coverage is still `portable`-only, still 4 of 36 ids
+    on this machine. And the confound count samples before and after each run,
+    not during it.
+
+    **One thing came out wider than the item claims, and it is in the
+    measurement document rather than here** (§2): a package started through its
+    `WinGet\Links` shim is caught too, even though `Get-Process`,
+    `MainModule.FileName` and WMI all report that process's image as the *link*.
+    The behaviour is measured; the explanation -- that `sysinfo` reads the
+    kernel's image name rather than the PEB's -- is **reasoned, and nobody has
+    printed `sysinfo`'s value for that pid**.
+
+    **A correction to this item's own text, found while closing it:** it says
+    `guard_names("PhatMT97.VKey", "VKey")` means "the **`names` half** catches it
+    too". By `covers`'s own taxonomy four lines above, `guard_names` output lands
+    in `Installed.bins`, so the disjunct that fires for VKey is the **`bins`**
+    half. The conclusion -- that A1 could not isolate `dirs` -- is unaffected.
 
 ### Inherited verification debt, carried unchanged
 
@@ -2469,16 +2648,48 @@ so the next phase inherits a named list rather than a surprise.
   src/sys.rs`)"*. Task 9's own diff-scoped run did not reach them either, since
   this phase changed no line in that function.
 
-  The characterisation survives the correction and is now **measured rather than
-  reasoned**: they are a platform gap, not a test gap. On macOS the
-  `cfg(not(windows))` arm returns `None` unconditionally, so the `None`
-  replacement is an *equivalent* mutant there; and nothing on macOS asserts a
-  value, so `Some(false)` and `Some(true)` survive for the same reason. Only a
-  mutation run *on* Windows can distinguish any of the four. **No `cargo
-  mutants` invocation has ever happened on a Windows machine in this project** —
-  the suite ran there twice, but a *suite* run is not a *mutation* run.
-  `package_roots()`'s two survivors (item 19) are blocked on the same missing
-  run, so the Windows mutation run is a single gate holding **six** mutants.
+  The characterisation survives the correction: they are a platform gap, not a
+  test gap. On macOS the `#[cfg(windows)]` body is not compiled at all, so the
+  mutation has no effect whatever the replacement is -- all four are inert
+  there, and this file's earlier explanation (that the `cfg(not(windows))` arm's
+  `None` is what makes the `None` replacement equivalent) is a non-sequitur: that
+  arm is a *different function* and the mutation never touches it. **Measured**
+  on macOS, `cargo mutants -f src/sys.rs`: 4 missed at `:139` x3 and `:163`, 10
+  caught -- including both mutants of the `cfg(not(windows))` arm at `:216`,
+  which die on `elevated_answers_or_admits_it_does_not_know`'s
+  `assert_eq!(answer, None)`.
+
+  ~~**Only a mutation run *on* Windows can distinguish any of the four**, and
+  with `package_roots()`'s two that is a single gate holding **six**
+  mutants.~~ -- **corrected 2026-08-12
+  (`docs/measurements-2026-08-12-phase5-residuals.md` §4). The gate is holding
+  three, not six, and it needs conditions this file never stated.**
+
+  - `package_roots()`'s two are **measured** not to be closable by a Windows run
+    at all (item 19 above).
+  - The assertion that would kill any of the `sys.rs` four lives **only** in the
+    `#[ignore]`d `on_a_real_elevated_windows_session_…`, the single `#[ignore]`
+    in this repository. `cargo mutants` runs `cargo test`, which skips it --
+    which is why both Windows suite runs report `1 ignored`. **A default
+    `cargo mutants` run on Windows reproduces "4 missed" and settles nothing.**
+  - Told to include it, and run from an elevated session (a14's ssh session is
+    one: `IsInRole(Administrator)` is `True` and the test passes by name), three
+    die -- `None`, `Some(false)`, and the `:163` inversion. **`Some(true)`
+    cannot**: it *is* the correct answer in an elevated session, so it is a
+    genuinely equivalent mutant there. Killing it needs a **non**-elevated
+    session and a test asserting `Some(false)`, which is item 15's unmeasured
+    half. The two items are one gap seen from two directions.
+  - **The invocation matters and the documented one is wrong.** `cargo mutants
+    -- --include-ignored` does not reach libtest -- verified by having libtest
+    reject a bogus flag only in the two-`--` form. And `cargo install
+    cargo-mutants --locked` **cannot build on a14**: it pins `winapi` 0.3, which
+    fails on `aarch64-pc-windows-msvc`. Without `--locked` it installs in 2.7
+    min. So "no `cargo mutants` invocation has ever happened on a Windows machine
+    in this project" is not only an omission -- the documented incantation does
+    not work there.
+  - **Still true, and still the point:** no such run has completed. One was
+    started on a14 on 2026-08-12 and was cut off when the machine went offline;
+    **no verdicts were recovered and none are claimed.**
 - **The accepted equivalent mutant on the `outstanding_skips` check** that Phase
   4b recorded at `main.rs:773`; the call is at `main.rs:856` on this tree.
   Closing it needs a fake scoop binary (which a standing test policy forbids) or
@@ -2488,11 +2699,14 @@ so the next phase inherits a named list rather than a surprise.
   `parse_versions` (1), `RealWinget::run` (1). `docs/phase4b-notes.md:606`
   records 6 and 6 for the first two, giving 14; the completed file-scoped run
   described below lists seven each. The **functions** Phase 4b named were right;
-  two of its four counts were not. This phase added **699** lines to that file (against 15
+  two of its four counts were not. This phase added **706** lines to that file (against 15
   deleted) and closed none of them — `git diff --numstat 1d633c6 --
-  src/backend/winget.rs`, measured by Task 9c on `4bbe3be` and unchanged since:
-  `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is empty, so the
-  figure still describes **`765e091`**, the tree that actually ships.
+  src/backend/winget.rs`, re-derived 2026-08-12 on `c7086f0`. **The 699 this
+  bullet used to carry was already wrong when it was written**: `2480393` landed
+  after `765e091`, touched this file, and made the figure 706 at `8ed3de0` —
+  `c7086f0`'s own parent. And `765e091` is not "the tree that actually ships";
+  `main` is four commits past it. Both errors are the same one: a number checked
+  against an endpoint that had stopped being the end.
   **This is the one figure for that quantity**; the table under
   "Sixteen `file:line` citation numbers" above records the two earlier trees (535
   at `c8c7f0d`, 611 at `4673517`) and why they are kept. The number
@@ -2511,11 +2725,21 @@ so the next phase inherits a named list rather than a surprise.
       the survivors sit in **four** functions, exactly the four Phase 4b named.
       The claim came from a run that never finished, and the ledger carried the
       same error; both are withdrawn.
-    - **Two of Phase 4b's four counts were low.** `floor_char_boundary` and
-      `parse_list` have **seven** survivors each, not six, so the inherited total
-      is **16, not 14**. Nothing closed them and nothing reopened them; the
-      earlier number was simply never re-derived, because no completed run had
-      covered the file since Phase 4b's own, which was scoped by diff.
+    - ~~**Two of Phase 4b's four counts were low**, and the earlier number "was
+      simply never re-derived, because no completed run had covered the file
+      since Phase 4b's own, which was scoped by diff"~~ — **withdrawn
+      2026-08-12.** Phase 4b's run *was* file-scoped (419 mutants), and on its
+      tree the count has no single value to be low against: three completed runs
+      of the same scope gave three different survivor sets. **16 is right for
+      `c7086f0` and is now reproducible; "Phase 4b undercounted" is not a claim
+      the evidence supports.** See "Why the corrections were possible" above and
+      `docs/measurements-2026-08-12-phase5-residuals.md` §5.
+    - **Independently confirmed, differently scoped:** a
+      `-f src/sys.rs -f src/backend/winget.rs` run on `c7086f0` reports **141
+      mutants, 22 missed, 110 caught, 9 unviable, 0 TIMEOUT**, and the 22 break
+      down as 7 + 7 + 1 + 1 (the inherited 16) plus `package_roots` 2 and
+      `sys.rs` 4. Two runs of different scope agreeing on 16 is what the
+      single-run figure could not offer.
     - **What that says about the earlier disagreement:** it was not between the
       ledger and Phase 4b's breakdown, as this file previously concluded. Both
       were wrong, in different ways and for the same underlying reason — an

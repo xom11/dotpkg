@@ -26,6 +26,39 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+/// `git init` a temp repository with git's own background maintenance turned
+/// off. **Every temp repo the integration suite creates must be built here**,
+/// and that is the whole point of the function existing.
+///
+/// *Measured* 2026-08-11, in `tests/cli.rs`'s `write_lock_and_bucket_for`:
+/// left running, git's background maintenance wrote
+/// `buckets/main/.git/objects/maintenance.lock` between two disk snapshots and
+/// aborted an entire `cargo mutants` run by tripping
+/// `assert_nothing_was_touched` over a write **git** made, not one dotpkg made.
+/// See that call site for the full evidence.
+///
+/// *Reasoned*: `maintenance.auto` (git >= 2.30) is the trigger that creates
+/// that specific lock file; `gc.auto` is the older, separate auto-gc trigger
+/// (its own lock is `gc.pid`, never observed here) but the same failure shape,
+/// so both are disabled rather than only the one actually caught.
+///
+/// **Why a constructor rather than three lines repeated at each site.** The
+/// three lines are the mechanism by which that defect comes back: the next
+/// test that needs a temp repo copies the nearest existing one, and a copy
+/// that stops after `git init` compiles, passes, and reintroduces the race.
+/// A caller cannot reach `git init` through this module without also getting
+/// the two `config` calls, which is a stronger guarantee than a comment asking
+/// for them. `src/apply.rs`'s own unit test is the one site that cannot use
+/// this -- it lives inside the library crate, which cannot depend on an
+/// integration test's `common` module -- and it says so where it writes the
+/// three lines out by hand.
+pub fn init_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    git(dir, &["init", "-q", "-b", "main"]);
+    git(dir, &["config", "gc.auto", "0"]);
+    git(dir, &["config", "maintenance.auto", "0"]);
+}
+
 pub struct Fixture {
     pub home: tempfile::TempDir,
 }
@@ -47,18 +80,7 @@ impl Fixture {
     pub fn bucket(&self, name: &str) -> PathBuf {
         let dir = self.bucket_dir(name);
         std::fs::create_dir_all(dir.join("bucket")).unwrap();
-        git(&dir, &["init", "-q", "-b", "main"]);
-        // Disables git's own background maintenance on every temp bucket
-        // repo this fixture creates. *Measured* 2026-08-11 in the sibling
-        // fixture `tests/cli.rs`'s `write_lock_and_bucket_for`: left running,
-        // it once wrote `buckets/main/.git/objects/maintenance.lock` between
-        // two disk snapshots and aborted a whole `cargo mutants` run by
-        // tripping `assert_nothing_was_touched` for a reason that had
-        // nothing to do with dotpkg. See that call site for the full
-        // evidence; `gc.auto` is disabled alongside `maintenance.auto` on
-        // the same reasoning given there.
-        git(&dir, &["config", "gc.auto", "0"]);
-        git(&dir, &["config", "maintenance.auto", "0"]);
+        init_repo(&dir);
         git(&dir, &["config", "user.email", "t@example.invalid"]);
         git(&dir, &["config", "user.name", "t"]);
         git(&dir, &["config", "commit.gpgsign", "false"]);

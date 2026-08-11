@@ -107,6 +107,15 @@ pub fn add_scoop_package(text: &str, name: &Name) -> Result<String> {
 /// `winget` comparison here is what remains: defence against a future change
 /// to the editing code above that touches something it should not.
 ///
+/// The winget half is `after.winget == before.winget`, the whole section
+/// rather than its `packages` field, and that is deliberate. It used to name
+/// `after.winget.packages` alone, which left `[winget.guard]` uncompared: a
+/// scoop edit that dropped or mangled the guard table passed this check. That
+/// was harmless only because nothing in the tool writes that table -- a reason
+/// that stops holding the day any editor does. Comparing the section wholesale
+/// costs nothing here (this function changes no part of `[winget]`) and, unlike
+/// a second named field, it cannot go stale when `WingetSection` grows a third.
+///
 /// This is the semantic half only: it re-parses `out` and compares `Config`
 /// values, and `Config` has no field for comments, so a lost comment is
 /// invisible here by construction. `no_comment_was_lost` is the text-level
@@ -120,7 +129,7 @@ fn verify_round_trip(before: &crate::config::Config, name: &Name, out: &str) -> 
     anyhow::ensure!(
         after.scoop.buckets == before.scoop.buckets
             && after.scoop.opts == before.scoop.opts
-            && after.winget.packages == before.winget.packages,
+            && after.winget == before.winget,
         "the edit changed something other than [scoop] packages; refusing to write it"
     );
     let mut want = before.scoop.packages.clone();
@@ -192,11 +201,20 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
 /// called in `add_winget_package`, beside this function's own call, for the
 /// same reason: only the caller holds both texts. A future third
 /// `add_*_package` function must call both, the way this one does.
+///
+/// **`[winget]` cannot be compared wholesale here, because `packages` is what
+/// this function changes -- so every OTHER field of `WingetSection` has to be
+/// named on the `ensure!` line, and today that is exactly `guard`.** It was
+/// named nowhere until now, which meant a winget edit that dropped
+/// `[winget.guard]` passed this guard silently. Adding a third field to
+/// `WingetSection` without adding it here reopens that hole; the sibling
+/// `verify_round_trip` does not have this obligation because it can and does
+/// compare the section as a whole.
 fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
     let after = crate::config::parse(out)
         .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
     anyhow::ensure!(
-        after.scoop == before.scoop,
+        after.scoop == before.scoop && after.winget.guard == before.winget.guard,
         "the edit changed something other than [winget] packages; refusing to write it"
     );
     let mut want = before.winget.packages.clone();
@@ -543,6 +561,67 @@ python = { arch = "64bit" }   # force an architecture
         );
     }
 
+    #[test]
+    fn the_round_trip_guard_rejects_a_scoop_edit_that_drops_the_winget_guard_table() {
+        // `[winget.guard]` was the one part of the document neither round-trip
+        // guard compared, so an edit that dropped it passed both. Nothing in
+        // the tool writes that table today, which is why the hole was harmless
+        // and not why it was safe: the day an editor writes it, "harmless"
+        // stops being true, and a dropped guard entry is silent -- it reads as
+        // protection while protecting nothing.
+        //
+        // Exercised directly, like the sibling above, because no public
+        // function can produce this shape yet. That is the point: this pins the
+        // guard BEFORE a producer exists, which is the only order in which the
+        // pinning is free.
+        let with_guard = "# what this machine should have\n\
+             [scoop]\n\
+             buckets  = [\"main\"]\n\
+             packages = [\"fzf\", \"bat\"]\n\
+             \n\
+             [winget]\n\
+             packages = [\"Git.Git\"]\n\
+             \n\
+             [winget.guard]\n\
+             \"Tailscale.Tailscale\" = [\"tailscaled\", \"tailscale-ipn\"]\n";
+        let before = crate::config::parse(with_guard).unwrap();
+        assert_eq!(
+            before.winget.guard.len(),
+            1,
+            "the fixture must carry a guard"
+        );
+
+        // The positive control first: without it, a guard that refuses
+        // everything would satisfy the refusal below for the wrong reason.
+        let clean = add_scoop_package(with_guard, &Name::new("ripgrep")).unwrap();
+        verify_round_trip(&before, &Name::new("ripgrep"), &clean)
+            .expect("a clean scoop addition that leaves the guard alone must pass");
+
+        let dropped = clean.replacen(
+            "[winget.guard]\n\"Tailscale.Tailscale\" = [\"tailscaled\", \"tailscale-ipn\"]\n",
+            "",
+            1,
+        );
+        assert!(
+            crate::config::parse(&dropped)
+                .unwrap()
+                .winget
+                .guard
+                .is_empty(),
+            "the fixture must actually drop the table, or this test proves nothing"
+        );
+
+        let r = verify_round_trip(&before, &Name::new("ripgrep"), &dropped);
+        assert!(
+            r.is_err(),
+            "a dropped [winget.guard] must be refused: {r:?}"
+        );
+        assert!(
+            format!("{:#}", r.unwrap_err()).contains("changed something other than"),
+            "must say what kind of disagreement it is"
+        );
+    }
+
     // -- add_winget_package -----------------------------------------------
     //
     // `add_scoop_package`'s mirror, one section over. Not a full re-run of
@@ -693,6 +772,58 @@ packages = [
         let before = crate::config::parse(HAND_WRITTEN_WINGET).unwrap();
         let out = add_winget_package(HAND_WRITTEN_WINGET, &Name::new("7zip.7zip")).unwrap();
         verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &out).unwrap();
+    }
+
+    #[test]
+    fn the_winget_round_trip_guard_rejects_an_edit_that_drops_the_guard_table() {
+        // The mirror of the scoop-side test above, and the harder half: this
+        // function CANNOT compare `[winget]` wholesale, because `packages` is
+        // the field it exists to change. So every other field of
+        // `WingetSection` has to be named on its `ensure!` line by hand, and
+        // `guard` was not. A winget edit that dropped the table passed.
+        let with_guard = "[scoop]\n\
+             buckets  = [\"main\"]\n\
+             packages = [\"fzf\"]\n\
+             \n\
+             [winget]\n\
+             packages = [\"Git.Git\"]\n\
+             \n\
+             [winget.guard]\n\
+             \"Tailscale.Tailscale\" = [\"tailscaled\"]\n";
+        let before = crate::config::parse(with_guard).unwrap();
+        assert_eq!(
+            before.winget.guard.len(),
+            1,
+            "the fixture must carry a guard"
+        );
+
+        let clean = add_winget_package(with_guard, &Name::new("7zip.7zip")).unwrap();
+        verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &clean)
+            .expect("a clean winget addition that leaves the guard alone must pass");
+
+        let dropped = clean.replacen(
+            "[winget.guard]\n\"Tailscale.Tailscale\" = [\"tailscaled\"]\n",
+            "",
+            1,
+        );
+        assert!(
+            crate::config::parse(&dropped)
+                .unwrap()
+                .winget
+                .guard
+                .is_empty(),
+            "the fixture must actually drop the table, or this test proves nothing"
+        );
+
+        let r = verify_round_trip_winget(&before, &Name::new("7zip.7zip"), &dropped);
+        assert!(
+            r.is_err(),
+            "a dropped [winget.guard] must be refused: {r:?}"
+        );
+        assert!(
+            format!("{:#}", r.unwrap_err()).contains("changed something other than"),
+            "must say what kind of disagreement it is"
+        );
     }
 
     // -- no_comment_was_lost ------------------------------------------------

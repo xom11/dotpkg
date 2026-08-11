@@ -27,6 +27,19 @@ not be isolated from `guard_names` on the one live subject the machine offered. 
 run that happened is not the same as a question that was answered, and this file
 tries not to spend the first to claim the second.
 
+**And then the tree moved twice more, and one of those three runs had to happen a
+second time.** `6b2211e` (the commit that wrote the paragraph above) is docs only;
+`765e091` changes one comment line in `src/backend/winget_exec.rs` in addition to
+documentation. Both land before this file merges, so `4bbe3be` stopped being "the
+tree that ships this file" the moment `765e091` was committed. The Windows suite
+is the one of the three runs whose validity is tied to a specific tree by a sha
+carried inside its own tarball, so it is the one that had to run again rather than
+merely be relabelled — see "The Windows suite: it ran twice" below, which is also
+where this file's own now-false claim that only one Windows run would be needed is
+corrected. The dogfood and the mutation run are not retracted: neither of the two
+commits touches anything either of them observed, which is checked rather than
+assumed at each of those sections below.
+
 `docs/phase2-notes.md`, `docs/phase2b-notes.md`, `docs/phase3-notes.md`,
 `docs/phase4-notes.md` and `docs/phase4b-notes.md` still hold the earlier items;
 this file does not repeat them except where a Phase 4b "still open" item was in
@@ -796,9 +809,15 @@ Task 9c with `git diff --numstat 1d633c6 -- src/backend/winget.rs` at each point
 |---|---|---|---|
 | `c8c7f0d` | 535 | 15 | before the fix wave |
 | `4673517` | 611 | 15 | after the fix wave; the tree the citations below were re-pointed against |
-| **`4bbe3be`** | **699** | **15** | **the tree that ships this file** |
+| **`4bbe3be`** | **699** | **15** | **the tree that ships this file at the time this row was written** |
 
-**The single figure for this phase is therefore 699 added against 15 deleted.**
+**The single figure for this phase is therefore 699 added against 15 deleted, and
+it still is**: `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is
+empty, so neither `6b2211e` nor `765e091` moves this number. `4bbe3be` is kept as
+the row's label rather than replaced with `765e091` because the row is a
+historical measurement, not a running total — the tree that ships this file *now*
+is named where it is used as a live claim, in Verification below.
+
 The other two are kept only because the citation table below needs them: the
 **+171/+184** shift the table's two `winget.rs` rows record was caused by the 535,
 and re-pointing them was done against `4673517`. The 611 → 699 step is `ee46172`'s
@@ -873,20 +892,27 @@ those two insertion points moved — **+32** for targets before the test module,
 live citation numbers, all 26 resolving" ran on the tree **before** `ee46172`, so
 it is not evidence about the tree that ships.
 
-**One citing site inside the shipped `.rs` files is stale on `4bbe3be`, and Task
+**One citing site inside the shipped `.rs` files was stale on `4bbe3be`, and Task
 9c did not fix it** — this task's scope was documentation only, so the `.rs` files
-were left untouched deliberately rather than by oversight:
+were left untouched deliberately rather than by oversight. **Task 9d then fixed it,
+in `765e091`** — see "The `file:line` citation convention failed the same way
+twice on this one branch" above for the fix itself and the 21-site re-sweep that
+followed it. The table below is kept as Task 9c wrote it, describing the
+citation's state on `4bbe3be`, because the point of this subsection is the drift
+that tree recorded, not the value it holds now:
 
-| citing site | says | true target on `4bbe3be` |
+| citing site | said | drifted target on `4bbe3be` |
 |---|---|---|
 | `src/backend/winget_exec.rs:154`, in `list_one_argv`'s doc comment | `src/backend/winget.rs:867`, `:956` | `:899`, `:988` |
 
 Both targets are the *"no `--exact`"* comment lines in `resolve_latest` and
 `resolve_installed`. They were correct at `1d633c6` as `:696`/`:772`, re-pointed to
-`:867`/`:956` against `4673517`, and are `:899`/`:988` now — so the total drift
-from base is **+203/+216**, not the +171/+184 the table above records for the
-earlier tree. **This is the same defect the table exists to document, in the same
-file, one commit later.**
+`:867`/`:956` against `4673517`, and were `:899`/`:988` on `4bbe3be` — so the total
+drift from base reached **+203/+216**, not the +171/+184 the table above records
+for the earlier tree, before Task 9d's fix brought the `.rs` comment itself back
+into agreement. **This is the same defect the table exists to document, in the
+same file, one commit later — and, unlike the thirteen in that table, it shipped
+broken for one more commit before anyone caught it.**
 
 **Six citations in *this* document had drifted the same way, and those are
 re-pointed in place** — they are documentation, and the whole premise of the table
@@ -903,15 +929,19 @@ above is that a wrong number is worth fixing:
 
 **What this actually demonstrates, and it is not that people are careless.** The
 fix wave re-pointed thirteen citations and a reviewer verified all twenty-six
-numbers; **two commits later seven of them were wrong again**, because a later
-commit inserted lines above them. The failure is not attention, it is the format:
-`file:line` in prose is invalidated by any edit above the target and nothing in the
-build can notice. `src/backend/winget_exec.rs:154`'s citation has now been wrong,
-fixed, and wrong again within one branch. The durable answer is to cite by
-**symbol name** — which no line edit can break, and which `winget.rs`'s own
-`INTERNAL_ERROR` doc comment already does — and that is a production change this
-documentation task deliberately did not make. Recorded here so the next phase
-inherits the diagnosis rather than the fourteenth instance.
+numbers; **two commits later seven of them were wrong again** (the six in the
+table above plus `winget_exec.rs:154`), because a later commit inserted lines
+above them. The failure is not attention, it is the format: `file:line` in prose
+is invalidated by any edit above the target and nothing in the build can notice.
+`src/backend/winget_exec.rs:154`'s citation has now been wrong, fixed, wrong
+again, and fixed again within one branch — the second fix, Task 9d's in
+`765e091`, corrected the numbers but did not switch the citation to a symbol
+name, so it is exactly as fragile against the next insertion as it was after the
+first fix. The durable answer is to cite by **symbol name** — which no line edit
+can break, and which `winget.rs`'s own `INTERNAL_ERROR` doc comment already does
+— and that is a production change no documentation task in this phase made.
+Recorded here so the next phase inherits the diagnosis rather than the fifteenth
+instance.
 
 ### The design attributes 105 invocations to one argv
 
@@ -1091,17 +1121,23 @@ line is a dead pointer, not a superseded one.
 
 ### macOS suite
 
-`cargo test --no-fail-fast`, **re-measured by Task 9c on the tree that ships this
-file, `4bbe3be`** — named as a sha rather than as "the tree above", because that
-is the phrase this section has already been caught by twice: **exit 0, 638
-passed, 0 failed, 0 ignored**, across **14** `test result:` lines
-(`unittests src/lib.rs` 311, `unittests src/main.rs` 14, the eleven `tests/*.rs`
-binaries totalling 313, and `Doc-tests dotpkg` 0). Base `main` at `1d633c6` was
-588, so the phase adds **50** tests. **Measured.**
+`cargo test --no-fail-fast`, **measured on `765e091`, the tree that ships this
+file** — named as a sha rather than as "the tree above", because that is the
+phrase this section has already been caught by twice, and named as the *current*
+sha rather than `4bbe3be` because two more commits landed after Task 9c measured
+that one (below): **exit 0, 638 passed, 0 failed, 0 ignored**, across **14**
+`test result:` lines (`unittests src/lib.rs` 311, `unittests src/main.rs` 14, the
+eleven `tests/*.rs` binaries totalling 313, and `Doc-tests dotpkg` 0). Base `main`
+at `1d633c6` was 588, so the phase adds **50** tests. **Measured directly by Task
+9e on `765e091`** — not inherited from Task 9c's `4bbe3be` figure, because
+`765e091` also touches a `.rs` file (one comment line in
+`src/backend/winget_exec.rs`), and this section's own history two entries below is
+already two-for-two on what happens when a number is carried past a tree move
+instead of re-run.
 
-**The history of this one number, because it has been wrong here twice and the
-shape of the error was the same both times** — a count that was true of some tree
-sitting under a sentence that named a different one:
+**The history of this one number, because it has been wrong here twice before and
+the shape of the error was the same both times** — a count that was true of some
+tree sitting under a sentence that named a different one:
 
 - **631** was Task 8's total at `137fc35`. The sentence then read "measured on
   the tree this file describes" while two commits (`05023fd`, `c8c7f0d`) had
@@ -1112,12 +1148,21 @@ sitting under a sentence that named a different one:
   retry's `attempt == 0` guard. It held from `2a35df2` through `4673517`.
 - **638** is Task 9b's, `+4`: the four `package_roots_with` tests `ee46172`
   added, all four in `src/lib.rs`'s unit tests, which is exactly where the 307 →
-  311 move comes from. `4bbe3be` after it is a docs-only commit, so 638 is the
-  shipping total.
+  311 move comes from.
+- **638 held unchanged through `4bbe3be`, `6b2211e` and `765e091`, and this is the
+  first of those three it was actually re-run on rather than carried forward.**
+  `4bbe3be` was a docs-only commit on top of `ee46172`, so inheriting 638 there was
+  correct. `6b2211e` is docs-only too. `765e091` is not: it changes one comment
+  line in `src/backend/winget_exec.rs`, which makes inheriting 638 across it
+  without re-running exactly the mistake the 631 entry above already names once.
+  Re-run instead, by Task 9e: same **638 / 0 / 0**, same **14** lines. A comment
+  cannot change a test count, but this section does not get to assume that — it
+  gets to measure it, which is what makes **638 the figure `765e091` — the tree
+  that ships this file now — actually earns**, rather than one it merely
+  inherited.
 
-Also **measured** by Task 9c on `4bbe3be`, not carried forward from the tree
-before it — `ee46172` edited `src/backend/winget.rs`, so none of these three
-could be inherited:
+Also **measured directly by Task 9e on `765e091`**, for the same reason — not
+carried forward from Task 9c's `4bbe3be` run:
 
 - `cargo fmt --check` — exit 0, no output.
 - `cargo clippy --all-targets -- -D warnings` — exit 0, zero warnings.
@@ -1125,12 +1170,14 @@ could be inherited:
 ### Windows target, cross-checked from macOS
 
 `cargo check --target aarch64-pc-windows-msvc --all-targets` — exit 0, zero
-warnings, **measured on `4bbe3be`**. This type-checks every
-`#[cfg(windows)]` path from macOS
-and is explicitly **not** a substitute for running the suite on Windows: it
-catches compile errors on the Windows target, not behavioural differences. That
-distinction is no longer hypothetical here — the suite *has* now run on Windows,
-below, and this check is what made that run cheap rather than what replaced it.
+warnings, **measured on `765e091`** (re-run by Task 9e; the `4bbe3be` result this
+section previously cited was not carried forward, on the same standing as the
+macOS suite above, even though the only intervening `.rs` change is a comment).
+This type-checks every `#[cfg(windows)]` path from macOS and is explicitly
+**not** a substitute for running the suite on Windows: it catches compile errors
+on the Windows target, not behavioural differences. That distinction is no
+longer hypothetical here — the suite *has* now run on Windows, below, twice, and
+this check is what made both runs cheap rather than what replaced them.
 
 ### Fixture integrity
 
@@ -1140,6 +1187,14 @@ below, and this check is what made that run cheap rather than what replaced it.
 **inside the tarball before upload** and on a14 after unpacking, all three values
 identical. The byte count and the CRLF count are exactly what `PROVENANCE.md` and
 `docs/phase4b-notes.md` record, and `.gitattributes` pins the path `-text`.
+
+**Checked a second time for the Windows suite's second run, on `765e091`** —
+same three numbers, same sha, again inside the tarball before upload and on a14
+after unpacking. Re-confirmed on macOS too, directly against the checked-in file
+by Task 9e: **30958 bytes, 143 CRLF pairs, sha256 `c71284a393f87686…`**,
+unchanged. Expected, since `git diff --name-only 4bbe3be 765e091 --
+tests/fixtures/` is empty — but this section's whole point is that expected is
+not measured, so it was checked rather than assumed.
 
 **Why the sha is the check that matters and the two counts are not enough**, which
 this phase learned from its own mistake rather than from a rule: this round's
@@ -1264,9 +1319,18 @@ ledger record, the 72/59 row is a re-derivation.
 the same step that had aborted now produced a result.
 
 **Attributable to the shipping tree**, which is worth stating rather than
-assuming: `4bbe3be` is a docs-only commit on top of `ee46172` (`1 file changed`,
-`docs/phase5-notes.md`), so the second run's code tree is byte-identical to the
-one that ships.
+assuming, and restated here because the shipping tree has moved twice since this
+paragraph was first written: `4bbe3be` is a docs-only commit on top of `ee46172`
+(`1 file changed`, `docs/phase5-notes.md`). Two more commits land after it —
+`6b2211e` (also docs-only) and `765e091`, which changes exactly one line of
+`src/backend/winget.rs`'s companion file, `src/backend/winget_exec.rs`, and
+nothing else under `src/`. That one line is a doc comment, not code `cargo
+mutants` can mutate, so it changes nothing this run could have tested
+differently — verified here rather than assumed: `git diff ee46172 765e091 --
+src/` touches exactly `src/backend/winget_exec.rs`, one insertion and one
+deletion, both inside a `///` comment. **`765e091`'s code is functionally
+identical to `ee46172`'s for mutation-testing purposes**, so this run's numbers
+are still the ones that describe the tree that ships.
 
 **Zero timeouts at `-j 2`, matching Phase 4b** — the second consecutive phase to
 measure that, which is what turns Phase 4's 69 unresolved `timeout` mutants
@@ -1295,10 +1359,18 @@ evidence about *both*, and it is the one thing a count of 57 or 59 caught cannot
 tell you. The two survivors' current status, their move from `:241` to `:251`
 across the split, and why neither is closed, are still-open item 19.
 
-### The Windows suite: it ran, on the tree that ships
+### The Windows suite: it ran twice, because the tree moved after the first run
 
-**Measured** on a14 (`zenbook-a14`), on **`4bbe3be`** — the tree that ships this
-file.
+**Measured** on a14 (`zenbook-a14`). Two runs belong here, on the same footing as
+the mutation run's abort belonging above its completion earlier in this section:
+what the second run establishes is the finding, not a rerun taken for luck. This
+section used to close by saying the first run was the only one that would be
+needed. That sentence was true of Task 9's own sequencing, below, and false about
+the branch: two more commits landed afterward, the second one touching a `.rs`
+file, so the tree these notes described moved out from under them and a second
+run followed, on `765e091` — the tree that actually merges.
+
+#### First run, on `4bbe3be`
 
 **The sha was carried inside the artefact, not asserted alongside it.** The
 shipping sha travelled **in** the tarball as `SHIPPING-SHA.txt` and was echoed
@@ -1361,20 +1433,90 @@ trap this project has already fallen into once:**
 `kanata_windows_tty_winIOv2_arm64` **PID 13676** both times, **31** scoop apps,
 `pkg.toml` sha `32A238FF…` unchanged, no `pkg.toml.bak`, `dotpkg-build` intact.
 
-**Only one Windows run was needed, and that is a result about the plan rather than
-about the code.** Phase 4b needed **four**, because its tree moved twice after the
-first run and every move invalidated the run before it. Here the tree did **not**
-move between the suite and the dogfood — both ran on `4bbe3be`, with the sha
-echoed back from inside the tarball both times — because the whole-branch review,
-the fix wave, the mutation run and the `package_roots` split were all
-**deliberately sequenced before** the Windows work, precisely so that the
-expensive run would land on a settled tree. That sequencing decision was Phase
-4b's own recorded lesson being spent.
+**Why this section used to say only one run would be needed, and why that turned
+out wrong.** The tree did **not** move between this suite and the dogfood below —
+both ran on `4bbe3be`, with the sha echoed back from inside the tarball both
+times — because the whole-branch review, the fix wave, the mutation run and the
+`package_roots` split were all **deliberately sequenced before** the Windows
+work, precisely so that the expensive run would land on a settled tree. That
+sequencing decision was Phase 4b's own recorded lesson being spent, and it is
+still true as a claim about *this run's own two halves*. It was never a claim
+about the rest of the branch, and the rest of the branch is what falsified it:
+two more commits landed after `4bbe3be` — `6b2211e` (docs only) and `765e091`
+(one comment line in `src/backend/winget_exec.rs`, see "And then the class
+recurred" above, plus documentation) — so the tree this section described stopped
+being the tree that ships. A run whose validity is proven by a sha carried inside
+its own tarball cannot be relabelled onto a later commit by arguing the code did
+not meaningfully change; it has to run again on the sha that now matters. It did,
+below.
+
+#### Second run, on `765e091` — the tree that merges
+
+**Measured** on a14, the same machine, the same convention. The sha was carried
+inside the tarball as `SHIPPING-SHA.txt` again and echoed back by the runner,
+this time matching `765e091`.
+
+- **Fixture checked by sha again, inside the tarball**: 30958 bytes, 143 CRLF
+  pairs, sha256 `c71284a393f87686…` — identical to the first run and to the
+  checked-in file (re-confirmed on macOS too by Task 9e; see Fixture integrity
+  above).
+- **`cargo test --no-fail-fast`: exit 0, 636 passed / 0 failed / 1 ignored**,
+  across **14** `test result:` lines — **identical to the first run.**
+- **The `#[ignore]`d elevated-only test passed again when invoked by name.**
+- **The name-by-name cross-reference was run again, not assumed from the first
+  run**: macOS **638**, Windows **637**, common **636**, and the difference set
+  **byte-identical** to the first run's and to every Phase 4b run — the same two
+  `#[cfg(unix)]` tests and the same one `#[cfg(windows)] #[ignore]` test.
+- **Machine verified unchanged again**: kanata `kanata_windows_tty_winIOv2_arm64`
+  **PID 13676** before and after, **31** scoop apps, `pkg.toml` sha unchanged, no
+  `pkg.toml.bak`.
+
+**Two method points from this run that belong in the record on their own, because
+both are about trusting a run's provenance rather than about its numbers:**
+
+1. **The extract step partly failed, and the run was still valid — but only
+   because that was proven, not assumed.** `Remove-Item` could not delete the
+   previous build tree: macOS `tar` had written AppleDouble `._*` entries into it
+   when the tarball was created, and one of them could not be removed. `New-Item`
+   then reported the target directory already existed, and `tar` extracted the
+   new tree **over** the old one rather than into a clean directory. **A run on a
+   tree that was overwritten rather than replaced is not self-evidently a run on
+   the shipping tree** — an overwrite that silently failed to touch even one file
+   would leave a stale file from `4bbe3be` sitting inside what the runner reports
+   as `765e091`. This was established **by content**, not assumed from the sha
+   alone: five files — `src/backend/winget_exec.rs`, `src/backend/winget.rs`,
+   `src/render.rs`, `src/backend/mod.rs`, `Cargo.lock` — were hashed on both sides
+   (the known-good `765e091` checkout and the extracted a14 tree) and all five
+   matched, on top of the echoed `SHIPPING-SHA.txt`. **The sha-in-tarball
+   convention alone would not have caught a stale-file case**: `SHIPPING-SHA.txt`
+   proves what sha the tarball *carried*, not what ended up on disk after an
+   extraction wrote over an already-populated directory — only the five-file
+   content check does that. **Structural, verified independently here too**: of
+   the five, `src/backend/winget.rs`, `src/render.rs`, `src/backend/mod.rs` and
+   `Cargo.lock` are byte-identical between `4bbe3be` and `765e091` (`git diff
+   --numstat`, empty for all four) — only `src/backend/winget_exec.rs` differs.
+   So `winget_exec.rs` was the one file in the set actually capable of telling the
+   two trees apart, and it is the one Task 9d had just edited — the check worked
+   because it happened to include the one file where a stale copy would have been
+   distinguishable from the real thing.
+2. **80 AppleDouble `._*` files are litter in the build directory on a14.**
+   Inert — none is a `.rs` file and nothing compiles them — but they are what made
+   the removal above fail, and they will still be there next time. A future
+   Windows run should either create the tarball with `--exclude='._*'` or clear
+   the target directory before extracting, rather than relying on `Remove-Item` to
+   succeed against a directory macOS itself has littered.
 
 ### The dogfood: read-only except one stage
 
 **Measured** on a14, on **`4bbe3be`**, sha echoed back from inside the tarball as
-above.
+above. **Not re-run on `765e091`, and that is stated rather than assumed to be
+fine**: unlike the Windows suite, the dogfood's evidence is not tied to a sha
+inside its own tarball, so the question is whether anything it observed could
+have changed between the two trees. Nothing did — `git diff --numstat 4bbe3be
+765e091 -- src/` touches only `src/backend/winget_exec.rs`, one comment line, and
+every stage below (`status`, `[winget.guard]`, the collapsed line, `dotpkg
+update`) exercises code the dogfood ran through paths this diff does not touch.
+**Structural**, not measured a second time.
 
 **Why it could be read-only at all, which is the scoping insight and not a lucky
 break:** everything this phase changed is observable through **`status`**, and
@@ -1645,8 +1787,9 @@ triages whatever remains.
   at `main` (`1d633c6`), untouched by this phase, and in the `~` line rather than
   the `?` collapse this phase changed.
 - **Three citations in `winget.rs` still use the shorthand
-  `measurements-2026-08-11 §N` with no filename** — `:939`, `:1370`, `:1676` on
-  the tree that ships (`4bbe3be`), re-pointed by Task 9c from `:907`, `:1338`,
+  `measurements-2026-08-11 §N` with no filename** — `:939`, `:1370`, `:1676`,
+  unchanged from `4bbe3be` through `765e091` since neither later commit touches
+  `src/backend/winget.rs`, re-pointed by Task 9c from `:907`, `:1338`,
   `:1588`, which were correct at `4673517` before `ee46172` shifted the file. Not
   ellipses and not factual errors, but inconsistent with the
   now-fully-named citations in the same file. A fourth, at the retry test, was
@@ -1933,8 +2076,10 @@ so the next phase inherits a named list rather than a surprise.
   `floor_char_boundary` (6), `parse_list` (6), `parse_versions` (1),
   `RealWinget::run` (1). This phase added **699** lines to that file (against 15
   deleted) and closed none of them — `git diff --numstat 1d633c6 --
-  src/backend/winget.rs`, measured by Task 9c on **`4bbe3be`**, the tree that
-  ships. **This is the one figure for that quantity**; the table under
+  src/backend/winget.rs`, measured by Task 9c on `4bbe3be` and unchanged since:
+  `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is empty, so the
+  figure still describes **`765e091`**, the tree that actually ships.
+  **This is the one figure for that quantity**; the table under
   "Thirteen `file:line` citations" above records the two earlier trees (535 at
   `c8c7f0d`, 611 at `4673517`) and why they are kept. The number
   read 534 until the whole-branch review (Minor 2) re-derived **535** against

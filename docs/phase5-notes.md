@@ -110,8 +110,23 @@ Structural, provable by reading:
   nothing. Collapsing removes the very lines that used to carry the fact, so
   without the clause 42 printed facts sit under `0 change(s), 0 skipped` — the
   shape `refused_downgrade_count` already earned its own clause to avoid.
-  `render_preparation`'s summary has no such clause and needs none: its numbers
-  never counted a report, and the collapsed line it prints carries its own count.
+  **`render_preparation`'s summary now carries the same clause**, on the same
+  gating — the count, never the flag. This file used to say it "has no such
+  clause and needs none: its numbers never counted a report, and the collapsed
+  line it prints carries its own count". That was true on the collapse path and
+  false under `--show-unmanaged`, where no collapsed line is printed at all:
+  `apply --show-unmanaged` printed N individual `?` lines and then `0 of 0
+  changes ready, 0 failed, 0 skipped, 0 not locked.`, while `render(plan)`'s
+  summary for the same run *did* count them, its clause being gated on the count
+  rather than on the flag. The two tables of one `apply` run disagreeing about
+  whether a printed fact is counted is the exact defect this task was already
+  fixed for once, one level up. Found by the whole-branch review (Minor 1), and
+  pinned by
+  `render_preparation_counts_unmanaged_reports_on_both_paths_not_only_the_collapsed_one`,
+  which asserts the literal summary text for **both** flag values from one
+  `Preparation`, plus a second test asserting the clause is absent when there are
+  no reports. **Structural:** none of the four counts in that line can see an
+  `Outcome::Report`, so a report is counted by nothing else there.
 
 #### 2. `[winget.guard]` is a new `pkg.toml` table
 
@@ -377,8 +392,8 @@ the same PID the phase brief recorded.
 - `INTERNAL_ERROR`'s decimal value is cross-checked against the hex form recorded
   beside its definition (`assert_eq!(INTERNAL_ERROR as u32, 0x8A150001)`), in a
   test of its own: `the_internal_error_codes_decimal_and_hex_forms_still_agree`
-  (`winget.rs:1497-1504`). The six exit-code constants are pinned across **three**
-  such tests, not one — two in `winget.rs:1479-1494`, this one, and three in
+  (`winget.rs:1513-1520`). The six exit-code constants are pinned across **three**
+  such tests, not one — two in `winget.rs:1495-1510`, this one, and three in
   `winget_exec.rs:468-470` — so the value is pinned but the constants are not
   checked together. That matters because the defect class here is a sign flip on a
   constant's own definition, which every test that builds its `CmdOut` from the
@@ -417,6 +432,16 @@ the same PID the phase brief recorded.
   inferred from 105 of 105, not a measured property of the reader.
 - **The path signal's value.** Zero new catches on the measured machine; the
   claim is about the class, and there is no number behind it.
+- **Whether `winget list`'s `Id` and `winget show`'s `Id` are ever different
+  spellings for one package.** The mid-run fence's `dirs` half compares them
+  against each other: `Running.dirs` is filled from the *scan*'s ids
+  (`backend::winget_fence_ids` → `winget::running_ids`, which inserts the scanned
+  id itself, and `rows_to_scan` builds those from `winget list`'s `Id` column),
+  while the `Name` the re-sampler asks about is `Step::app()` — for a
+  `WingetStep::Set`, `Outcome::ReadyToSet`'s `id`, which is `winget show`'s `Id`
+  as `parse_show` read it back. `Name` folds case, so a case-only difference is
+  absorbed; nothing measures whether a non-case difference exists. Recorded as a
+  residual, not as a bug — see still-open item 17.
 
 ## Method failures: the measurement round, the design, and the controller
 
@@ -651,6 +676,80 @@ kind of stale sentence a reader cannot be warned about from a document.
   measurement cannot drift again, and with the full document filename, which also
   closes one of the shorthand citations listed under "Left open".
 
+### Thirteen `file:line` citations corrected inside the shipped `.rs` files
+
+The same defect class as the two comments above, but caused by *line drift*
+rather than by a wrong sentence. **Nine** were correct when written and were
+falsified by a later commit on this branch: five found by the whole-branch review
+(Important 1), four more by the fix wave's own re-sweep of every
+`<file>.rs:<line>` citation in `src/`, comparing each target's line *content* at
+`1d633c6` against this tree. **Four** more were already wrong at `1d633c6` and
+are inherited rather than this branch's; they are listed separately below. All
+thirteen are corrected in the shipped tree; the table is here because the *cause*
+is worth naming, not the numbers.
+
+Task 5's `5c4894c` added `Plan::unmanaged_count` and shifted `src/plan.rs` by
+exactly **17** lines and `tests/cli.rs` by **20**; Task 2 removed
+`Scoop::running_set` and shifted `src/backend/scoop.rs` by **-16**; the phase's
+535 added lines shifted `src/backend/winget.rs` by **+171/+184** at the two
+points cited into it.
+
+| site | said | now |
+|---|---|---|
+| `src/backend/mod.rs`, `running_set` | `src/plan.rs:414`, `:462` | `:431`, `:479` |
+| `src/backend/mod.rs`, `running_set` | `src/plan.rs:345` | `:362-369` |
+| `src/backend/mod.rs`, `apply_guard_overrides` | `src/plan.rs:414`, `:462` | `:431`, `:479` |
+| `src/backend/mod.rs`, `apply_guard_overrides` | `src/plan.rs:345` | `:362-369` |
+| `src/apply.rs`, `sample_fence` | `tests/cli.rs:980` | `:1000` |
+| `src/main.rs`, `reconcile_ghosts` test | `src/backend/scoop.rs:299-303` | `:283-287` |
+| `src/backend/winget_exec.rs`, `list_one_argv` | `src/backend/winget.rs:696`, `:772` | `:867`, `:956` |
+| `src/render.rs`, `render_execution` | `src/render.rs:303` | `:493` |
+| `src/render.rs`, a mutation-reasoning test | `src/render.rs:286` | `:443` |
+
+And the four inherited ones, described below — all four off by **exactly 44
+lines**, which is one un-repointed historical shift, not four independent
+mistakes:
+
+| site | said | now |
+|---|---|---|
+| `src/apply.rs`, `a_prune_from_a_backend_that_is_neither…` | `apply.rs:849`, `:814` | `:912`, `:858` |
+| `src/apply.rs`, `a_scoop_action_carrying_a_readytoset…` | `apply.rs:837` | `:900` |
+| `src/apply.rs`, `guard_for_needs_both_the_right_backend…` | `apply.rs:911` | `:974` |
+
+**Why this is not bookkeeping.** The four `backend/mod.rs` citations carry the
+structural argument that an `opaque` id can never reach either fence, which is
+the entire reason `winget_fence_ids` may return `installed` only. A maintainer
+who opens `plan.rs:414` finds a comment about scoop's `install.json`, cannot
+verify the claim, and is left to either weaken the claim or "fix" code that is
+correct. `docs/phase5-notes.md` already cited `plan.rs:362-369` correctly, so the
+notes and the code disagreed about one fact in the same tree.
+
+**Two of the nine were already imprecise before this branch** — `render.rs`'s
+`:303` was two lines off its target function and `:286` two lines off its
+expression at `1d633c6` — and this branch's own edits then moved both into
+*different functions*, which is what turned an off-by-two into a false pointer.
+Corrected on the same footing as the other seven.
+
+**The four inherited ones, fixed in the same pass and labelled so the blame is
+not misplaced.** `src/apply.rs`'s `plan_to_steps` routing tests cited
+`apply.rs:814`, `:837` and `:849` for the scoop-`Prune`, winget-`Set` and
+winget-`Remove` guards, and its `guard_for` mutation test cited `:911` for that
+function's `.find`. On this tree those four are at `:858`, `:900`, `:912` and
+`:974`. They were **equally wrong at `1d633c6`** — the citing comments and their
+targets are byte-identical there, and all four were off by the same 44 lines, so
+one edit long before this branch moved the code and left every pointer behind at
+once. This branch did not break them; it did move three of them further out of
+date, and leaving four known-false pointers in a tree whose whole review round
+was about false pointers would have been the wrong call. The two sibling
+citations in the same comments (`:834`, `:853`) were correct and are unchanged.
+
+**Not claimed: that thirteen is all of them.** The sweep catches *drift* — a
+citation whose target line changed content between `1d633c6` and this tree — and
+cannot catch one that was wrong from the start and whose target never moved. The
+four above were found only because a human read the comments around them, after
+the sweep had flagged their *neighbours*. A mechanical guarantee would need the
+citations to be checkable, which line numbers in prose are not.
+
 ### The design attributes 105 invocations to one argv
 
 `docs/specs/2026-08-11-phase5-guard-unmanaged-retry-design.md:85-87` reads *"the
@@ -663,7 +762,7 @@ that mention it — and it went unrecorded against the design that seeded it. Th
 measurement document itself is not wrong: §5's table lists the argvs separately
 and only totals them in a `| | | **105** | **0** |` row.
 
-### Nine historical `docs/` sentences this phase falsifies
+### Ten historical `docs/` sentences this phase falsifies
 
 Found by Task 2's sweep and carried here rather than edited: these documents keep
 their stale sentences by design, and this is where a reader learns they are
@@ -671,6 +770,17 @@ stale. The sweep also confirmed the line-based-grep trap it was warned about —
 `grep -rn "only the first two can ever fire" src/ docs/` returns **zero** content
 hits purely because every real occurrence is line-wrapped. The list below came
 from reading, not from a count.
+
+**What the sweep covered, stated instead of a completeness claim.** This list
+said the nine were "listed only so the sweep is provably complete". It was not
+provable and it was not complete: the whole-branch review (Minor 5) found a
+tenth, item 10 below, which the sweep had missed because it was reading for the
+`scoop-only` / `covers` wording rather than for every name this phase deleted.
+What the sweep actually did was read `docs/` for the sentences about
+`Running::covers`, `dirs` being scoop-only, and `resolve`; it was never a
+mechanical enumeration of every identifier this phase removed, and a
+line-wrapped-text corpus does not admit one by grep. So: **ten found by reading,
+no claim that ten is all of them.**
 
 1. **`docs/phase4-notes.md:19-27`** ("Read this first"): *"of `Running::covers`'s
    three signals (package directory, process name, declared executables), only
@@ -712,10 +822,26 @@ from reading, not from a count.
 9. **`docs/specs/2026-08-11-phase5-guard-unmanaged-retry-design.md:153`** and
    **`docs/superpowers/plans/2026-08-11-phase5-guard-unmanaged-retry.md:68, 367,
    481, 573, 575, 597, 598, 617`** — this phase's own spec and plan, describing
-   the change as pending. Correct as forward-looking documents; listed only so
-   the sweep is provably complete.
+   the change as pending. Correct as forward-looking documents; listed so a
+   reader who greps for the old wording finds them accounted for.
+10. **`docs/dogfood-phase2a-2026-08-08.md:467`** — names `Scoop::running_set`
+    inside a live, present-tense description of what the `status` path does
+    ("Nothing in `dotpkg`'s `status` path (`config::load`, … `Scoop::running_set`,
+    `plan::plan`, `render::render`) performs a write, a subprocess spawn, or a
+    network call"). Task 2 deleted that function when `backend::running_set`
+    became the one fence producer; `apply::sample_fence` occupies that slot
+    today. **And the sentence around the name is stale in a second, larger way
+    this entry should not hide:** `status` now calls
+    `backend::scan_or_warn(&winget)`, whose `RealWinget::run` is a
+    `Command::new("winget")` — so "performs no subprocess spawn" stopped being
+    true of the `status` path when winget got a backend, two phases before this
+    one. **Structural**, provable by reading `src/main.rs`'s `status` arm. Left
+    in place like items 1-9, and for the same reason: those documents keep their
+    sentences and this is where a reader learns they are stale. Found by the
+    whole-branch review (Minor 5), not by Task 2's sweep — which is the evidence
+    for the paragraph above about what that sweep could and could not prove.
 
-### Two corrections made in place, in this phase's own measurement document
+### Four corrections made in place, in this phase's own measurement document
 
 **§3 recorded the two machine-scope `Links` directories as absent but never said
 `%ProgramFiles%\WinGet\Packages` had been probed.** It was, and it is absent —
@@ -738,19 +864,45 @@ document's pointer. §1 now cites the surviving statement of the same claim,
 justification recorded beside it. Same treatment as §3, for the same reason: a
 citation that resolves to nothing is not a superseded sentence, it is a dead one.
 
+**Three of its `file:line` citations had drifted onto this phase's own code, and
+all three are re-pointed in place.** Same defect class as the `.rs` citations
+below, same cause — the phase edited the files it was citing:
+
+| section | said | now | what moved it |
+|---|---|---|---|
+| §4 | `plan.rs:532` (winget's `helpers: &[]`) | `plan.rs:549` | Task 5's `5c4894c`, +17 lines |
+| §5 | `main.rs:613` (`!preparation.is_ok() && !keep_going`) | `main.rs:641` | this phase's `apply` arm |
+| §5 | `main.rs:468` (`backend::scan_or_warn`) | `main.rs:481` | this phase's `status` arm |
+
+Each was correct when written — verified against `1d633c6`, where all three
+resolve to exactly the cited code. Found by the fix wave's own sweep, not by the
+whole-branch review. Corrected in place with the old number and its cause
+recorded beside it; **no measurement changed**, and this is the same treatment §1
+and §3 got, for the reason given there: a citation that resolves to the wrong
+line is a dead pointer, not a superseded one.
+
 ## Verification
 
 ### macOS suite
 
-`cargo test --no-fail-fast`, measured on the tree this file describes: **631
-passed, 0 failed, 0 ignored**, across **14** `test result:` lines
-(`unittests src/lib.rs` 304, `unittests src/main.rs` 14, the eleven
-`tests/*.rs` binaries, and `Doc-tests dotpkg` 0). Same total Task 7's completion
-gate recorded at `4a70826`; the only code this task touched is two comments, one
-of them inside a test body. Base `main` at `1d633c6` was 588, so the phase adds 43
+`cargo test --no-fail-fast`, **re-measured on the tree that ships this file**
+— the whole-branch fix wave's tree, three commits past the `b2fdc58`/`137fc35`
+pair this section was originally written against: **634 passed, 0 failed, 0
+ignored**, across **14** `test result:` lines (`unittests src/lib.rs` 307,
+`unittests src/main.rs` 14, the eleven `tests/*.rs` binaries, and
+`Doc-tests dotpkg` 0). Base `main` at `1d633c6` was 588, so the phase adds 46
 tests.
 
-Also measured now:
+**This sentence used to read "measured on the tree this file describes" while
+naming 631**, which was Task 8's total at `137fc35`. Two commits (`05023fd`,
+`c8c7f0d`) then landed and the file did not move, so the sentence named a tree
+that was no longer the one it shipped on — the whole-branch review's Important 2.
+The 631 was not wrong, it was unowned: `05023fd` and `c8c7f0d` added no tests, so
+631 held through `c8c7f0d`, and the +3 to 634 is this fix wave's own — two in
+`src/render.rs` for the `render_preparation` summary clause and one in
+`src/backend/winget.rs` for the retry's `attempt == 0` guard.
+
+Also measured now, on the same tree:
 
 - `cargo fmt --check` — exit 0, no output.
 - `cargo clippy --all-targets -- -D warnings` — exit 0, zero warnings.
@@ -758,26 +910,108 @@ Also measured now:
 ### Windows target, cross-checked from macOS
 
 `cargo check --target aarch64-pc-windows-msvc --all-targets` — exit 0, zero
-warnings, measured now. This type-checks every `#[cfg(windows)]` path from macOS
+warnings, re-measured on the same tree as the suite above. This type-checks every
+`#[cfg(windows)]` path from macOS
 and is explicitly **not** a substitute for running the suite on Windows: it
 catches compile errors on the Windows target, not behavioural differences.
 
 ### Fixture integrity
 
 `tests/fixtures/winget/list-full.txt` is **30958 bytes with 143 CRLF pairs**,
-measured now — exactly the values `PROVENANCE.md` and `docs/phase4b-notes.md`
+re-measured on the same tree — exactly the values `PROVENANCE.md` and `docs/phase4b-notes.md`
 record, and `.gitattributes` pins the path `-text`. **No fixture bytes changed in
 this phase**: the branch diff touches no file under `tests/fixtures/`. Checked
 before any Windows result is trusted, because a fixture normalised by a checkout
 makes every downstream assertion meaningless.
 
-### The Windows suite, the dogfood and the mutation run have not run
+### The mutation run was attempted and refused to start
+
+**Not "has not run yet". It ran, and the gate failed before testing a single
+mutant.** `cargo mutants --in-diff -j 2 --timeout 600` against the branch diff
+reported:
+
+```
+cargo test failed in an unmutated tree, so no mutants were tested
+```
+
+The baseline — the unmutated tree, the run's own control — went red, so zero
+mutants were built and zero were killed. This section previously said only that
+the mutation run "ha[s] not run", which reads as a scheduling fact when what
+actually happened was a gate failing. Recorded as a failure, because the
+difference is the whole point of this section.
+
+**The cause was a pre-existing instance of a defect class this project already
+names.** The failing test was
+`apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it`
+(`tests/cli.rs`), at `assert_nothing_was_touched`'s `assert_eq!`. **Measured**,
+by parsing both `Snapshot` values out of the panic dump in `mutants.log` rather
+than taking the failure on report: the two differ in **exactly one of 58
+entries**, and it is `buckets/main/.git/objects/maintenance.lock` — written by
+**git's own background maintenance** inside the fixture's temp bucket repo,
+between the `before` snapshot and the `after` one.
+
+So a helper whose entire job is to prove *dotpkg* wrote nothing reported *git's*
+housekeeping as dotpkg's write. That is the inverse of this project's named
+recurring defect: not a test that cannot fail, but one that **fails for a reason
+unrelated to what it asserts**. Both the helper and the fixture predate this
+phase, and `assert_nothing_was_touched` has **14 call sites** in `tests/cli.rs`,
+every one of which carried the same exposure. It had never surfaced under a plain
+`cargo test`: only the load and the relocation `cargo mutants` imposes moved the
+timing far enough for git's maintenance to land inside the window. Disk was never
+the constraint — 14 GiB free throughout, no starvation.
+
+> The count is **14**, not the 16 first recorded in `05023fd`'s own commit
+> message and repeated into the whole-branch review. 16 was a `grep -c` over
+> lines *mentioning* the helper — which at `137fc35` were the 14 calls, the `fn`
+> definition and one comment. Re-derived here by counting
+> `f.assert_nothing_was_touched(before);` (14 at `137fc35` and 14 today). A
+> line-count standing in for a call-count is the same measurement error this
+> phase's own sweep was warned about.
+
+**The fix removed the cause, not the symptom.** Every `git init` in this repo's
+test infrastructure now sets `gc.auto 0` and `maintenance.auto 0` immediately
+afterwards — **six sites**, which is every `git init` in the tree: one in
+`tests/cli.rs` (`write_lock_and_bucket_for`), one in `tests/common/mod.rs`
+(`Fixture::bucket`), **three** in `tests/prepare.rs`, and one in `src/apply.rs`'s
+`#[cfg(test)]` module. The last of those is stated at its own site as
+**prophylactic and never observed failing** — that test asserts no disk snapshot,
+so it is not currently exposed. `maintenance.auto` is the trigger measured to
+create that exact lock file; `gc.auto` is the older, separate auto-gc trigger
+whose own lock is `gc.pid` and which was *not* observed here, disabled alongside
+it as *reasoned*, and labelled that way at the site.
+
+Filtering `*.lock` out of `Snapshot::of` was considered and **rejected**: it
+would also hide a real lock file dotpkg leaked, which is precisely the kind of
+write this assertion exists to catch. `Snapshot::of` and
+`assert_nothing_was_touched` are untouched — the fixture's environment was made
+deterministic, the assertion was not weakened.
+
+**The structural finding underneath it, which would otherwise have stayed in the
+git-ignored ledger:** `tests/prepare.rs` carries its **own private copy** of the
+`git()` helper instead of importing `common::git` (`tests/prepare.rs:8` versus
+`tests/common/mod.rs:14`). That duplication is why the fix needed six sites
+rather than two, and it is the mechanism by which the defect returns — the next
+person adding a temp-repo test copies whichever helper is nearest, and the new
+`git init` arrives without the two `config` calls. **Structural**, provable by
+reading. Not fixed here (collapsing the two helpers is a test-infrastructure
+change with no behaviour attached, and this fix wave is a correction pass); it is
+on the still-open list below.
+
+**Proven against the failure mode, not against a lucky re-run:** `cargo mutants
+--file src/sys.rs -j 2` afterwards reported `ok Unmutated baseline in 9s build +
+5s test`, where the same step had aborted before. The config was verified to land
+on a real fixture repo by temporary instrumentation inside
+`write_lock_and_bucket_for`, then reverted.
+
+### The Windows suite, the dogfood and the full mutation run have not run
 
 They are Task 9's, and until Task 9 records them in this section, this phase has
-**no** Windows-run, dogfood or mutation evidence at all. Read that as absent, not
-as pending-and-probably-fine — this is the exact place `docs/phase4b-notes.md`
-shipped a stale claim, and its post-merge audit's best finding was that its own
-pre-merge watch-list item had gone unmet without the notes saying so.
+**no** Windows-run, dogfood or completed-mutation evidence at all. Read that as
+absent, not as pending-and-probably-fine — this is the exact place
+`docs/phase4b-notes.md` shipped a stale claim, and its post-merge audit's best
+finding was that its own pre-merge watch-list item had gone unmet without the
+notes saying so. The `src/sys.rs`-only baseline above is evidence that the gate
+can now *start*; it is not a mutation result.
 
 The standing rules carry unchanged: the Windows suite runs on the tree that
 ships and is cross-referenced **name by name**, never by subtracting totals;
@@ -861,17 +1095,22 @@ triages whatever remains.
   at `main` (`1d633c6`), untouched by this phase, and in the `~` line rather than
   the `?` collapse this phase changed.
 - **Three citations in `winget.rs` still use the shorthand
-  `measurements-2026-08-11 §N` with no filename** — `:907`, `:1322`, `:1572` on
+  `measurements-2026-08-11 §N` with no filename** — `:907`, `:1338`, `:1588` on
   this tree. Not ellipses and not factual errors, but inconsistent with the
   now-fully-named citations in the same file. A fourth, at the retry test, was
   named in full by this task's own comment fix. (The ledger recorded one of them at
   `:1477`; that line number had already drifted by the end of the branch, which is
   its own small instance of the class this phase kept fixing.)
-- **`winget.rs:1077-1088` reads "P2 S2's 40, P2 S4's 15, and P7's 30 against a
+- ~~**`winget.rs:1077-1088` (`:1077-1092` after the fix) read "P2 S2's 40, P2 S4's 15, and P7's 30 against a
   continuously running `source update`"**, which can be read as putting S4's 15
-  under the continuous loop too. Only P7's 30 were continuous; S4's 15 were
-  concurrent, a distinct condition. The top-level `INTERNAL_ERROR` doc comment in
-  the same file isolates it correctly, so the file as a whole is not wrong.
+  under the continuous loop too.~~ **Fixed** by the whole-branch fix wave, which
+  triaged it fix-before-merge. Only P7's 30 were continuous; S4's 15 were
+  concurrent with one `source update`, a distinct condition, and S2's 40 state no
+  concurrency at all (§5's table lists the three separately). The arm now names
+  all three conditions rather than listing three counts under one of them —
+  the same care the top-level `INTERNAL_ERROR` doc comment in the same file
+  already took ("0 nonzero exits in 105 invocations, including 30 fired against a
+  continuously running `source update` loop").
 - **`Phase 4b`'s `main.rs:773` citation has drifted.** The accepted equivalent
   mutant is on the `outstanding_skips` argument to `floor_exit_code`, which is at
   `main.rs:856` on this tree (verified by reading). The mutant itself is
@@ -881,8 +1120,9 @@ triages whatever remains.
 
 Items 1-15 are `docs/phase4b-notes.md`'s list renumbered one for one, with each
 item's status stated against it: 2, 9 and 11 are the three this phase rewrote, 10
-is the one it deliberately did not close, and the rest are unchanged. Item 16 is
-new in this phase.
+is the one it deliberately did not close, and the rest are unchanged. Items 16-18
+are new in this phase — 16 from Task 8, 17 and 18 from the whole-branch review
+and the fix wave that answered it.
 
 1. **Downgrading a winget package.** *Decided, not deferred.* Unchanged from
    Phase 4b: measured, `install --version <older>` cannot do it, and the
@@ -974,6 +1214,34 @@ new in this phase.
     the moment any editor does — an `add` that writes the table, or a rewrite of
     `add_*_package` that touches more of the document than it means to. Structural,
     and the cheap fix is one clause in each guard rather than a new test.
+17. **The mid-run fence's `dirs` half compares two different winget spellings,
+    and nothing measures whether they ever differ** — new in this phase, found by
+    the whole-branch review (Minor 7), **reasoned only**. `Running.dirs` holds
+    `winget list`'s `Id` (`backend::winget_fence_ids` → `winget::running_ids`,
+    which inserts the scanned id; `rows_to_scan` builds those from the `Id`
+    column). The `Name` the per-step re-sampler asks `Running::covers_any` about
+    is `Step::app()` — for a `WingetStep::Set`, the `id` out of
+    `Outcome::ReadyToSet`, which is `winget show`'s `Id` as `parse_show` read it
+    back. `Name` folds case, so only a difference that is **not** case would make
+    the `dirs` half silently answer "not running" mid-run for a package the
+    plan-time fence could see, and `guard_for`'s `bins` half would not
+    compensate: it supplies plausible *process* names, a different signal, empty
+    unless `[winget.guard]` names the package or `guard_names` guesses right.
+    **No measurement either way** — nothing in this phase's measurement document
+    compares the two spellings for one package — so this is an uncovered
+    residual, **not a claim that the two ever differ**. `src/apply.rs`'s
+    `plan_to_steps` winget `Set` arm now states it at the site, next to the
+    `set_argv` two-spellings discussion that had covered only the argv half.
+18. **`tests/prepare.rs` duplicates `common::git` instead of importing it** —
+    `tests/prepare.rs:8` versus `tests/common/mod.rs:14`. **Structural.** Surfaced
+    by the background-maintenance fix above, which needed six `git init` sites
+    instead of two because of it, and it is the mechanism by which that defect
+    returns: the next temp-repo test copies whichever helper is nearest and
+    arrives without the two `config` calls. Left open deliberately — collapsing
+    the two helpers is a pure test-infrastructure change with no behaviour
+    attached, and the fix wave that found it was a correction pass. The cheap
+    version is one `mod common;` in `tests/prepare.rs`; the durable version is a
+    single fixture-repo constructor that no caller can bypass.
 
 ### Inherited verification debt, carried unchanged
 
@@ -992,8 +1260,13 @@ so the next phase inherits a named list rather than a surprise.
   a production change.
 - **14 mutants in `src/backend/winget.rs`, in Phase 4 code** —
   `floor_char_boundary` (6), `parse_list` (6), `parse_versions` (1),
-  `RealWinget::run` (1). This phase added 534 lines to that file (against 15
-  deleted) and closed none of them.
+  `RealWinget::run` (1). This phase added **611** lines to that file (against 15
+  deleted) and closed none of them — `git diff --numstat 1d633c6 --
+  src/backend/winget.rs`, measured on the tree this file describes. The number
+  read 534 until the whole-branch review (Minor 2) re-derived **535** against
+  `c8c7f0d`; the fix wave that answered the review then added 76 more — the new
+  retry-delay test, its fake's instant recorder, and the reworded
+  `INTERNAL_ERROR` arm.
 - **Two mutants in `winget_exec.rs`, inside `RealWingetMutator::run`** — a
   `NotFound == -> !=` and an `unwrap_or(-1) -> unwrap_or(1)`. Covering them means
   spawning a real `winget.exe` from the test suite, which this project does not

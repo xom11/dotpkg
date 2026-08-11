@@ -229,16 +229,21 @@ vocabulary. And the argument for fixing it is already in the code:
 `rows_to_scan` collapses 84 sourceless ids into **one** aggregate warning
 because "84 lines for the ordinary shape of a winget machine is exactly the
 false-positive flood that gets a feature silenced and never turned back on".
-That reasoning is stated for `opaque` and not for `Unmanaged`; `plan.rs:532`
-gives winget `helpers: &[]` where scoop gets `SCOOP_HELPERS`.
+That reasoning is stated for `opaque` and not for `Unmanaged`; `plan.rs:549`
+gives winget `helpers: &[]` where scoop gets `SCOOP_HELPERS`. (That citation
+read `:532` when this section was written, which was correct then; Task 5's
+`5c4894c` shifted `src/plan.rs` by 17 lines and the whole-branch fix wave
+re-pointed it. The measurement itself is unchanged.)
 
 ## 5. Transient winget failures: the reader never lost, the writer did
 
 ### The reader — the path a failure kills the whole run
 
-`version_liveness` returns `Err` for any nonzero exit, and `main.rs:613`'s
+`version_liveness` returns `Err` for any nonzero exit, and `main.rs:641`'s
 `!preparation.is_ok() && !keep_going` then refuses the whole run at exit 2,
-scoop included.
+scoop included. (Read `:613` when written, against `1d633c6`; the phase's own
+`apply` arm then grew. Re-pointed by the whole-branch fix wave — see the notes'
+citation-drift table. The measurement is unchanged.)
 
 | probe | argv | calls | nonzero |
 |---|---|---|---|
@@ -284,8 +289,10 @@ property of the reader**.
 **Also true and not in item 11:** `--keep-going` is not a full escape hatch.
 `gate_removals` holds **every** removal step whenever `is_ok()` is false,
 scoop's included. And `status` never calls `version_liveness` at all — it uses
-`backend::scan_or_warn` (`main.rs:468`), which deliberately does not abort on a
-winget hiccup. Item 11 is an `apply` problem, not a `status` problem.
+`backend::scan_or_warn` (`main.rs:481`; read `:468` when written, against
+`1d633c6`, and re-pointed by the whole-branch fix wave for the same reason as
+`:641` above), which deliberately does not abort on a winget hiccup. Item 11 is
+an `apply` problem, not a `status` problem.
 
 ## 6. Four method failures of my own in this round
 

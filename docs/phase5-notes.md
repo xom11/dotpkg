@@ -2672,9 +2672,12 @@ Windows run could settle.
     measurement document rather than here** (§2): a package started through its
     `WinGet\Links` shim is caught too, even though `Get-Process`,
     `MainModule.FileName` and WMI all report that process's image as the *link*.
-    The behaviour is measured; the explanation -- that `sysinfo` reads the
-    kernel's image name rather than the PEB's -- is **reasoned, and nobody has
-    printed `sysinfo`'s value for that pid**.
+    **Both halves are measured.** A standalone probe on the same `sysinfo` 0.32
+    dotpkg links, asked about the same pid at the same moment, answers with the
+    path under `Packages\` while PowerShell answers with the one under `Links\`.
+    The two views disagree, and dotpkg reads the one that resolves the symlink --
+    so the fence sees a shim-launched portable that a PowerShell-built process
+    table would have reported as living somewhere else entirely.
 
     **A correction to this item's own text, found while closing it:** it says
     `guard_names("PhatMT97.VKey", "VKey")` means "the **`names` half** catches it

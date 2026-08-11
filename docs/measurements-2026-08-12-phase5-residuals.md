@@ -151,13 +151,21 @@ image as the *link*, not the target.
 `…\WinGet\Links\` is not a prefix of `…\WinGet\Packages\`, so `running_ids`
 could not have matched the value those three APIs report — yet it matched.
 
-**Reasoned, not measured:** the three APIs above all read the process's PEB,
-which records the path as given at load; `sysinfo` (which is what
-`sys::running_processes` uses) reads the kernel's own image name, which is the
-file the kernel actually opened — the symlink target. **Nobody has printed
-`sysinfo`'s value for that pid**, so the mechanism is an explanation for an
-observation, not itself an observation. A dozen-line probe would settle it and
-is the obvious next step.
+**Measured** (the probe was written and run; this paragraph used to say
+"reasoned"). A standalone twelve-line binary depending on the same `sysinfo`
+0.32 and making the same two calls `sys::running_processes` makes, run against
+the same pid at the same moment:
+
+| source, same pid 3732 | value |
+|---|---|
+| PowerShell `Get-Process .Path` | `…\WinGet\Links\rg.exe` |
+| `sysinfo`'s `Process::exe()` | `…\WinGet\Packages\BurntSushi.ripgrep.MSVC_…\ripgrep-15.2.0-…\rg.exe` |
+
+**The two disagree, and dotpkg reads the one that resolves the link.** The
+PowerShell-visible APIs report the path as the loader recorded it; `sysinfo`
+reports the image the kernel actually opened. That is why `running_ids` matched
+a process whose path, by every check available from PowerShell, was not under
+`Packages\` at all.
 
 **Consequence for the record, and it cuts the reader's way:** §1 of the
 2026-08-11 document categorised live processes by a PowerShell-captured `Path`.
@@ -458,6 +466,12 @@ recomputed on the machine, `unlisted on disk : 0`.
 The five-test rise (638 → 643) is this branch's own: two round-trip guard tests,
 one `SourceRefresh` unit test, and two `update.rs` integration tests.
 
+**Run a third time, on `14b865c`**, because correcting `update_source`'s
+retry-delay comment (§11) moved the tree again: **exit 0, 641 passed / 0 failed /
+1 ignored**, 14 result lines, fixture sha unchanged, and the cross-reference
+again **643 / 642 / 641** with the same three `cfg` exclusions. That is the tree
+this branch ends on.
+
 ## 10. Item 20 live: the retry still has not fired, and now that means something
 
 **The point of the instrumentation was to make a zero informative.** Stage C's
@@ -616,14 +630,12 @@ proven about it, so the next attempt does not re-derive any of that.
    contended rounds.** The instrumentation works (proven by the sibling arm) and
    the trigger still exists (§11, 1 of 10 at four competitors), but not through
    `dotpkg update` at any contention tried. Still open, now with a bound.
-3. **The Windows suite on the final tree.** §9 describes `ea6d91f`. Any further
-   `.rs` edit — including the `update_source` comment correction §11 calls for —
-   moves the tree again and needs another run. Cheap: about four minutes.
+3. ~~The Windows suite on the final tree~~ — **done.** It ran on `14b865c`, the
+   tree this branch ends on (§9). Any further `.rs` edit moves it again.
 4. **One assertion tying `package_roots()` to the environment it reads**, which
    would kill `vec![]` on any platform where the variables are set. §12 shows no
    run of any kind will do it without one.
 
-**One thing that does not need a fresh round**: printing `sysinfo`'s `exe` for a
-`Links`-launched process, which would turn §2's reasoned mechanism into a
-measured one. A standalone twelve-line probe is prepared and needs only a quiet
-moment on the machine.
+~~One thing that does not need a fresh round: printing `sysinfo`'s `exe`~~ —
+**done, §2.** The two APIs disagree for the same pid, and dotpkg reads the one
+that resolves the symlink.

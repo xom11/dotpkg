@@ -2129,6 +2129,12 @@ mod tests {
         let bucket_dir = root.path().join("buckets").join("main");
         std::fs::create_dir_all(bucket_dir.join("bucket")).unwrap();
         git_output(&bucket_dir, &["init", "-q", "-b", "main"]);
+        // Prophylactic, not observed failing here: this test asserts no disk
+        // snapshot, so it is not currently exposed. See `tests/cli.rs`'s
+        // `write_lock_and_bucket_for` for the measured case where the same
+        // unmanaged temp repo shape aborted a `cargo mutants` run.
+        git_output(&bucket_dir, &["config", "gc.auto", "0"]);
+        git_output(&bucket_dir, &["config", "maintenance.auto", "0"]);
         std::fs::write(
             bucket_dir.join("bucket").join("tool.json"),
             r#"{"version":"1.0.0","bin":"tool.exe"}"#,

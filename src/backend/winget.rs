@@ -237,9 +237,41 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
 /// library. It was briefly `pub`, for a `main.rs` call site that read these roots
 /// directly -- the `sample_fence` hoist removed that site, and the widening with
 /// it.
+///
+/// Reads the two variables and hands them to `package_roots_with`, which does
+/// the actual path construction -- including which branch gets the
+/// `"Microsoft"` segment. **Structural:** the only way to control what this
+/// function sees is `std::env::set_var`, which mutates process-global state,
+/// and this crate's tests run in parallel threads (`cargo test`'s default), so
+/// one test's `set_var` would race every other test that reads or sets the
+/// same variable. Splitting the construction out from the read is what lets a
+/// test pin the two paths -- and the asymmetry between them -- without
+/// touching `std::env` at all.
 pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
+    package_roots_with(
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+        std::env::var("ProgramFiles").ok().as_deref(),
+    )
+}
+
+/// `package_roots`'s tested seam: the same two paths, built from plain values
+/// instead of a live environment read. `None` stands for "the variable is
+/// unset" -- `package_roots` maps `std::env::var`'s `Err` (unset, or set to
+/// non-Unicode data) to `None` with `.ok()`, so this function never
+/// distinguishes those two `Err` cases either.
+///
+/// The asymmetry this exists to pin: the user-scope path joins `"Microsoft"`
+/// before `"WinGet"`; the machine-scope path does not. That is not a
+/// simplification a careless edit could safely "tidy up" -- it is the two
+/// different real layouts winget uses (see `package_roots`'s own doc comment
+/// for which one is measured and which is reasoned), and losing it silently
+/// changes what `running_ids` can ever match on the user-scope side.
+fn package_roots_with(
+    local_appdata: Option<&str>,
+    program_files: Option<&str>,
+) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+    if let Some(local) = local_appdata {
         out.push(
             std::path::PathBuf::from(local)
                 .join("Microsoft")
@@ -247,7 +279,7 @@ pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
                 .join("Packages"),
         );
     }
-    if let Ok(pf) = std::env::var("ProgramFiles") {
+    if let Some(pf) = program_files {
         out.push(std::path::PathBuf::from(pf).join("WinGet").join("Packages"));
     }
     out
@@ -1466,6 +1498,62 @@ mod tests {
             running_ids(&[], &procs, &[Name::new("PhatMT97.VKey")]),
             BTreeSet::new()
         );
+    }
+
+    // `package_roots_with` is `package_roots`'s pure seam: no test here sets
+    // `LOCALAPPDATA` or `ProgramFiles`, so none of these race any other test
+    // in the suite over process-global environment state. Each asserts the
+    // exact path, not just its presence, so a swap of the two parameters --
+    // or an added/dropped `"Microsoft"` segment on either branch -- turns the
+    // corresponding assertion red.
+
+    // Expected values are built with `PathBuf::join`, the same call
+    // production uses, rather than backslash-literal strings: `join` inserts
+    // the host platform's own separator, which is `/` on the non-Windows host
+    // this suite is running on here, not `\`. Building the expected side with
+    // `.join()` too keeps the assertion exact on whichever platform runs it,
+    // while still hardcoding -- independently of `package_roots_with`'s own
+    // code -- exactly which segments each branch does and does not get.
+    #[test]
+    fn package_roots_with_builds_both_roots_when_both_vars_are_set() {
+        let local = r"C:\Users\kln\AppData\Local";
+        let program_files = r"C:\Program Files";
+        assert_eq!(
+            package_roots_with(Some(local), Some(program_files)),
+            vec![
+                PathBuf::from(local)
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Packages"),
+                PathBuf::from(program_files).join("WinGet").join("Packages"),
+            ]
+        );
+    }
+
+    #[test]
+    fn package_roots_with_omits_the_machine_root_when_program_files_is_unset() {
+        let local = r"C:\Users\kln\AppData\Local";
+        assert_eq!(
+            package_roots_with(Some(local), None),
+            vec![PathBuf::from(local)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Packages")]
+        );
+    }
+
+    #[test]
+    fn package_roots_with_omits_the_user_root_when_localappdata_is_unset() {
+        let program_files = r"C:\Program Files";
+        assert_eq!(
+            package_roots_with(None, Some(program_files)),
+            vec![PathBuf::from(program_files).join("WinGet").join("Packages")]
+        );
+    }
+
+    #[test]
+    fn package_roots_with_returns_nothing_when_both_vars_are_unset() {
+        assert_eq!(package_roots_with(None, None), Vec::<PathBuf>::new());
     }
 
     #[test]

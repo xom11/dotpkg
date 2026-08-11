@@ -241,9 +241,14 @@ pub fn scan_or_warn(backend: &dyn Backend) -> ScanOutcome {
 ///
 /// **The only producer of a `Running` outside tests, deliberately.**
 /// **Structural**, checkable by grepping `Running::new` across `src/`: every
-/// other call site is inside `model.rs`'s own `#[cfg(test)] mod tests`, and the
+/// other call site is inside `model.rs`'s own `#[cfg(test)] mod tests`.
+///
+/// Its only `src/` caller is `apply::sample_fence_with_roots`, which is how the
 /// three production sites (`apply::load_everything`, `main.rs`'s `status` arm,
-/// `main.rs`'s per-step re-sampler closure) all call this function.
+/// `main.rs`'s per-step re-sampler closure) reach it -- they call
+/// `apply::sample_fence` and never this function directly. It stays `pub`
+/// because three tests in `tests/scoop_scan.rs` call it to exercise scoop's two
+/// halves against an empty winget side.
 ///
 /// `Scoop::running_set` used to be that producer and was removed here rather
 /// than kept. Its doc comment carried the reasoning this union still rests on,
@@ -257,9 +262,11 @@ pub fn scan_or_warn(backend: &dyn Backend) -> ScanOutcome {
 /// during-the-run hole exactly as wide".
 ///
 /// Assembling the union here rather than in `main.rs` is also what makes it
-/// testable at all: `main.rs` is the binary crate, so no integration test can
-/// reach a closure built there, while this function takes fabricated `Process`
-/// values on any OS.
+/// testable **on any OS with fabricated `Process` values**, which is the property
+/// that matters: `tests/cli.rs` can and does drive the real binary, but only
+/// against a live process under a real scoop root, and never against winget at
+/// all -- see `apply::sample_fence` for the mechanism that rules the winget half
+/// out there.
 ///
 /// `winget_ids` is the winget scan's `installed` names and never its `opaque`
 /// ones. **Structural:** `plan()` only ever reaches `Running::covers` through an

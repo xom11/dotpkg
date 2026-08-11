@@ -1658,21 +1658,27 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
 
 // **What this proves:** `execute`'s consumption of the fence. A winget step held
 // by nothing but a `dirs` entry -- empty guard list, no related process name --
-// IS held, so the winget ids a Phase 5 sampler now puts in `dirs` actually reach
-// the hold path rather than `covers_any` consulting `dirs` for scoop only.
-// Mutating `Running::covers_name` to drop its `dirs` half turns this red, and it
-// goes red in the dangerous direction: `FakeWingetMutator::unreachable` catches a
-// real `winget uninstall` reaching the executor.
+// IS held, so a `dirs` entry alone is sufficient to hold a winget step and the
+// executor's hold path really does consult it. (`covers_any` is backend-agnostic
+// and always was -- `dirs` carries no backend tag to filter on -- so the thing
+// being pinned is that a `dirs`-only hold reaches `execute` at all, not that
+// `dirs` stopped being scoop-specific somewhere.) Mutating `Running::covers_name`
+// to drop its `dirs` half turns this red, and it goes red in the dangerous
+// direction: `FakeWingetMutator::unreachable` catches a real `winget uninstall`
+// reaching the executor.
 //
 // **What this does NOT prove, and must not be read as covering:** that
-// `main.rs`'s re-sampler closure builds the fence correctly. `main.rs` is the
-// binary crate and an integration test links only the library, so no test in this
-// suite can observe which closure `main.rs` builds -- verified by reverting that
-// closure to a winget-blind sampler and watching the whole suite stay green.
-// `apply::sample_fence` is what closes that gap, by moving the choice of ids and
+// `main.rs`'s re-sampler closure builds the fence correctly. Note this is NOT
+// because `main.rs` is unobservable -- `tests/cli.rs` spawns the real binary and
+// `a_declared_package_skipped_as_running_is_outstanding_not_success` there drives
+// this fence end to end. The reason is narrower and specific to winget:
+// `path_without_winget` (`tests/cli.rs:55-64`) strips `winget` from `PATH` in
+// every `cli.rs` fixture by design, so a winget scan there is always empty and
+// the winget half of the fence cannot be reached from `cli.rs` either.
+// `apply::sample_fence` is what narrows that gap, by moving the choice of ids and
 // roots into a library function; `the_fence_unions_scoop_paths_with_winget_package_dirs`
 // in `tests/scoop_scan.rs` is the test that pins it. Read `sample_fence`'s doc
-// comment for the residual that remains after both.
+// comment for the measured residual that remains after both.
 #[test]
 fn the_re_sampler_holds_a_winget_step_caught_only_by_its_package_directory() {
     let t = Tree::new();

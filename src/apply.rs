@@ -1058,13 +1058,28 @@ pub struct Driver {
 /// part no test could reach.** `backend::running_set` takes `winget_ids` and
 /// `winget_roots` as parameters, so before this function existed, each of the
 /// three call sites chose them for itself -- and one of the three lives in
-/// `main.rs`'s per-step re-sampler closure, which no test in this repository can
-/// observe at all: `main.rs` is the binary crate and an integration test links
-/// only the library. That was measured, not assumed. With the closure reverted
-/// to pass `&[]` for `winget_ids`, `cargo test --no-fail-fast` stayed entirely
-/// green; the only automated signal was an `unused variable: fence_ids` warning,
-/// which `-D warnings` does promote to an error but which any future refactor
-/// that legitimately stops binding that local would silence.
+/// `main.rs`'s per-step re-sampler closure.
+///
+/// **Why no test reached that closure's winget half, precisely.** Not because
+/// `main.rs` is unobservable: `tests/cli.rs` spawns the real binary through
+/// `CARGO_BIN_EXE_dotpkg`, and
+/// `a_declared_package_skipped_as_running_is_outstanding_not_success`
+/// (`tests/cli.rs:980`) already drives this very fence end to end -- it copies
+/// the binary into `<scoop_root>/apps/aichat/current/`, runs it live, and asserts
+/// the `held … running -- stop it first` line. What that test cannot reach is the
+/// **winget** half, and the reason is narrower: `path_without_winget`
+/// (`tests/cli.rs:55-64`) strips every `PATH` directory holding `winget.exe` or
+/// `winget` from every `cli.rs` fixture by design, so `Winget::scan` there always
+/// returns an empty `Scan`, `winget_fence_ids` always returns an empty vector,
+/// and `running_ids` has no scanned id to match a package directory against.
+/// Overriding `LOCALAPPDATA` changes which roots `package_roots()` reports but
+/// cannot help: with no scanned ids there is nothing for the path half to match.
+///
+/// **Measured, suite-wide.** With `main.rs`'s closure calling
+/// `sample_fence_with_roots(&d.scoop, &d.winget_scan, &[], …)` -- the winget
+/// roots dropped at the call site -- `cargo test --no-fail-fast` reported 598
+/// passed, 0 failed across all fourteen binaries, and no compiler warning of any
+/// kind. That is the whole suite, not a filtered run.
 ///
 /// This is the same remedy, for the same finding, that `gate_the_run` above
 /// applies: Task 15's review found four driver lines whose *order* and
@@ -1073,31 +1088,46 @@ pub struct Driver {
 /// ones". Here it is not an order but a pair of inputs; the shape of the fix is
 /// identical.
 ///
-/// **Why two functions.** The split is load-bearing in both directions:
+/// **Why two functions**, given that one of them has to take roots for a test to
+/// fabricate them:
 ///
-/// - If `winget_roots` were a parameter of the only entry point, `main.rs` could
-///   still hand it `&[]` and no library test could stop it. The hole would move
-///   up one level rather than close.
-/// - If `winget_roots` were only ever read inside the one function, no test
-///   could exercise the winget path half at all, because `package_roots()` reads
-///   `LOCALAPPDATA` / `ProgramFiles` and returns an empty vector on every
-///   non-Windows platform -- including the machine this crate is developed on.
+/// - If `winget_roots` were a parameter of the **production** entry point, every
+///   call site would have to name it, and naming it is where the three sites
+///   previously disagreed. Passing `&[]` would be an ordinary argument mistake on
+///   the ordinary path.
+/// - If `winget_roots` were only ever read inside one function with no
+///   root-taking variant at all, no test could exercise the winget path half,
+///   because `package_roots()` reads `LOCALAPPDATA` / `ProgramFiles` and returns
+///   an empty vector on every non-Windows platform -- including the machine this
+///   crate is developed on.
 ///
 /// So `sample_fence` takes no roots and is what production calls;
 /// `sample_fence_with_roots` takes fabricated ones and is what
-/// `the_fence_unions_scoop_paths_with_winget_package_dirs` drives. A caller
-/// cannot pass the wrong roots, and the union is still reachable from a test on
-/// any OS.
+/// `the_fence_unions_scoop_paths_with_winget_package_dirs` drives.
 ///
-/// **Residual, stated plainly rather than claimed closed:** each of the three
-/// sites still contains one call to this function, and `main.rs`'s two are still
-/// unpinned by any test -- nothing goes red if someone deletes the re-sampler
-/// closure's call outright or swaps it for `Running::default()`. That is exactly
-/// the residual `gate_the_run` accepted and recorded ("one call to get wrong
-/// instead of three"), and it is narrower than what it replaces: the choice of
-/// ids and roots is no longer expressible at a call site, so the only remaining
-/// mistake is not calling this at all, rather than calling it with half its
-/// inputs.
+/// **Residual, stated plainly rather than claimed closed.** The split moves the
+/// mistake off the default path; it does not make it unwritable, and it is worth
+/// being exact about what remains, because an earlier draft of this comment
+/// claimed "the choice of ids and roots is no longer expressible at a call site"
+/// and that is false:
+///
+/// - `sample_fence_with_roots` is `pub`, so `main.rs` could call it with `&[]`.
+///   **Measured:** doing exactly that leaves the whole suite green (598 passed, 0
+///   failed) with no warning -- see the measurement above. Nothing but review
+///   catches it.
+/// - `backend::running_set` is also still `pub`, because three
+///   `tests/scoop_scan.rs` tests call it directly, so that lower-level door is
+///   open too.
+/// - Each of the three sites still contains one call, and `main.rs`'s two are
+///   unpinned: nothing goes red if someone deletes the re-sampler closure's call
+///   outright or swaps it for `Running::default()`.
+///
+/// What the hoist *does* buy is real but narrower than "unwritable": writing the
+/// mistake now requires deliberately reaching past the production entry point for
+/// a differently-named function, rather than mis-filling one of its ordinary
+/// parameters, and the correct inputs live in one place that a test does pin. That
+/// is the same class of residual `gate_the_run` accepted and recorded ("one call
+/// to get wrong instead of three separately-placed ones").
 pub fn sample_fence(
     scoop: &Scoop,
     winget_scan: &crate::backend::ScanOutcome,

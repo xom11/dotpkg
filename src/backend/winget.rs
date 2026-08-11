@@ -233,9 +233,11 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
 /// non-Windows platform. `running_ids` is a no-op on an empty root list, so
 /// nothing needs a `cfg`.
 ///
-/// `pub`, not `pub(crate)`, for one reason: `src/main.rs` is a separate crate
-/// from the library and its per-step re-sampler closure needs these roots.
-pub fn package_roots() -> Vec<std::path::PathBuf> {
+/// `pub(crate)` is enough: the sole caller is `apply::sample_fence`, inside this
+/// library. It was briefly `pub`, for a `main.rs` call site that read these roots
+/// directly -- the `sample_fence` hoist removed that site, and the widening with
+/// it.
+pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         out.push(
@@ -402,7 +404,7 @@ pub(crate) fn running_ids(
 /// missed case was a package's *second* alias (`ducaale.xh`, whose install
 /// created both `xh` and `xhs`). That example is real, but the framing was too
 /// narrow: **measured**
-/// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §4) `rg` is
+/// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §3) `rg` is
 /// ripgrep's *only* command and `guard_names` misses it too, because
 /// `BurntSushi.ripgrep.MSVC`'s last dotted segment is `MSVC` and the display
 /// name folds to `ripgrep msvc`. Any id whose last segment is a build or

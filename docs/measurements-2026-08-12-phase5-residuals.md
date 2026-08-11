@@ -432,3 +432,32 @@ project keeps paying for.
    $?` reports the last element of the pipeline. The upload was verified
    afterwards by listing the files on the machine, which is what should have
    been done first.
+
+## 8. What is still outstanding, and exactly what it needs
+
+a14 went offline partway through this round and did not come back, so three
+things are set up but unmeasured. Each is listed with what has already been
+proven about it, so the next attempt does not re-derive any of that.
+
+1. **The Windows mutation run.** Scope `-f src/sys.rs -f src/backend/winget.rs`,
+   and it **must** be invoked as `cargo mutants … -- -- --include-ignored` (two
+   `--`; the one-`--` form documented by `--help` does not reach libtest, and
+   without it the run settles nothing). The session must be elevated; a14's ssh
+   session already is. Expect **3** of the `sys.rs` four to die and
+   `elevated -> Some(true)` plus both `package_roots()` mutants to survive — if
+   anything else happens, that is the finding. **Run it detached on the machine**:
+   the last attempt died with the ssh connection.
+2. **The retry, observed firing** (still-open item 20). The instrumentation is
+   in the tree and unit-pinned; what is missing is one `dotpkg update` round with
+   a declared winget package and a concurrent winget process, watching for the
+   `0x8A150001 … succeeded on one retry` line. The trigger was measured at 3 of
+   10 under contention, so ~10–20 rounds should produce it.
+3. **The Windows suite, again.** The run recorded in §6 describes `c7086f0`.
+   This branch changes `.rs`, so that result no longer describes the tree, and
+   by this project's own rule it has to run again before the branch is
+   verifiable. Nothing here has been merged on the strength of the `c7086f0` run.
+
+**One thing that does not need the machine**: printing `sysinfo`'s `exe` for a
+`Links`-launched process, which would turn §2's reasoned mechanism into a
+measured one. It needs a dozen lines and a Windows host — the same host, but not
+the same round.

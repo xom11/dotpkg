@@ -81,7 +81,8 @@ pub struct WingetSection {
     /// Process names the user says belong to a winget package, because winget
     /// exposes no way for dotpkg to find them out.
     ///
-    /// **Measured** (`docs/measurements-2026-08-11-…` §2): `Tailscale.Tailscale`
+    /// **Measured** (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md`
+    /// §2): `Tailscale.Tailscale`
     /// runs `tailscaled` and `tailscale-ipn`, `AutoHotkey.AutoHotkey` runs
     /// `autohotkey64`, and `Microsoft.WSL` runs `wslservice`. None is the id,
     /// the display name, or the id's last dotted segment, and none is a

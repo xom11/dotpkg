@@ -780,7 +780,8 @@ pub const NO_VERSION_FOUND: i32 = -1978335209;
 
 /// `0x8A150001` -- winget's generic internal error.
 ///
-/// **Measured** (`docs/measurements-2026-08-11-…` §5), and measured for
+/// **Measured** (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md`
+/// §5), and measured for
 /// **`source update` only**: that command exited nonzero 0 of 10 times run
 /// alone and 3 of 10 with one other winget process alive, every failure this
 /// code, returning in 60-72 ms with empty stdout where a success takes
@@ -1171,22 +1172,27 @@ impl<C: WingetCmd> Winget<C> {
     /// scoop.
     ///
     /// Retries once, and only on `INTERNAL_ERROR`: measured
-    /// (`docs/measurements-2026-08-11-…` §5) as the one transient this call
-    /// actually has, caused by a concurrent winget process rather than the
-    /// network. Every other nonzero exit keeps the old behaviour exactly --
-    /// a retry on a definitive answer only slows a certain failure down.
+    /// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §5) as
+    /// the one transient this call actually has, caused by a concurrent
+    /// winget process rather than the network. Every other nonzero exit keeps
+    /// the old behaviour exactly -- a retry on a definitive answer only slows
+    /// a certain failure down.
     pub fn update_source(&self) -> Result<()> {
-        // 1 s comes off the measurements rather than being picked: the failure
-        // returns in 60-72 ms and the competing winget call it lost to runs
-        // 407-1117 ms, so a shorter delay retries into the same contention.
-        // 1 s covers the measured maximum and is **not** measured to be
-        // sufficient on a slower machine.
+        // 1 s is chosen, not measured: the failure itself returns in 60-72 ms,
+        // and a successful `source update` -- the call this delay guards --
+        // takes 348-623 ms (measurements-2026-08-11-phase5-guard-unmanaged-
+        // retry.md §5, "The writer"), so 1 s clears that success range with
+        // margin. The process it lost to in that probe was a full `winget
+        // list`, whose own duration was never measured. Both gaps mean this
+        // margin is reasoned, not measured to be sufficient -- not against
+        // that unmeasured contender, and not on a slower machine either.
         self.update_source_with(std::time::Duration::from_secs(1))
     }
 
     /// `update_source` with the retry delay injected, so the tests do not
-    /// sleep. The seam this crate has extracted six times before, for the same
-    /// reason: the rule is what needs proving.
+    /// sleep. The same shape `apply::sample_fence` /
+    /// `sample_fence_with_roots` already uses for a different injected value:
+    /// the rule is what needs proving, not the literal call.
     pub fn update_source_with(&self, retry_delay: std::time::Duration) -> Result<()> {
         let argv = [
             "source",
@@ -1247,7 +1253,7 @@ mod tests {
     /// Modelled on `src/apply.rs`'s `FakeWinget` (`RefCell` queue plus a call
     /// recorder), which lives in a different module's `#[cfg(test)]` and cannot
     /// be reached from here. Two fakes for one trait is worse than one, but the
-    /// alternative is making `apply`'s fake `pub(crate)` and dragging its four
+    /// alternative is making `apply`'s fake `pub(crate)` and dragging its five
     /// canned constructors along with it.
     ///
     /// `calls()` is readable after `Winget::new` moves the fake because this

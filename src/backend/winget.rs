@@ -1278,14 +1278,29 @@ impl<C: WingetCmd> Winget<C> {
     /// the old behaviour exactly -- a retry on a definitive answer only slows
     /// a certain failure down.
     pub fn update_source(&self) -> Result<SourceRefresh> {
-        // 1 s is chosen, not measured: the failure itself returns in 60-72 ms,
-        // and a successful `source update` -- the call this delay guards --
-        // takes 348-623 ms (measurements-2026-08-11-phase5-guard-unmanaged-
-        // retry.md §5, "The writer"), so 1 s clears that success range with
-        // margin. The process it lost to in that probe was a full `winget
-        // list`, whose own duration was never measured. Both gaps mean this
-        // margin is reasoned, not measured to be sufficient -- not against
-        // that unmeasured contender, and not on a slower machine either.
+        // 1 s is chosen, not measured, and **re-measurement has since shown the
+        // margin it was chosen for no longer exists**. The original reasoning:
+        // the failure returned in 60-72 ms and a successful `source update` --
+        // the call this delay guards -- took 348-623 ms
+        // (measurements-2026-08-11-phase5-guard-unmanaged-retry.md §5, "The
+        // writer"), so 1 s cleared that success range with margin.
+        //
+        // Measured again on the same machine on 2026-08-12
+        // (measurements-2026-08-12-phase5-residuals.md §11): successful calls now
+        // take **1.2-5.4 s**, and the one observed failure took **1245 ms**
+        // against a success of **1266 ms** in the same round. So 1 s is now
+        // INSIDE the range of how long the competitor it waits out takes to
+        // finish, and duration no longer separates a failure from a success at
+        // all -- only the exit code and the empty stdout do.
+        //
+        // The delay is left at 1 s deliberately. A retry that fires too early
+        // simply fails a second time and warns, which is the behaviour already
+        // shipped and already tested; lengthening it would make every contended
+        // `dotpkg update` slower to reach the same warning, and no measurement
+        // says which longer value would be enough. What is withdrawn is the
+        // claim that 1 s is comfortably clear of the success range -- it is not,
+        // and still-open item 11's "sufficient on a slower machine" question is
+        // now answered NO for this machine, at today's durations.
         self.update_source_with(std::time::Duration::from_secs(1))
     }
 

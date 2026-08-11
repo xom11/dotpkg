@@ -528,31 +528,102 @@ appealing to anything about dotpkg.
   the behaviour already shipped — but the comment's stated justification is no
   longer true and should not be read as if it were.
 
+## 12. The first `cargo mutants` run on Windows, and what it settled
+
+**Measured** on a14, on `ea6d91f`, from an elevated session, scoped by
+`-f src/sys.rs -f src/backend/winget.rs --re "package_roots|elevated"` with the
+two-`--` form so libtest receives `--include-ignored`. 10 mutants in 9 min at
+`-j 4`; the one `TIMEOUT` it produced was re-run at `-j 1 --timeout 600`, where
+it and its five siblings completed in 6 min with **0 timeouts**.
+
+**Every one of the ten, on both platforms:**
+
+| mutant | macOS | Windows |
+|---|---|---|
+| `sys.rs:139` `elevated -> None` | MISSED | **CAUGHT** |
+| `sys.rs:139` `elevated -> Some(false)` | MISSED | **CAUGHT** |
+| `sys.rs:139` `elevated -> Some(true)` | MISSED | **MISSED** |
+| `sys.rs:163` `!=` -> `==` | MISSED | **CAUGHT** |
+| `sys.rs:216` `elevated -> Some(true)` | CAUGHT | MISSED |
+| `sys.rs:216` `elevated -> Some(false)` | CAUGHT | MISSED |
+| `winget.rs:251` `package_roots -> vec![]` | MISSED | **MISSED** |
+| `winget.rs:251` `package_roots -> vec![Default::default()]` | MISSED | **MISSED** |
+| `winget.rs:273` `package_roots_with -> vec![]` | CAUGHT | CAUGHT |
+| `winget.rs:273` `package_roots_with -> vec![Default::default()]` | CAUGHT | CAUGHT |
+
+**What it settled — three of the six, and the three it did not are each settled
+as unclosable-this-way rather than left unknown:**
+
+- **Three die: `elevated -> None`, `elevated -> Some(false)`, and the `:163`
+  inversion.** This is the whole of what the Windows gate was ever holding, and
+  it is now spent. Their killer is the repository's single `#[ignore]`d test,
+  which is why the two-`--` form and an elevated session were both load-bearing:
+  without either, all four survive and the run reports nothing new.
+- **`elevated -> Some(true)` survives, and now that is measured rather than
+  predicted.** In an elevated session `Some(true)` *is* the correct answer, so
+  the mutant is genuinely equivalent there. Killing it needs a non-elevated
+  session and a test asserting `Some(false)` — which is still-open item 15's
+  unmeasured half, exactly. **Items 15 and 19 are one gap seen from two ends**,
+  and no run from this session can close it.
+- **Both `package_roots()` mutants survive on Windows.** This is the direct
+  observation of what §4.1 predicted from the environment experiment, and it
+  refutes the record's "resolvable by a mutation run *on* Windows" outright. The
+  cause is a test gap, not a platform gap: nothing asserts anything that depends
+  on that function's value, on any platform.
+- **`package_roots_with`'s two die on both platforms**, which is the control that
+  makes the row above mean something: the split Task 9b performed did move the
+  *logic* under test, and only the plumbing was left uncovered.
+
+**And a symmetry nobody had named.** The record calls the four `#[cfg(windows)]`
+`sys.rs` mutants a platform gap closable only on Windows. The mirror is equally
+true and was never written down: `:216`'s two mutants live in the
+`#[cfg(not(windows))]` arm, are killed by macOS, and are **inert on Windows** —
+they came back MISSED there for exactly the reason `:139` comes back MISSED on
+macOS. So the rule is not "this file needs a mutation run on Windows". It is
+**"this file needs a run on both, because each platform is blind to the other's
+arm"**, and a Windows-only run would silently reopen two mutants while closing
+three.
+
+**Two operational facts, both paid for:**
+
+- **`Start-Process` from an OpenSSH session does not survive the session.** The
+  first attempt at this run was launched detached and reported alive after 20 s;
+  it was killed when the session closed, and 90 minutes of polling showed
+  `0 / 141` because there was nothing running. `mutants.out/debug.log` stops at
+  1.0 s, on the baseline build. **A zero that never moves is not slow progress**
+  — the poll should have been checking for a live `cargo`/`rustc` process, and it
+  did not until it was rewritten to.
+- **`-j 4` on this machine inflates test time enough to trip the auto-timeout.**
+  The baseline test took 25 s so cargo-mutants set a 126 s limit, but under four
+  parallel jobs the mutants' test phases ran 54 s, 71 s, 114 s, 116 s — and one
+  hit 126 s and was recorded as `TIMEOUT`. At `-j 1` the same test phases take
+  33–36 s. **A `TIMEOUT` is the absence of a verdict**, so it was re-run rather
+  than reported; the standing `-j 2` rule exists for this and this run should
+  have followed it.
+
 ## 8. What is still outstanding, and exactly what it needs
 
 a14 went offline partway through this round and did not come back, so three
 things are set up but unmeasured. Each is listed with what has already been
 proven about it, so the next attempt does not re-derive any of that.
 
-1. **The Windows mutation run.** Scope `-f src/sys.rs -f src/backend/winget.rs`,
-   and it **must** be invoked as `cargo mutants … -- -- --include-ignored` (two
-   `--`; the one-`--` form documented by `--help` does not reach libtest, and
-   without it the run settles nothing). The session must be elevated; a14's ssh
-   session already is. Expect **3** of the `sys.rs` four to die and
-   `elevated -> Some(true)` plus both `package_roots()` mutants to survive — if
-   anything else happens, that is the finding. **Run it detached on the machine**:
-   the last attempt died with the ssh connection.
-2. **The retry, observed firing** (still-open item 20). The instrumentation is
-   in the tree and unit-pinned; what is missing is one `dotpkg update` round with
-   a declared winget package and a concurrent winget process, watching for the
-   `0x8A150001 … succeeded on one retry` line. The trigger was measured at 3 of
-   10 under contention, so ~10–20 rounds should produce it.
-3. **The Windows suite, again.** The run recorded in §6 describes `c7086f0`.
-   This branch changes `.rs`, so that result no longer describes the tree, and
-   by this project's own rule it has to run again before the branch is
-   verifiable. Nothing here has been merged on the strength of the `c7086f0` run.
+1. ~~The Windows mutation run~~ — **done, §12.** Three of the six died; the other
+   three are each measured to be unclosable that way. What replaces it as an open
+   question is narrower and belongs to item 15: **a non-elevated Windows session,
+   plus a test asserting `elevated() == Some(false)`**, which is the only thing
+   that can kill `elevated -> Some(true)`.
+2. ~~The retry, observed firing~~ — **attempted, §10, and it did not fire in 70
+   contended rounds.** The instrumentation works (proven by the sibling arm) and
+   the trigger still exists (§11, 1 of 10 at four competitors), but not through
+   `dotpkg update` at any contention tried. Still open, now with a bound.
+3. **The Windows suite on the final tree.** §9 describes `ea6d91f`. Any further
+   `.rs` edit — including the `update_source` comment correction §11 calls for —
+   moves the tree again and needs another run. Cheap: about four minutes.
+4. **One assertion tying `package_roots()` to the environment it reads**, which
+   would kill `vec![]` on any platform where the variables are set. §12 shows no
+   run of any kind will do it without one.
 
-**One thing that does not need the machine**: printing `sysinfo`'s `exe` for a
+**One thing that does not need a fresh round**: printing `sysinfo`'s `exe` for a
 `Links`-launched process, which would turn §2's reasoned mechanism into a
-measured one. It needs a dozen lines and a Windows host — the same host, but not
-the same round.
+measured one. A standalone twelve-line probe is prepared and needs only a quiet
+moment on the machine.

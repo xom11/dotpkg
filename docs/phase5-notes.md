@@ -2541,9 +2541,13 @@ Windows run could settle.
       functions fabricated data. With `scanned` empty, `running_ids` answers the
       empty set for *any* roots, so nothing observable depends on
       `package_roots()`'s value. **A mutation run on Windows cannot close this
-      pair.** What would: one assertion tying `package_roots()` to the
-      environment it reads, which kills `vec![]` on any platform where the
-      variables are set.
+      pair** -- predicted from the environment experiment, and then **observed
+      directly**: the Windows run of 2026-08-12 reports both of them MISSED
+      (`docs/measurements-2026-08-12-phase5-residuals.md` §12), while
+      `package_roots_with`'s two die on both platforms, which is the control that
+      makes the row mean something. What would close them: one assertion tying
+      `package_roots()` to the environment it reads, which kills `vec![]` on any
+      platform where the variables are set.
     **What the split did close:** the part of the original gap that was about
     *logic*, not *plumbing*. `package_roots_with` is now pinned by four tests —
     both values present, each absent alone, both absent — each asserting the
@@ -2736,9 +2740,29 @@ so the next phase inherits a named list rather than a surprise.
     min. So "no `cargo mutants` invocation has ever happened on a Windows machine
     in this project" is not only an omission -- the documented incantation does
     not work there.
-  - **Still true, and still the point:** no such run has completed. One was
-    started on a14 on 2026-08-12 and was cut off when the machine went offline;
-    **no verdicts were recovered and none are claimed.**
+  - **The run has now happened**
+    (`docs/measurements-2026-08-12-phase5-residuals.md` §12), on `ea6d91f`, from
+    an elevated session, with the two-`--` form. It is the first `cargo mutants`
+    invocation to complete on Windows in this project's history, and it settled
+    the gate exactly as the analysis above said it would:
+    - **`elevated -> None`, `elevated -> Some(false)` and the `:163` inversion
+      are CAUGHT.** Three of the six are closed, and that is all the gate ever
+      held.
+    - **`elevated -> Some(true)` is MISSED on Windows too** -- measured now, not
+      reasoned. It is the correct answer in an elevated session, so no elevated
+      run can kill it. What can: a **non-elevated** session plus a test asserting
+      `Some(false)`, which is item 15's unmeasured half. Items 15 and 19 are one
+      gap seen from two ends.
+    - **Both `package_roots()` mutants are MISSED on Windows**, confirming §4.1's
+      prediction by direct observation.
+  - **A symmetry this bullet had backwards.** It calls the four
+    `#[cfg(windows)]` mutants a platform gap closable only on Windows. The mirror
+    is equally true and was never written: `sys.rs:216`'s two mutants live in the
+    `#[cfg(not(windows))]` arm, are **CAUGHT on macOS and MISSED on Windows**,
+    for exactly the reason `:139` is missed on macOS. The rule is therefore not
+    "this file needs a run on Windows" but **"it needs a run on both, because
+    each platform is blind to the other's arm"** -- a Windows-only run closes
+    three and silently reopens two.
 - **The accepted equivalent mutant on the `outstanding_skips` check** that Phase
   4b recorded at `main.rs:773`; the call is at `main.rs:856` on this tree.
   Closing it needs a fake scoop binary (which a standing test policy forbids) or

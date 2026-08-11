@@ -522,6 +522,104 @@ fn an_idle_winget_package_still_reports_its_version_difference() {
     );
 }
 
+// The whole point, through the planner rather than through one function: a
+// winget package whose live process name appears NOWHERE in winget's own output
+// is skipped as running, because pkg.toml said so.
+//
+// Built through `rows_to_scan` plus `backend::apply_guard_overrides`, in that
+// order, because that is the pair production runs -- a hand-made `Installed`
+// with `bins` already containing "tailscaled" would pass this test while
+// nothing in the tree ever put it there.
+//
+// **What this does NOT cover:** whether `main.rs` and `apply::load_everything`
+// actually call `apply_guard_overrides`. `tests/cli.rs`'s
+// `status_warns_when_a_winget_guard_entry_protects_nothing` and its
+// `apply_prepare` twin drive the real binary for that half.
+#[test]
+fn a_winget_package_is_held_by_a_guard_name_only_pkg_toml_knows() {
+    let declared = config::parse(
+        r#"
+[winget]
+packages = ["Tailscale.Tailscale", "Brave.Brave"]
+
+[winget.guard]
+"Tailscale.Tailscale" = ["tailscaled"]
+"#,
+    )
+    .unwrap();
+    let mut outcome =
+        dotpkg::backend::ScanOutcome::Scanned(dotpkg::backend::winget::rows_to_scan(vec![
+            dotpkg::backend::winget::WingetRow {
+                name: "Tailscale".to_string(),
+                id: "Tailscale.Tailscale".to_string(),
+                version: "1.102.0".to_string(),
+                available: None,
+                source: Some("winget".to_string()),
+            },
+            dotpkg::backend::winget::WingetRow {
+                name: "Brave".to_string(),
+                id: "Brave.Brave".to_string(),
+                version: "151.1.93.132".to_string(),
+                available: None,
+                source: Some("winget".to_string()),
+            },
+        ]));
+    let warnings = dotpkg::backend::apply_guard_overrides(
+        &mut outcome,
+        &declared.winget.guard,
+        &declared.winget.packages,
+    );
+    assert!(warnings.is_empty(), "warnings were: {warnings:?}");
+    let dotpkg::backend::ScanOutcome::Scanned(scan) = &outcome else {
+        panic!("outcome changed variant");
+    };
+
+    let p = plan(
+        &declared,
+        &lock::parse(
+            "[winget.\"Tailscale.Tailscale\"]\nversion = \"1.102.2\"\npin = \"version-only\"\n\
+             [winget.\"Brave.Brave\"]\nversion = \"151.1.93.134\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &scan.installed,
+        &scan.opaque,
+        &State::default(),
+        &Running::new(
+            // What a real machine reports for Tailscale, and nothing winget's
+            // own output contains: not the id, not its last dotted segment,
+            // not the display name. `tailscaled` reaches the fence only
+            // because pkg.toml named it.
+            BTreeSet::from(["tailscaled".to_string()]),
+            Default::default(),
+        ),
+        &[],
+    );
+
+    assert!(
+        p.actions.contains(&Action::Skip {
+            backend: WINGET.into(),
+            name: "Tailscale.Tailscale".into(),
+            reason: SkipReason::Running,
+        }),
+        "a guard name from pkg.toml must hold the package: {:?}",
+        p.actions
+    );
+    // The counterweight in the same test: Brave has no guard entry and no
+    // matching process, so a fix that holds everything cannot pass.
+    assert!(
+        p.actions.contains(&Action::Upgrade {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            from: "151.1.93.132".into(),
+            to: "151.1.93.134".into(),
+            arch: None,
+        }),
+        "an unguarded idle package must still act on its version difference: {:?}",
+        p.actions
+    );
+    assert_eq!(p.actions.len(), 2, "got {:?}", p.actions);
+}
+
 #[test]
 fn an_owned_undeclared_winget_package_is_a_real_prune_now() {
     // Was `an_owned_undeclared_winget_package_is_reported_not_pruned`, whose

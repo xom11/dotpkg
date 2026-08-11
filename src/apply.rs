@@ -1163,7 +1163,18 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
     let winget = crate::backend::winget::Winget::new(crate::backend::winget::RealWinget);
     // Not `?`: a winget hiccup must not abort scoop's entirely unrelated
     // half of this run. See `crate::backend::scan_or_warn`'s own doc comment.
-    let winget_scan = crate::backend::scan_or_warn(&winget);
+    let mut winget_scan = crate::backend::scan_or_warn(&winget);
+    // Before anything reads `winget_scan`: `main.rs` clones its `installed` into
+    // the list `plan()` and `plan_to_steps` both see, so a guard name merged
+    // here reaches the plan-time fence and the mid-run re-sampler alike. See
+    // `apply_guard_overrides`' own doc comment for that chain.
+    for w in &crate::backend::apply_guard_overrides(
+        &mut winget_scan,
+        &declared.winget.guard,
+        &declared.winget.packages,
+    ) {
+        eprintln!("warning: {w}");
+    }
     let procs = crate::sys::running_processes();
     let running = sample_fence(&scoop, &winget_scan, &procs);
     Ok(Driver {

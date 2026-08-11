@@ -502,10 +502,17 @@ guards = { }
     fn two_guard_values_that_fold_to_the_same_process_name_collapse_to_one() {
         // `Tailscaled.EXE`, `TAILSCALED`, and `tailscaled` all fold to the
         // same string through `sys::normalize`. Without the `.contains()`
-        // guard in `parse`, the guard list would carry that name three
-        // times over -- harmless for matching (`Running::covers` only asks
-        // "is this string in the set"), but a phantom duplicate nothing
-        // written in pkg.toml led a reader to expect.
+        // guard in `parse`, the guard list would carry that name three times
+        // over -- a phantom duplicate nothing written in pkg.toml led a reader
+        // to expect.
+        //
+        // **What it is not:** a matching fix. That was a forecast when this
+        // test was written and is now checkable -- the value's only consumer,
+        // `backend::apply_guard_overrides`, appends each name to
+        // `Installed.bins` only when it is not already there, and `Running`'s
+        // matchers only ask whether a string is in a set. So this pins the
+        // parsed value's own shape, and a reader must not take it for a claim
+        // that a duplicate would have broken the fence.
         let cfg = parse(
             r#"
 [winget.guard]

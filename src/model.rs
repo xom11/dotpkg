@@ -215,11 +215,16 @@ pub const WINGET: &str = "winget";
 /// `backend::winget::running_ids` inserts a winget id whose own package
 /// directory holds a running executable. **Measured:** winget creates such a
 /// directory only for a `portable` package -- 4 of 36 installed ids on a14 --
-/// so a winget EXE/MSI application still reaches this fence only through
-/// `names` (matched against `bins`, which `winget::guard_names` guesses).
-/// `config::parse` accepts and validates a declared `[winget.guard]` entry
-/// (`WingetSection::guard`) since Phase 5 Task 3, but nothing here merges it
-/// into `names` yet; `names` alone is the non-portable coverage today.
+/// so a winget EXE/MSI application reaches this fence only through `names`,
+/// matched against the `bins` of the `Installed` handed to `covers`.
+///
+/// Two things fill that `bins` for winget, and neither is this type's business:
+/// `winget::guard_names`' two guesses, and -- since Phase 5 Task 4 -- a declared
+/// `[winget.guard]` entry (`config::WingetSection::guard`), which
+/// `backend::apply_guard_overrides` merges into the matching `Installed.bins`
+/// once per scan. **Structural:** nothing here reads a `Config`; a declared name
+/// reaches these matchers only inside the `Installed` that `covers` takes, or
+/// inside the `guard` slice `covers_any` takes.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Running {
     names: BTreeSet<String>,

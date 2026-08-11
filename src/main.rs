@@ -465,7 +465,18 @@ fn main() -> Result<()> {
             // exit code far more readily than scoop does) must not abort
             // scoop's entirely unrelated half of this run. See
             // `scan_or_warn`'s own doc comment.
-            let winget_scan = dotpkg::backend::scan_or_warn(&winget);
+            let mut winget_scan = dotpkg::backend::scan_or_warn(&winget);
+            // Before `print_scan_warnings_and_merge` below, which is what copies
+            // this scan's `installed` into the list `plan()` reads: a guard name
+            // merged after that point would be invisible to the fence. See
+            // `backend::apply_guard_overrides`' own doc comment.
+            for w in &dotpkg::backend::apply_guard_overrides(
+                &mut winget_scan,
+                &declared.winget.guard,
+                &declared.winget.packages,
+            ) {
+                eprintln!("warning: {w}");
+            }
             let procs = dotpkg::sys::running_processes();
             let running = dotpkg::apply::sample_fence(&scoop, &winget_scan, &procs);
 

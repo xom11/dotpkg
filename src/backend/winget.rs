@@ -266,10 +266,16 @@ pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
 ///
 /// **Coverage is bounded and the bound is measured, not guessed:** winget only
 /// creates these directories for `portable` packages -- 4 of 36 installed ids
-/// on a14 -- so every EXE/MSI application is invisible here and reachable only
-/// through `names`. `config::parse` accepts a `[winget.guard]` entry per
-/// package, but nothing merges it into `names` or anything else this fence
-/// reads, so it does not widen this bound yet.
+/// on a14 -- so every EXE/MSI application is invisible to THIS signal and can
+/// only ever be caught by the fence's name half.
+///
+/// That bound is unmoved by Phase 5 Task 4, and what the name half can see is
+/// wider because of it: `backend::apply_guard_overrides` merges a declared
+/// `[winget.guard]` entry into the matching `Installed.bins`, which
+/// `Running::covers` compares against `names`. So a non-portable package the
+/// user has named does now reach the fence -- by name, never by path, and only
+/// when pkg.toml names it. Nothing about that widens what this function
+/// returns.
 ///
 /// **Why a per-id prefix test rather than parsing the directory name.** The
 /// segment is `<id>_<sourceIdentifier>` in all 5 measured cases, but splitting
@@ -416,9 +422,17 @@ pub(crate) fn running_ids(
 /// Two things narrow that gap, neither of them here. `running_ids` catches the
 /// **portable** subset by path regardless of what the process is called -- 4 of
 /// 36 installed ids on a14, so a minority -- and a declared `[winget.guard]`
-/// entry is meant to cover the rest. `config::parse` accepts and validates
-/// that table since Phase 5 Task 3 (`WingetSection::guard`); nothing here
-/// merges it into the fence yet.
+/// entry covers the rest: since Phase 5 Task 4,
+/// `backend::apply_guard_overrides` appends that table's names to the very
+/// `bins` this function filled, in a second pass over the finished `Scan`.
+/// **Deliberately not here:** this is a pure function of winget's own `list`
+/// output -- `tests/winget_scan.rs` drives it with rows and nothing else -- and
+/// taking a `Config` would end that.
+///
+/// Whether a declared entry covers the right process is the user's claim rather
+/// than a property of this code. What is **measured**
+/// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §2) is only
+/// that three real ids run processes no rule here could have derived.
 pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
     for row in rows {

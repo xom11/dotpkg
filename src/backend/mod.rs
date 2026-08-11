@@ -8,6 +8,7 @@ use crate::model::{Installed, Name};
 use crate::update::Resolution;
 use anyhow::Result;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// What one scan found, plus what it could not read.
@@ -302,6 +303,83 @@ pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
     }
 }
 
+/// Add `[winget.guard]`'s process names to the matching `Installed.bins`, and
+/// report every guard key that matched nothing.
+///
+/// **One merge point serves both fences. Structural**, three hops each,
+/// checkable by reading:
+///
+/// - Plan time: `plan()` hands a whole `&Installed` to `Running::covers`
+///   (`src/plan.rs:414` and `:462`), and `covers`' third disjunct asks
+///   `inst.bins` against the live process names.
+/// - Mid-run: `apply::guard_for` clones the same `Installed.bins` into the
+///   `guard` field of `WingetStep::Set`/`Remove`, `Step::guard_names` returns
+///   it, and `execute`'s per-step re-sampler passes it to
+///   `Running::covers_any` (`src/execute.rs:1032`).
+///
+/// Neither list has any other source: `guard_for` reads `bins` or falls back to
+/// `winget::guard_names`, and `bins` itself is filled only by
+/// `winget::rows_to_scan` and by this function. So a name added here is seen by
+/// both fences, and adding it at a second point would be redundant rather than
+/// necessary.
+///
+/// Merging inside `winget::rows_to_scan` instead would mean handing that
+/// function a `Config`. It is a pure function of winget's own `list` output and
+/// must stay one -- `tests/winget_scan.rs` drives it with rows alone.
+///
+/// Names are ADDED, never substituted: `winget::guard_names`' two guesses still
+/// apply, and a declared name is a third signal beside them, not a replacement
+/// for them. Values arrive already folded by `sys::normalize` at parse time
+/// (see `config::WingetSection::guard`), so they are directly comparable
+/// against `Running`'s `names` and are not folded again here.
+///
+/// A key that matches no installed package and is not declared in
+/// `[winget] packages` gets one warning. Keyed on both, because a declared
+/// package that is merely not installed yet is the ordinary state of a fresh
+/// machine and must not warn on every run; a key that is in neither is a stale
+/// or misspelled entry protecting nothing in silence. This check cannot live in
+/// `config::parse`, which knows the declaration but not the scan.
+pub fn apply_guard_overrides(
+    outcome: &mut ScanOutcome,
+    guard: &BTreeMap<Name, Vec<String>>,
+    declared: &[Name],
+) -> Vec<String> {
+    let ScanOutcome::Scanned(scan) = outcome else {
+        // An Unscannable backend established no facts, so nothing here can say
+        // whether a key matched -- and there is no `installed` row to merge
+        // into either. The same rule `main.rs`'s `reconcile_ghosts` applies to
+        // the same outcome, and the same one `winget_fence_ids` above applies.
+        return Vec::new();
+    };
+
+    let mut warnings = Vec::new();
+    for (id, names) in guard {
+        let mut matched = false;
+        for inst in scan.installed.iter_mut() {
+            // Both conditions, not either: `[winget.guard]` is keyed by winget
+            // id, and a scoop package that happens to share the spelling is a
+            // different package. Compared as `Name`, so pkg.toml's spelling
+            // need not match winget's canonical casing.
+            if inst.backend != crate::model::WINGET || &inst.name != id {
+                continue;
+            }
+            matched = true;
+            for n in names {
+                if !inst.bins.contains(n) {
+                    inst.bins.push(n.clone());
+                }
+            }
+        }
+        if !matched && !declared.contains(id) {
+            warnings.push(format!(
+                "pkg.toml [winget.guard] {id}: nothing installed and nothing declared by that \
+                 name, so these guard names protect nothing"
+            ));
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +438,156 @@ mod tests {
                 panic!("a genuine scan failure must not read as scanned: {s:?}")
             }
         }
+    }
+
+    /// One installed winget row, for the guard-merge tests below.
+    fn winget_row(id: &str, bins: &[&str]) -> Installed {
+        Installed {
+            backend: crate::model::WINGET.to_string(),
+            name: Name::new(id),
+            version: "1.102.2".to_string(),
+            arch: None,
+            bucket: None,
+            bins: bins.iter().map(|b| b.to_string()).collect(),
+        }
+    }
+
+    /// The `installed` list of a `Scanned` outcome, or a panic naming what the
+    /// outcome became instead.
+    fn scanned(outcome: &ScanOutcome) -> &[Installed] {
+        match outcome {
+            ScanOutcome::Scanned(s) => &s.installed,
+            ScanOutcome::Unscannable(why) => panic!("outcome changed variant: {why}"),
+        }
+    }
+
+    #[test]
+    fn a_guard_entry_is_merged_into_that_packages_bins() {
+        let mut outcome = ScanOutcome::Scanned(Scan {
+            installed: vec![winget_row("Tailscale.Tailscale", &["tailscale"])],
+            ..Scan::default()
+        });
+        let mut guard = BTreeMap::new();
+        guard.insert(
+            Name::new("Tailscale.Tailscale"),
+            vec!["tailscaled".to_string(), "tailscale-ipn".to_string()],
+        );
+        let warnings = apply_guard_overrides(&mut outcome, &guard, &[]);
+        assert!(warnings.is_empty(), "warnings were: {warnings:?}");
+        // The `guard_names` value survives: this ADDS signals, it does not
+        // replace them.
+        assert_eq!(
+            scanned(&outcome)[0].bins,
+            vec![
+                "tailscale".to_string(),
+                "tailscaled".to_string(),
+                "tailscale-ipn".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_guard_key_matches_an_installed_id_by_name_not_by_exact_spelling() {
+        // pkg.toml carries whatever spelling the user typed; the scan carries
+        // winget's canonical id. Comparing the two as `String` would make a
+        // guard entry silently protect nothing on a case difference, which is
+        // the failure direction this whole phase exists to close.
+        let mut outcome = ScanOutcome::Scanned(Scan {
+            installed: vec![winget_row("Tailscale.Tailscale", &[])],
+            ..Scan::default()
+        });
+        let mut guard = BTreeMap::new();
+        guard.insert(
+            Name::new("tailscale.tailscale"),
+            vec!["tailscaled".to_string()],
+        );
+        let warnings = apply_guard_overrides(&mut outcome, &guard, &[]);
+        assert!(warnings.is_empty(), "warnings were: {warnings:?}");
+        assert_eq!(scanned(&outcome)[0].bins, vec!["tailscaled".to_string()]);
+    }
+
+    #[test]
+    fn a_guard_name_already_guessed_by_guard_names_is_not_added_twice() {
+        // `[winget.guard] "Brave.Brave" = ["brave"]` names exactly what
+        // `winget::guard_names` already guessed. A duplicate would not break
+        // matching -- `Running` only asks whether a string is in the set --
+        // but `apply::guard_for` copies this list into the `Step`, and a
+        // doubled entry there is a phantom nothing in pkg.toml explains.
+        let mut outcome = ScanOutcome::Scanned(Scan {
+            installed: vec![winget_row("Brave.Brave", &["brave"])],
+            ..Scan::default()
+        });
+        let mut guard = BTreeMap::new();
+        guard.insert(Name::new("Brave.Brave"), vec!["brave".to_string()]);
+        assert!(apply_guard_overrides(&mut outcome, &guard, &[]).is_empty());
+        assert_eq!(scanned(&outcome)[0].bins, vec!["brave".to_string()]);
+    }
+
+    #[test]
+    fn a_scoop_package_of_the_same_name_takes_no_winget_guard_names() {
+        // `[winget.guard]` is keyed by winget id, and the two backends share a
+        // namespace only by accident. The same hazard `guard_for_needs_both_the_
+        // right_backend_and_the_right_name_not_either_alone` pins in
+        // `src/apply.rs`, one table over.
+        let mut scoop_row = winget_row("Tailscale.Tailscale", &[]);
+        scoop_row.backend = crate::model::SCOOP.to_string();
+        let mut outcome = ScanOutcome::Scanned(Scan {
+            installed: vec![scoop_row, winget_row("Tailscale.Tailscale", &[])],
+            ..Scan::default()
+        });
+        let mut guard = BTreeMap::new();
+        guard.insert(
+            Name::new("Tailscale.Tailscale"),
+            vec!["tailscaled".to_string()],
+        );
+        assert!(apply_guard_overrides(&mut outcome, &guard, &[]).is_empty());
+        let installed = scanned(&outcome);
+        assert!(
+            installed[0].bins.is_empty(),
+            "the scoop row must be untouched: {:?}",
+            installed[0].bins
+        );
+        assert_eq!(installed[1].bins, vec!["tailscaled".to_string()]);
+    }
+
+    #[test]
+    fn a_guard_entry_matching_no_installed_package_warns_once() {
+        // A stale or misspelled id otherwise protects nothing, in silence.
+        // This cannot be a parse error: only this point knows the scan.
+        let mut outcome = ScanOutcome::Scanned(Scan::default());
+        let mut guard = BTreeMap::new();
+        guard.insert(Name::new("Tailscale.Typo"), vec!["tailscaled".to_string()]);
+        let warnings = apply_guard_overrides(&mut outcome, &guard, &[]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Tailscale.Typo"), "was: {warnings:?}");
+        assert!(warnings[0].contains("[winget.guard]"), "was: {warnings:?}");
+    }
+
+    #[test]
+    fn a_guard_entry_for_a_declared_but_not_installed_package_does_not_warn() {
+        // A machine where the app is merely not installed yet must not print a
+        // warning on every run. `declared` is what distinguishes that from a
+        // typo.
+        let mut outcome = ScanOutcome::Scanned(Scan::default());
+        let mut guard = BTreeMap::new();
+        guard.insert(
+            Name::new("Tailscale.Tailscale"),
+            vec!["tailscaled".to_string()],
+        );
+        let warnings =
+            apply_guard_overrides(&mut outcome, &guard, &[Name::new("Tailscale.Tailscale")]);
+        assert!(warnings.is_empty(), "was: {warnings:?}");
+    }
+
+    #[test]
+    fn an_unscannable_winget_backend_takes_no_guard_names_and_does_not_warn() {
+        // Same rule `State::reconcile` follows for the same outcome: an
+        // Unscannable backend yields no facts, so nothing can be said about
+        // whether a guard key matched.
+        let mut outcome = ScanOutcome::Unscannable("winget exploded".to_string());
+        let mut guard = BTreeMap::new();
+        guard.insert(Name::new("Tailscale.Typo"), vec!["x".to_string()]);
+        assert!(apply_guard_overrides(&mut outcome, &guard, &[]).is_empty());
     }
 
     #[test]

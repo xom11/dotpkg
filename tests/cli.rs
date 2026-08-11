@@ -1317,6 +1317,79 @@ fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
     f.assert_nothing_was_touched(before);
 }
 
+// -- Phase 5 task 4: `[winget.guard]` merged into the scan ------------------
+//
+// These two exist because nothing else in the suite can go red when the
+// `backend::apply_guard_overrides` call is deleted from a call site.
+// `tests/planner.rs`'s `a_winget_package_is_held_by_a_guard_name_only_pkg_toml_
+// knows` calls that function itself, so it stays green no matter what `main.rs`
+// does; only the real binary can say whether `main.rs` calls it.
+//
+// They assert the WARNING half rather than the merge half, and that is forced
+// rather than chosen: `Fixture::run` hands the spawned process
+// `path_without_winget()`, so `Winget::scan`'s `NotFound` arm returns an empty
+// `Scan` and there is no installed winget package on this machine for a guard
+// name to be merged INTO. An unmatched, undeclared guard key is the one guard
+// behaviour observable through a real run with no winget present -- and it is
+// produced by the same call, at the same point, so deleting that call takes
+// both halves with it. Proving the merge reaches the fence end-to-end needs a
+// real winget package and a live process, which is a Windows-machine
+// measurement, not a test.
+
+#[test]
+fn status_warns_when_a_winget_guard_entry_protects_nothing() {
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n\
+         [winget.guard]\n\"Tailscale.Typo\" = [\"tailscaled\"]\n",
+        "{}",
+    );
+
+    let out = f.run(&["status"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status stays read-only: stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("[winget.guard]") && stderr.contains("Tailscale.Typo"),
+        "status must say which guard key protects nothing: {stderr}"
+    );
+}
+
+#[test]
+fn apply_prepare_also_warns_about_a_winget_guard_entry_that_protects_nothing() {
+    // `status` and `apply` reach the winget scan through two different code
+    // paths -- `main.rs`'s own inline sequence, and `apply::load_everything`'s
+    // driver -- so each needs the merge wired independently, and each needs its
+    // own end-to-end witness.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n\
+         [winget.guard]\n\"Tailscale.Typo\" = [\"tailscaled\"]\n",
+        r#"{"scoop":{"fzf":"installed"}}"#,
+    );
+    f.write_lock_and_bucket_for("fzf", "1.0.0");
+    f.install_app("fzf", "1.0.0");
+    let before = f.snapshot();
+
+    let out = f.run(&["apply", "--prepare"]);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("[winget.guard]") && stderr.contains("Tailscale.Typo"),
+        "apply must say which guard key protects nothing: {stderr}"
+    );
+    f.assert_nothing_was_touched(before);
+}
+
 #[test]
 fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_is_reached() {
     // **This test is inverted, on purpose, and its old name was

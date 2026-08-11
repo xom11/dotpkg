@@ -415,6 +415,42 @@ rather than sampling it.
   tests, Windows-only the one `#[cfg(windows)] #[ignore]` test. Byte-identical
   difference set to every earlier run.
 
+## 6b. The machine was not idle, and that is stated rather than discovered later
+
+**Found during cleanup, not during the round**, which is the failure: an
+unrelated workload was active in `C:\Users\kln` while part of this round ran --
+a separate project's own probe session, compiling and running its own binaries
+and taking screenshots. Its files carry timestamps from **02:46 to 03:20** on
+2026-08-12 (plus two from the previous evening). It is not this round's, nothing
+here touched it, and it was left exactly as found.
+
+**What it affects, stated by kind rather than waved away:**
+
+- **The mutation verdicts do not depend on timing.** CAUGHT and MISSED are
+  decided by whether an assertion fires, and every verdict in §12 was reproduced
+  at `-j 1` or is a compile-time-inert case. Those stand.
+- **The one `TIMEOUT` is now over-explained rather than under-explained.** It was
+  already attributable to `-j 4` inflating test phases past the auto-timeout; a
+  competing workload on the same 8 cores is a second sufficient cause. Either
+  way it was the absence of a verdict and was re-run.
+- **The `source update` durations in §11 are the measurement most exposed to
+  it**, because they *are* timings. The 1.2-5.4 s success range and the
+  1245 ms/1266 ms failure-versus-success pair were captured before this window
+  opens by the sequence of this round's own steps, but **no timestamp was
+  recorded alongside them**, so that ordering is inference and not evidence. The
+  conclusion drawn from them -- that 1 s no longer clears the success range --
+  should be re-measured on a verifiably quiet machine before it is treated as
+  settled. What does **not** depend on it: the trigger's *rate* (0/10, 0/10,
+  1/10), which is a count of exit codes, not of milliseconds.
+
+**The method lesson, and it is the reusable one.** This project's own standing
+rule says `cargo mutants` runs "on an idle machine with nothing editing the
+tree". This round checked the second half -- the tree was shipped and hashed --
+and never checked the first. **A precondition that is only ever asserted in prose
+is not a precondition.** The cheap fix is the same shape as every other gate
+here: sample the process table and the load before starting, record it beside the
+result, and refuse if something unexpected is running.
+
 ## 7. Method failures of my own, this round
 
 Recorded because a probe that reports a wrong answer confidently is what this

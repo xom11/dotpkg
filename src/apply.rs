@@ -2503,6 +2503,56 @@ mod tests {
     }
 
     #[test]
+    fn outstanding_skips_excludes_a_not_locked_skip_sitting_beside_an_outstanding_one() {
+        // `is_outstanding` returns `false` for exactly one `SkipReason`:
+        // `NotLocked`. In real `prepare()` output that reason never reaches
+        // `Outcome::Skipped` -- `classify` routes it to `Outcome::NotLocked`
+        // instead (see `is_outstanding`'s doc comment) -- so, like
+        // `could_not_be_prepared_counts_failures_not_every_package_that_
+        // became_no_step` below, this builds the `Preparation` directly
+        // rather than through `prepare()`, to put a `Skipped`-with-
+        // `NotLocked` entry in front of `outstanding_skips` at all.
+        //
+        // Under `replace match guard is_outstanding(reason) with true`, this
+        // entry would come back too. Asserted by identity, not merely by
+        // count, so a mutant that returned the wrong package (or both) would
+        // not slip past a bare `len() == 1`.
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("kanata"),
+                        reason: SkipReason::Running,
+                    },
+                    outcome: Outcome::Skipped {
+                        why: "running -- stop it first".into(),
+                    },
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("zellij"),
+                        reason: SkipReason::NotLocked,
+                    },
+                    outcome: Outcome::Skipped {
+                        why: "not locked".into(),
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            prep.outstanding_skips(),
+            vec![(
+                SCOOP.to_string(),
+                Name::new("kanata"),
+                "running -- stop it first".to_string()
+            )],
+            "the not-locked skip must not come back, even sitting right beside one that does"
+        );
+    }
+
+    #[test]
     fn the_lock_coherence_guard_refuses_every_shape_that_is_decidable_without_io() {
         use crate::lock::Pin;
 
@@ -2925,6 +2975,96 @@ mod tests {
             prep.unpreparable_count(),
             1,
             "but only one could not be PREPARED"
+        );
+    }
+
+    #[test]
+    fn unpreparable_count_is_zero_when_nothing_failed_and_nothing_is_unlocked() {
+        // The zero side of the pin: a run made entirely of a benign skip
+        // (which does not fail the run -- see `is_ok()`) must read 0, not
+        // the constant `replace unpreparable_count -> usize with 1` would
+        // leave behind.
+        let prep = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Skip {
+                    backend: SCOOP.into(),
+                    name: Name::new("kanata"),
+                    reason: SkipReason::Running,
+                },
+                outcome: Outcome::Skipped {
+                    why: "running -- stop it first".into(),
+                },
+            }],
+        };
+        assert_eq!(prep.unpreparable_count(), 0);
+    }
+
+    #[test]
+    fn unpreparable_count_sums_failed_and_not_locked_rather_than_returning_either_alone() {
+        // One failed and two not-locked, deliberately different non-zero
+        // numbers: the sum is 3, which is neither operand and not the
+        // constant 1 either. A fixture built as 1-and-0 (like the test
+        // above this one) would still read 1 under `replace
+        // unpreparable_count -> usize with 1` and prove nothing; this one
+        // cannot pass under that mutation, nor under a body that returned
+        // `failed_count()` or `not_locked_count()` alone.
+        let prep = Preparation {
+            prepared: vec![
+                Prepared {
+                    action: Action::Install {
+                        backend: SCOOP.into(),
+                        name: Name::new("neovim"),
+                        version: "0.10.1".into(),
+                        arch: None,
+                    },
+                    outcome: Outcome::Failed {
+                        why: "download failed: hash mismatch".into(),
+                    },
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("kanata"),
+                        reason: SkipReason::NotLocked,
+                    },
+                    outcome: Outcome::NotLocked,
+                },
+                Prepared {
+                    action: Action::Skip {
+                        backend: WINGET.into(),
+                        name: Name::new("Discord.Discord"),
+                        reason: SkipReason::NotLocked,
+                    },
+                    outcome: Outcome::NotLocked,
+                },
+                // A benign skip, present so the sum is proven to ignore it
+                // rather than merely happening to equal 3 without it.
+                Prepared {
+                    action: Action::Skip {
+                        backend: SCOOP.into(),
+                        name: Name::new("zellij"),
+                        reason: SkipReason::Running,
+                    },
+                    outcome: Outcome::Skipped {
+                        why: "running -- stop it first".into(),
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            prep.failed_count(),
+            1,
+            "the positive control on one operand"
+        );
+        assert_eq!(
+            prep.not_locked_count(),
+            2,
+            "the positive control on the other operand"
+        );
+        assert_eq!(
+            prep.unpreparable_count(),
+            3,
+            "the sum of the two, not either alone and not the constant 1"
         );
     }
 

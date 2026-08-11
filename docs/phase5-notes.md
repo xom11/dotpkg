@@ -17,10 +17,25 @@ say a pre-merge gate had gone unmet. So every number below names the tree it was
 measured on, and the Verification section says plainly what each run did and did
 **not** establish rather than implying it went well.
 
-**All three of the runs that section used to list as absent have now happened** —
-the Windows suite, the dogfood and the completed mutation run, all on `4bbe3be`,
-the tree that ships this file. Two of them came back **inconclusive on the specific
-thing they were meant to settle**, and those are recorded as inconclusive and given
+**All three of the runs that section used to list as absent have now happened**,
+and each names its own tree rather than borrowing one — this paragraph used to say
+"all on `4bbe3be`", which was true of the dogfood and of the Windows suite's first
+run, and never of the mutation run:
+
+- the **Windows suite**, on `4bbe3be`, and then a second time on `765e091` (see
+  "And then the tree moved twice more" two paragraphs below);
+- the **dogfood**, on `4bbe3be`;
+- the **mutation run**, on neither — it completed **twice**, on `4673517` (70
+  mutants) and on `ee46172` (72), both of them commits *before* `4bbe3be` existed.
+
+Why the mutation run's numbers still describe the tree that ships is an argument
+about *attributability* rather than a measurement taken there, and it lives where
+the run is recorded ("The mutation run" under Verification) instead of being
+restated here — collapsing it into "measured on the shipping tree" is exactly the
+move the promise two paragraphs above forbids.
+
+**Two of the questions the dogfood was meant to settle** came back
+**inconclusive**, and those are recorded as inconclusive and given
 numbers in the still-open list (items **20** and **21**) rather than filed as
 passes: the retry has never been observed to fire, and the winget path signal could
 not be isolated from `guard_names` on the one live subject the machine offered. A
@@ -28,7 +43,8 @@ run that happened is not the same as a question that was answered, and this file
 tries not to spend the first to claim the second.
 
 **And then the tree moved twice more, and one of those three runs had to happen a
-second time.** `6b2211e` (the commit that wrote the paragraph above) is docs only;
+second time.** `6b2211e` (the commit that first wrote the claim the bullets above
+now correct) is docs only;
 `765e091` changes one comment line in `src/backend/winget_exec.rs` in addition to
 documentation. Both land before this file merges, so `4bbe3be` stopped being "the
 tree that ships this file" the moment `765e091` was committed. The Windows suite
@@ -610,8 +626,8 @@ nobody checks.
   commit>` empty, and the full suite re-run at 598 passed / 0 failed / 14 lines.
   No lasting effect — recorded because a reviewer that modifies the tree is
   exactly what must not be taken on faith.
-- **The `file:line` citation convention failed the same way twice on this one
-  branch, and both times the citation was correct when written.** *Structural*,
+- **The `file:line` citation convention failed the same way three times on this
+  one branch, and every time the citation was correct when written.** *Structural*,
   not a carelessness finding: a citation of this shape is a claim about the
   Nth line of a file, and any later commit that inserts a line above the target
   changes what that claim points at without touching the sentence making it —
@@ -625,8 +641,8 @@ nobody checks.
     Task 2's `db1c50f`; `apply_guard_overrides` by Task 4's `6cbdfa6`), and
     `apply::sample_fence`'s citation of `tests/cli.rs:980` (also Task 2's
     `01df082`). Caught by the whole-branch review's fix wave (`2a35df2`); see
-    "Thirteen `file:line` citations corrected inside the shipped `.rs` files"
-    above for the full table.
+    "Sixteen `file:line` citation numbers corrected inside the shipped `.rs`
+    files" above for the full table.
   - **Instance 2** — *measured* (content read against `6b2211e`). Task 9b's
     `ee46172` (the `package_roots` split) added +90/-2 lines to
     `src/backend/winget.rs` — **two commits after** that same whole-branch
@@ -638,15 +654,33 @@ nobody checks.
     recurred" above) but left it unfixed by design, since that task's scope was
     documentation only; corrected in the `.rs` file by Task 9d, which also
     re-swept all 21 `file:line` citing sites in `src/` against this tree by
-    content and found no third instance.
+    content and found no third instance **in `src/`**. That qualifier is the
+    whole of Instance 3, and this bullet shipped without it: Task 9c's survey and
+    Task 9d's re-sweep were both scoped to `src/`, and neither said so, so
+    "no third instance" read as a statement about the tree.
+  - **Instance 3** — *measured* (target content read at `01bdd16`, `1d633c6`,
+    `c8c7f0d`, `ee46172` and this tree). **The same commit, `ee46172`, and the
+    same +32, falsified a citation in `tests/` as well**, and both sweeps were
+    blind to it by scope rather than by luck. `tests/winget_resolve.rs:232` cited
+    `src/backend/winget.rs:870` for `resolve_installed`'s `versions_out.code == 0`
+    guard — correct at `01bdd16` where it was written and still correct at
+    `1d633c6`, then moved by this phase to `:1054` (+184, by `c8c7f0d`) and to
+    `:1086` (+32, by `ee46172`). Found only by this phase's post-merge audit and
+    fixed there; see "The same class in `tests/`" below, which also carries the
+    seven inherited `tests/` citations found alongside it.
   - **What a reader should conclude.** A citation sweep is evidence about the
-    tree it ran on and about nothing that ships after it — Instance 2 is the
-    proof, since it falsified two citations a sweep had certified two commits
-    earlier. Given the convention as it stands, there are exactly two ways to
-    keep a `file:line` citation from going stale unseen: run the sweep as the
-    last edit before the file ships, or do not put a line number in the
-    citation at all. This branch did neither consistently, on the same file,
-    twice, and paid for it both times.
+    tree it ran on, about the directories it covered, and about nothing else —
+    Instance 2 is the proof of the first half, since it falsified two citations a
+    sweep had certified two commits earlier, and Instance 3 is the proof of the
+    second, since it was the same insertion one directory over. Given the
+    convention as it stands, there are exactly two ways to keep a `file:line`
+    citation from going stale unseen: run the sweep as the last edit before the
+    file ships, or do not put a line number in the citation at all. **A third
+    rule falls out of Instance 3 and is cheaper than either: a sweep must state
+    its scope**, because one that does not is read as covering everything.
+    This branch did none of the three consistently and paid for it three times —
+    twice on citations *into* `src/backend/winget.rs`, from two different
+    directories.
 
 ### Five in Task 9's own verification work, all the controller's
 
@@ -693,12 +727,14 @@ Gates on the artefact caught what review of the artefact did not.
 ## Corrections to earlier documents
 
 Recorded here rather than edited in place, matching the precedent set by the 2a,
-2b-2, Phase 3, Phase 4 and Phase 4b designs. Two exceptions, both because leaving
-them would ship a falsehood rather than a superseded sentence: this phase's own
-measurement document is corrected **in place** in two sections and says so at each
-(see the end of this section), and the two `.rs` comments this phase falsified
+2b-2, Phase 3, Phase 4 and Phase 4b designs. **Three** exceptions, all because
+leaving them would ship a falsehood rather than a superseded sentence: this phase's
+own measurement document is corrected **in place** in two sections and says so at
+each (see the end of this section); the two `.rs` comments this phase falsified
 were **fixed in the code**, since a reader of the tree cannot be warned off a
-false comment by a document.
+false comment by a document; and `README.md`'s `dotpkg apply` transcript was
+corrected **in place** by the whole-branch fix wave, for the same reason one
+directory over.
 
 ### From the design's own corrections section
 
@@ -782,17 +818,66 @@ kind of stale sentence a reader cannot be warned about from a document.
   measurement cannot drift again, and with the full document filename, which also
   closes one of the shorthand citations listed under "Left open".
 
-### Thirteen `file:line` citations corrected inside the shipped `.rs` files
+### And one `README.md` transcript, the third in-place exception
+
+*Structural, provable by reading.* Recorded because it was missing entirely: the
+word "README" appeared exactly **once** in this whole file, on an unrelated point,
+so a reader counting the exceptions named at the top of this section found two
+where the branch made three.
+
+The `dotpkg apply` block read as **verbatim terminal output** — a `$ dotpkg apply`
+shell prompt, two plan lines, a blank line, then the confirmation question — and
+the binary **cannot produce it**. Two things always land between the plan and the
+question: `render(plan)` emits an `N change(s), M skipped` summary line for every
+non-empty plan (this branch is what made that clause mandatory), and `main` calls
+`render::render_preparation` on the full `apply` path and not only under
+`--prepare`, so a real run prints an entire second table there too. The same branch
+then contradicted the block inside its own file, by adding a `--show-unmanaged`
+bullet that says the flag reaches *both* tables `apply` prints.
+
+Found by the whole-branch review (Minor 4) and fixed **in place**, in `2a35df2`,
+rather than recorded here — a fabricated transcript in the project's front door is
+the stale sentence a reader is least likely to check and least able to be warned
+off by a phase-notes document, which is the identical argument the two `.rs`
+comments above got, one directory over. The block is now labelled **"That block is
+abridged, not verbatim"** and enumerates what it omits (`README.md:78-91`). **No
+line numbers were added to it** — it names `src/render.rs` and `src/main.rs` as
+files, deliberately, for the reason the next section is entirely about.
+
+### Sixteen `file:line` citation numbers corrected inside the shipped `.rs` files
 
 The same defect class as the two comments above, but caused by *line drift*
-rather than by a wrong sentence. **Nine** were correct when written and were
-falsified by a later commit on this branch: five found by the whole-branch review
-(Important 1), four more by the fix wave's own re-sweep of every
-`<file>.rs:<line>` citation in `src/`, comparing each target's line *content* at
-`1d633c6` against this tree. **Four** more were already wrong at `1d633c6` and
-are inherited rather than this branch's; they are listed separately below. All
-thirteen are corrected in the shipped tree; the table is here because the *cause*
-is worth naming, not the numbers.
+rather than by a wrong sentence.
+
+**The unit is one `file:line` number, and it is named here because this heading
+used to read "Thirteen" and thirteen counted nothing.** It was **9 rows of the
+first table below plus 4 numbers of the second** — two units added together, a
+total matching neither. Caught by the independent citation sweep that followed the
+fix wave (ledger, `progress.md:132`), and it survived into this document anyway.
+Recounted against the two tables, which are themselves unchanged:
+
+- **16 citation numbers** — a number being one `:NNN` or one `:NNN-MMM` range;
+- sitting on **13 lines** of `.rs` comment, because one line can carry two numbers
+  (`backend/mod.rs:274` cites `plan.rs:431` *and* `:479`, and
+  `winget_exec.rs:154` cites two `winget.rs` lines);
+- presented as **12 rows** — 9 in the first table, 3 in the second. A row groups
+  what one citing comment says about one target; in the first table each row
+  happens to be one line as well, and in the second table's first row two lines of
+  one test's comment are grouped, which is why 3 rows hold 4 lines.
+
+**Every citing line counted here is in `src/`**, which the heading does not say and
+which is not incidental — see "The same class in `tests/`" below for the eight
+numbers that scope hid.
+
+**Every count in this section is in numbers.** **Twelve** of the sixteen were
+correct when written and were falsified by a later commit on this branch: **seven**
+found by the whole-branch review (Important 1, across five citing comments),
+**five** more by the fix wave's own re-sweep of every `<file>.rs:<line>` citation in
+`src/`, comparing each target's line *content* at `1d633c6` against this tree.
+**Four** were already wrong at `1d633c6` and are inherited rather than this
+branch's; they are listed separately below. All sixteen are corrected in the
+shipped tree; the tables are here because the *cause* is worth naming, not the
+numbers.
 
 Task 5's `5c4894c` added `Plan::unmanaged_count` and shifted `src/plan.rs` by
 exactly **17** lines and `tests/cli.rs` by **20**; Task 2 removed
@@ -854,11 +939,11 @@ verify the claim, and is left to either weaken the claim or "fix" code that is
 correct. `docs/phase5-notes.md` already cited `plan.rs:362-369` correctly, so the
 notes and the code disagreed about one fact in the same tree.
 
-**Two of the nine were already imprecise before this branch** — `render.rs`'s
+**Two of the twelve were already imprecise before this branch** — `render.rs`'s
 `:303` was two lines off its target function and `:286` two lines off its
 expression at `1d633c6` — and this branch's own edits then moved both into
 *different functions*, which is what turned an off-by-two into a false pointer.
-Corrected on the same footing as the other seven.
+Corrected on the same footing as the other ten.
 
 **The four inherited ones, fixed in the same pass and labelled so the blame is
 not misplaced.** `src/apply.rs`'s `plan_to_steps` routing tests cited
@@ -873,12 +958,23 @@ date, and leaving four known-false pointers in a tree whose whole review round
 was about false pointers would have been the wrong call. The two sibling
 citations in the same comments (`:834`, `:853`) were correct and are unchanged.
 
-**Not claimed: that thirteen is all of them.** The sweep catches *drift* — a
-citation whose target line changed content between `1d633c6` and this tree — and
-cannot catch one that was wrong from the start and whose target never moved. The
-four above were found only because a human read the comments around them, after
-the sweep had flagged their *neighbours*. A mechanical guarantee would need the
-citations to be checkable, which line numbers in prose are not.
+**Not claimed: that sixteen is all of them — and there are two boundaries, not
+one.** The first is what a sweep can see: it catches *drift* — a citation whose
+target line changed content between `1d633c6` and this tree — and cannot catch one
+that was wrong from the start and whose target never moved. The four above were
+found only because a human read the comments around them, after the sweep had
+flagged their *neighbours*. A mechanical guarantee would need the citations to be
+checkable, which line numbers in prose are not.
+
+**The second boundary is `src/`, and no sweep on this branch ever said so.** The
+fix wave's sweep, the independent 26-number re-sweep after it and Task 9d's
+21-site re-sweep all took `src/` as their scope, because that is where this
+phase's own comments were. `tests/` uses the identical `file.rs:NNN` convention,
+carries citations *into* `src/`, and was swept for the first time after the merge.
+**A sweep whose scope is not stated reads as complete**, which is the whole
+mechanism by which the eight numbers in "The same class in `tests/`" below stayed
+invisible — including one that is this branch's own third instance of the drift
+class.
 
 ### And then the class recurred, on this branch, after the sweep that fixed it
 
@@ -892,14 +988,20 @@ those two insertion points moved — **+32** for targets before the test module,
 live citation numbers, all 26 resolving" ran on the tree **before** `ee46172`, so
 it is not evidence about the tree that ships.
 
-**One citing site inside the shipped `.rs` files was stale on `4bbe3be`, and Task
-9c did not fix it** — this task's scope was documentation only, so the `.rs` files
-were left untouched deliberately rather than by oversight. **Task 9d then fixed it,
-in `765e091`** — see "The `file:line` citation convention failed the same way
-twice on this one branch" above for the fix itself and the 21-site re-sweep that
-followed it. The table below is kept as Task 9c wrote it, describing the
-citation's state on `4bbe3be`, because the point of this subsection is the drift
-that tree recorded, not the value it holds now:
+**One citing site in `src/` was stale on `4bbe3be`, and Task 9c did not fix it** —
+this task's scope was documentation only, so the `.rs` files were left untouched
+deliberately rather than by oversight. **Task 9d then fixed it, in `765e091`** —
+see "The `file:line` citation convention failed the same way three times on this
+one branch" above for the fix itself and the 21-site re-sweep that followed it. The
+table below is kept as Task 9c wrote it, describing the citation's state on
+`4bbe3be`, because the point of this subsection is the drift that tree recorded,
+not the value it holds now:
+
+**`src/` is the qualifier that matters in the sentence above, and it was not there
+until after the merge.** `ee46172` falsified a citation in `tests/` by the same
++32, in the same insertion, and neither Task 9c's survey nor Task 9d's re-sweep
+could see it, because both were scoped to `src/` and neither said so — see "The
+same class in `tests/`" below.
 
 | citing site | said | drifted target on `4bbe3be` |
 |---|---|---|
@@ -911,7 +1013,7 @@ Both targets are the *"no `--exact`"* comment lines in `resolve_latest` and
 drift from base reached **+203/+216**, not the +171/+184 the table above records
 for the earlier tree, before Task 9d's fix brought the `.rs` comment itself back
 into agreement. **This is the same defect the table exists to document, in the
-same file, one commit later — and, unlike the thirteen in that table, it shipped
+same file, one commit later — and, unlike the sixteen in that table, it shipped
 broken for one more commit before anyone caught it.**
 
 **Six citations in *this* document had drifted the same way, and those are
@@ -928,10 +1030,15 @@ above is that a wrong number is worth fixing:
 | shorthand citation 3 | `:1588` | `:1676` | +88 |
 
 **What this actually demonstrates, and it is not that people are careless.** The
-fix wave re-pointed thirteen citations and a reviewer verified all twenty-six
-numbers; **two commits later seven of them were wrong again** (the six in the
-table above plus `winget_exec.rs:154`), because a later commit inserted lines
-above them. The failure is not attention, it is the format: `file:line` in prose
+fix wave re-pointed sixteen citation numbers and a reviewer verified all
+twenty-six live ones in `src/`; **two commits later eight numbers on seven lines
+were wrong again** — the six in the table above, one number each, plus
+`winget_exec.rs:154`'s two on one line — because a later commit inserted lines
+above them. (Counted in numbers, for the reason the heading above now gives; the
+earlier draft of this sentence said "seven of them", which was six documentation
+rows plus one `.rs` citing line, the same mixed unit one more time.)
+
+The failure is not attention, it is the format: `file:line` in prose
 is invalidated by any edit above the target and nothing in the build can notice.
 `src/backend/winget_exec.rs:154`'s citation has now been wrong, fixed, wrong
 again, and fixed again within one branch — the second fix, Task 9d's in
@@ -942,6 +1049,87 @@ can break, and which `winget.rs`'s own `INTERNAL_ERROR` doc comment already does
 — and that is a production change no documentation task in this phase made.
 Recorded here so the next phase inherits the diagnosis rather than the fifteenth
 instance.
+
+### The same class in `tests/`, swept only after the merge
+
+**Found by this phase's post-merge audit and fixed in the same commit that records
+it.** *Measured*: each target's content read at the commit that wrote the citation,
+at `1d633c6`, and on this tree. Every citation sweep on this branch was scoped to
+`src/`; `tests/` uses the identical convention and cites *into* `src/`, so the
+convention's failure mode applies there unchanged. Swept for the first time after
+the merge: **9 citation numbers on 8 lines in `tests/`, of which 8 were wrong.**
+
+**One of the eight is this branch's own — the third instance of the drift class,
+not the second.**
+
+| citing line | said | now | correct when written? |
+|---|---|---|---|
+| `tests/winget_resolve.rs:232`, in `a_failed_depth_lookup_is_not_trusted…` | `src/backend/winget.rs:870` | `:1086` | **yes** |
+
+The target is `resolve_installed`'s `versions_out.code == 0` guard. It was correct
+at the commit that wrote it (`01bdd16`, Phase 4b) and still correct at `1d633c6`,
+and **this phase moved it twice**: to `:1054` by `c8c7f0d` (+184, the tasks' own
+additions to that file) and to `:1086` by `ee46172`'s `package_roots` split (+32) —
+**the same +32, from the same insertion, that falsified `winget_exec.rs:154`'s two
+numbers one file over.** That one was caught by Task 9c and fixed by Task 9d; this
+one was not, and the only difference between them is the directory. So the durable
+count for this branch is **three** instances of "a citation correct when written,
+falsified by a later commit here", not the two the bullet above recorded: Task 5's
+`5c4894c`, and `ee46172` twice over — once inside the sweeps' scope and once
+outside it.
+
+**Seven more, all inherited, all fixed in the same pass.** None is this branch's
+doing — every one was already wrong at `1d633c6` — and they are corrected anyway,
+which is the reasoning this document already gave for the four inherited `apply.rs`
+citations above, applied across the directory boundary it stopped at. Leaving
+known-false pointers in a tree whose review rounds were about false pointers is the
+wrong call in `tests/` for exactly the reason it was the wrong call in `src/`; the
+only thing the boundary changed was who looked.
+
+| citing line | said | now | at `1d633c6` the target was |
+|---|---|---|---|
+| `tests/cli.rs:726`, `a_ready_prune_with_nothing_held_back…` | `main.rs:602` | `:670` | `:642` |
+| `tests/cli.rs:1109`, the preparation-table column pin | `src/render.rs:229` | `:505` | `:350` |
+| `tests/cli.rs:1698`, the Task 14 section header | `main.rs:438` | `:882` | `:840` |
+| `tests/cli.rs:1698`, same line | `main.rs:459` | `:943` | `:901` |
+| `tests/cli.rs:1699`, same comment | `main.rs:470` | `:955` | `:913` |
+| `tests/cli.rs:1700`, same comment | `main.rs:496` | `:1004` | `:962` |
+| `tests/execute.rs:1534`, `a_winget_set_sorts_before_every_removal…` | `execute.rs:190` | `:223` | `:223` |
+
+Three details worth keeping rather than flattening:
+
+- **The four `main.rs` numbers were correct at *their* origin** (`58c8e29`, Phase
+  3, where they named the five `cargo mutants` survivors that section exists to
+  close) and had already drifted by ~400 lines before this branch started. The
+  comment now says which tree its four numbers describe, and keeps the Phase 3
+  figures beside them — labelled as Phase 3's, matching what
+  `docs/phase3-notes.md:320-322` records — so a reader can still find the survivor
+  report. **A future sweep will see those four old numbers and must not re-point
+  them:** they are not claims about any current tree, which is the trap Task 1's
+  `package_roots` comment fell into twice by quoting numbers a sweep would then
+  match.
+- **`tests/execute.rs:1534`'s target never moved on this branch at all** — it is
+  `:223` at `1d633c6` and `:223` now. The citation says `:190`, correct at
+  `4ebd831` where it was written. This is the case the drift sweep is structurally
+  blind to and the "Not claimed" paragraph above names: wrong from the start of
+  this branch, target stationary, so no content diff between two trees can surface
+  it. Found by reading.
+- **The one `tests/` citation that was already correct is the one naming a whole
+  function** — `tests/execute.rs:1675` cites `tests/cli.rs:55-64` for
+  `path_without_winget`, and `src/apply.rs:1090` cites the same range; both
+  resolve. Stated as the single observation it is, and **not** as "ranges survive
+  and lines rot": `src/`'s re-pointed set includes two ranges
+  (`plan.rs:345` → `:362-369`, `scoop.rs:299-303` → `:283-287`), so a range is no
+  more durable than a line. What made this one hold is that
+  `path_without_winget` is short and nothing was inserted above it — luck, on the
+  evidence available.
+
+**The sweep, stated with its scope so this one does not read as complete either.**
+After the fixes: **26 citation numbers on 21 lines in `src/`, all 26 resolving**,
+and **9 numbers on 8 lines in `tests/`, all 9 resolving** — both measured on the
+tree this commit ships, by reading each target's current content. It is evidence
+about that tree and no later one, which is the lesson two sweeps on this branch
+already paid for.
 
 ### The design attributes 105 invocations to one argv
 
@@ -1166,6 +1354,40 @@ carried forward from Task 9c's `4bbe3be` run:
 
 - `cargo fmt --check` — exit 0, no output.
 - `cargo clippy --all-targets -- -D warnings` — exit 0, zero warnings.
+
+#### The suite's one wall-clock assertion, and it was measured under load
+
+**Recorded here because it existed only in the git-ignored ledger
+(`progress.md:131`), and this is the one branch that lost a merge gate to a
+timing-dependent test.** The 634 entry above names three tests without saying that
+one of them asserts on a clock:
+`the_retry_delay_is_not_slept_after_the_final_failed_attempt`
+(`src/backend/winget.rs`), the fix wave's answer to whole-branch
+Minor 6. It pins `attempt == 0` by timing rather than by injecting a sleeper, so no
+production seam is added for a test's benefit, and its `DELAY` is 200 ms with a
+100 ms threshold on either side of the split.
+
+**Its author labelled that margin *reasoned*, not measured. The scoped re-review of
+the fix wave then measured it**, which is why the label in the code now says both.
+**Measured on the fix-wave tree** — `2a35df2`, the commit that added the test;
+`4673517` on top of it is the record only — and **it carries to `765e091`** because
+the test's code has not changed since: stripping comments, its 32 lines are
+identical at `2a35df2` and here, so nothing about the timing it asserts on moved.
+
+- **20 consecutive runs of the test under 20 busy loops on 10 CPUs — 0 flakes.**
+- The margin is roughly **100 ms of headroom against a microsecond-scale span**:
+  everything between the second `run` and the function's return is one `expect`,
+  one integer comparison and one `format!`.
+- **`total >= DELAY` cannot fail at all** — *structural* — because `sleep` never
+  returns early. Only the `tail` assertion is timing-sensitive, so the surface
+  that could flake is half of what the test's two assertions suggest.
+
+**Not a merge-gate risk**, and the reason that verdict is worth the space: the
+gate this branch actually lost was lost to a *different* timing-dependent failure
+(git's background maintenance writing a lock file inside a fixture repo, below), so
+"a test that asserts on wall-clock time" is not a hypothetical worry here. A margin
+left *reasoned* on this branch, in the ledger only, would have been the cheapest
+possible place for the next lost gate to hide.
 
 ### Windows target, cross-checked from macOS
 
@@ -2080,18 +2302,36 @@ so the next phase inherits a named list rather than a surprise.
   `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is empty, so the
   figure still describes **`765e091`**, the tree that actually ships.
   **This is the one figure for that quantity**; the table under
-  "Thirteen `file:line` citations" above records the two earlier trees (535 at
-  `c8c7f0d`, 611 at `4673517`) and why they are kept. The number
+  "Sixteen `file:line` citation numbers" above records the two earlier trees (535
+  at `c8c7f0d`, 611 at `4673517`) and why they are kept. The number
   read 534 until the whole-branch review (Minor 2) re-derived **535** against
   `c8c7f0d`; the fix wave that answered the review then added 76 more — the new
   retry-delay test, its fake's instant recorder, and the reworded
   `INTERNAL_ERROR` arm — and Task 9b's `ee46172` then added a further **88 net**
-  (`+90/-2`) for the `package_roots` split. **Re-observed, not re-measured, by Task 9b:** a
-  `cargo mutants --file src/backend/winget.rs` run (dispatched to check Task 9b's
-  own fix, not this list) found the same 14 mutants missed, all in these same
-  two functions, before the run was interrupted partway through and never
-  printed its own summary line — so this is a re-observation consistent with
-  the count above, not a fresh, complete, authoritative one.
+  (`+90/-2`) for the `package_roots` split.
+  - **What is known about the 14, and what is not — because this item used to
+    answer that question two ways in one paragraph.** The **four functions and the
+    6/6/1/1 split above are Phase 4b's record**, carried unchanged from
+    `docs/phase4b-notes.md`, and that is the only breakdown anything measured
+    supports. **Task 9b re-observed the count and nothing more:** a
+    `cargo mutants --file src/backend/winget.rs` run (dispatched to check Task 9b's
+    own fix, not this list) reported 14 missed before it was interrupted partway
+    through and never printed a summary line. This document then wrote that
+    re-observation up as finding them "all in these same two functions", which
+    **cannot be right beside the split above**: four functions are named, and
+    `floor_char_boundary` plus `parse_list` account for 6 + 6 = **12**, not 14.
+    The ledger records the same two-function attribution
+    (`progress.md:144`), so the disagreement is between the ledger and Phase 4b's
+    breakdown, not a transcription slip here.
+  - **Not reconciled by choosing a number, because no evidence on hand can.** An
+    interrupted run is not authoritative about *which* functions its survivors sat
+    in any more than about how many there were; and the split it would have to be
+    checked against is inherited, not re-derived here. So: the **count 14 is
+    corroborated** by a run that did not finish, the **6/6/1/1 attribution stands
+    on Phase 4b's record alone**, and the two-function claim is **withdrawn** —
+    it was never measured, it is arithmetically inconsistent with the split it was
+    printed next to, and settling it needs a completed file-scoped run that no
+    task in this phase produced.
 - **Two mutants in `winget_exec.rs`, inside `RealWingetMutator::run`** — a
   `NotFound == -> !=` and an `unwrap_or(-1) -> unwrap_or(1)`. Covering them means
   spawning a real `winget.exe` from the test suite, which this project does not

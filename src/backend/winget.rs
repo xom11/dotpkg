@@ -414,8 +414,9 @@ pub(crate) fn running_ids(
 /// Two things narrow that gap, neither of them here. `running_ids` catches the
 /// **portable** subset by path regardless of what the process is called -- 4 of
 /// 36 installed ids on a14, so a minority -- and a declared `[winget.guard]`
-/// entry is meant to cover the rest. That config key is Phase 5 Task 3 and does
-/// **not** exist in this tree yet.
+/// entry is meant to cover the rest. `config::parse` accepts and validates
+/// that table since Phase 5 Task 3 (`WingetSection::guard`); nothing here
+/// merges it into the fence yet.
 pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
     for row in rows {

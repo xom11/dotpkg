@@ -216,10 +216,10 @@ pub const WINGET: &str = "winget";
 /// directory holds a running executable. **Measured:** winget creates such a
 /// directory only for a `portable` package -- 4 of 36 installed ids on a14 --
 /// so a winget EXE/MSI application still reaches this fence only through
-/// `names` (matched against `bins`, which `winget::guard_names` guesses) or,
-/// once Phase 5 Task 3 adds it, a declared `[winget.guard]` entry. That config
-/// key does **not** exist in this tree yet; `names` is the whole of the
-/// non-portable coverage today.
+/// `names` (matched against `bins`, which `winget::guard_names` guesses).
+/// `config::parse` accepts and validates a declared `[winget.guard]` entry
+/// (`WingetSection::guard`) since Phase 5 Task 3, but nothing here merges it
+/// into `names` yet; `names` alone is the non-portable coverage today.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Running {
     names: BTreeSet<String>,

@@ -14,7 +14,12 @@ pub const EXECUTABLE_SUFFIXES: &[&str] = &["exe", "cmd", "bat", "ps1", "com"];
 /// Lowercases `raw` and removes a trailing suffix in `EXECUTABLE_SUFFIXES`,
 /// if the part after the last `.` is one: "Kanata.exe" -> "kanata", "tool.com"
 /// -> "tool", "python3.11" -> "python3.11" (`11` is not a known suffix).
-fn normalize(raw: &str) -> String {
+///
+/// `pub(crate)` because `config::parse` folds `[winget.guard]`'s values with
+/// this exact function. A second implementation is the "two copies can drift"
+/// class, and drift here is silent: an unfolded guard name never matches and
+/// reads as protection.
+pub(crate) fn normalize(raw: &str) -> String {
     let n = raw.to_ascii_lowercase();
     match n.rsplit_once('.') {
         Some((stem, ext)) if EXECUTABLE_SUFFIXES.contains(&ext) => stem.to_string(),

@@ -78,6 +78,19 @@ fn parse_buckets(raw: Vec<String>) -> Result<Vec<BucketDecl>> {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct WingetSection {
     pub packages: Vec<Name>,
+    /// Process names the user says belong to a winget package, because winget
+    /// exposes no way for dotpkg to find them out.
+    ///
+    /// **Measured** (`docs/measurements-2026-08-11-…` §2): `Tailscale.Tailscale`
+    /// runs `tailscaled` and `tailscale-ipn`, `AutoHotkey.AutoHotkey` runs
+    /// `autohotkey64`, and `Microsoft.WSL` runs `wslservice`. None is the id,
+    /// the display name, or the id's last dotted segment, and none is a
+    /// `portable` install, so neither `guard_names` nor
+    /// `backend::winget::running_ids` reaches any of them.
+    ///
+    /// Values are normalised by `sys::normalize` at parse time, so they are
+    /// directly comparable against `Running`'s `names`.
+    pub guard: BTreeMap<Name, Vec<String>>,
 }
 
 /// The architectures scoop names in install.json, plus the opt-out.
@@ -148,6 +161,8 @@ struct RawScoopSection {
 struct RawWingetSection {
     #[serde(default)]
     packages: Vec<String>,
+    #[serde(default)]
+    guard: BTreeMap<String, Vec<String>>,
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -160,6 +175,26 @@ pub fn parse(text: &str) -> Result<Config> {
         },
         winget: WingetSection {
             packages: fold_names(raw.winget.packages, "[winget]")?,
+            guard: fold_map(raw.winget.guard, "[winget.guard]")?
+                .into_iter()
+                .map(|(id, raw_names)| {
+                    let mut names = Vec::new();
+                    for raw_name in raw_names {
+                        let folded = crate::sys::normalize(raw_name.trim());
+                        if folded.is_empty() {
+                            anyhow::bail!(
+                                "pkg.toml [winget.guard] {id}: a guard name is empty after \
+                                 folding. An empty name matches no process while reading here \
+                                 as protection."
+                            );
+                        }
+                        if !names.contains(&folded) {
+                            names.push(folded);
+                        }
+                    }
+                    Ok((id, names))
+                })
+                .collect::<Result<BTreeMap<Name, Vec<String>>>>()?,
         },
     };
     // `fold_map` does not look inside values, so the bucket opt -- which
@@ -398,6 +433,69 @@ packages = ["Git.Git"]
             let text = format!("[scoop.opts]\ntool = {{ bucket = \"{bad}\" }}\n");
             assert!(parse(&text).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn winget_guard_names_are_normalised_the_way_running_processes_reports_them() {
+        // Measured on a14: `Tailscale.Tailscale` is installed and its live
+        // processes are `tailscaled` and `tailscale-ipn`, neither of which is
+        // the id, the display name, or the last dotted segment. This table is
+        // the only mechanism that reaches them -- winget creates no package
+        // directory for a non-portable install.
+        //
+        // The value is written with an extension and mixed case on purpose:
+        // `sys::running_processes` lowercases and strips a known executable
+        // suffix, so an unfolded comparison silently never matches.
+        let cfg = parse(
+            r#"
+[winget]
+packages = ["Tailscale.Tailscale"]
+
+[winget.guard]
+"Tailscale.Tailscale" = ["Tailscaled.EXE", "tailscale-ipn"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.winget.guard.get(&Name::new("Tailscale.Tailscale")),
+            Some(&vec!["tailscaled".to_string(), "tailscale-ipn".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_winget_guard_name_that_is_empty_after_folding_is_a_parse_error() {
+        // An empty string in the guard list would sit in the comparison set
+        // matching nothing, while reading in pkg.toml as protection.
+        let err = parse(
+            r#"
+[winget.guard]
+"Tailscale.Tailscale" = ["  "]
+"#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("[winget.guard]"), "message was: {msg}");
+        assert!(msg.contains("Tailscale.Tailscale"), "message was: {msg}");
+    }
+
+    #[test]
+    fn a_typo_in_the_winget_guard_table_name_is_refused_not_ignored() {
+        // deny_unknown_fields, for the reason this file's `packagess` test
+        // already gives: a typo must not read as "you declared nothing".
+        assert!(parse(
+            r#"
+[winget]
+packages = ["Tailscale.Tailscale"]
+guards = { }
+"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_absent_winget_guard_table_is_an_empty_map_not_a_failure() {
+        let cfg = parse("[winget]\npackages = [\"Git.Git\"]\n").unwrap();
+        assert!(cfg.winget.guard.is_empty());
     }
 
     #[test]

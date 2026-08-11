@@ -903,6 +903,15 @@ impl<C: WingetCmd> Backend for Winget<C> {
                 ),
             };
         }
+        // Deliberately NOT given `version_liveness`'s `INTERNAL_ERROR` arm
+        // (Task 7, measurements-2026-08-11 §5). That arm's message rests on
+        // "0 nonzero exits in 105 invocations", and every reader-side probe
+        // behind that count exercises `show --id <id> -v <ver> …` -- the
+        // argv `version_liveness` calls -- never the flagless `show --id
+        // <id> …` this method calls. Copying the same wording here would
+        // attribute a population this call was never part of. **Reasoned,
+        // not measured**: closing this gap correctly needs its own probe of
+        // this exact argv under contention, not a copy of someone else's.
         if out.code != 0 {
             return Resolution::Failed {
                 why: format!(
@@ -1059,6 +1068,20 @@ pub(crate) fn version_liveness(
             "{}: no longer in the winget index ({})",
             id,
             out.stdout.lines().next().unwrap_or("(no output)")
+        ));
+    }
+    if out.code == INTERNAL_ERROR {
+        // `INTERNAL_ERROR` was measured from `source update`, never from
+        // `show`: this argv returned 0 nonzero exits in 105 invocations, 30 of
+        // them against a continuously running `source update`. That the reader
+        // wins the race is a MECHANISM inferred from those numbers, not a
+        // measured property of this call, and this arm exists so that if the
+        // inference is ever wrong the operator gets the cause rather than a
+        // bare exit code. There is no retry: see this arm's own test.
+        return Err(format!(
+            "{}: winget exited {:#x}, which was measured to mean another winget process held \
+             the index -- re-run once nothing else is using winget",
+            id, out.code as u32
         ));
     }
     if out.code != 0 {
@@ -1532,5 +1555,26 @@ mod tests {
             "was: {err:#}"
         );
         assert_eq!(w.cmd.calls(), 2);
+    }
+
+    #[test]
+    fn version_liveness_names_the_contention_cause_without_retrying_it() {
+        // No retry here, deliberately: the argv this function uses returned 0
+        // nonzero exits in 105 invocations (measurements-2026-08-11 §5),
+        // including 30 against a continuous source-update loop. Building a
+        // retry loop on an unobserved failure mode only slows a certain
+        // failure down. What it CAN do is say what the code has been measured
+        // to mean elsewhere.
+        // No `Winget` wrapper: `version_liveness` is a free function taking
+        // `&dyn WingetCmd`, which is also why it is the seam `main.rs` holds.
+        let fake = ScriptedWinget::new(vec![Ok(CmdOut {
+            code: INTERNAL_ERROR,
+            stdout: String::new(),
+        })]);
+        let err = version_liveness(&fake, &Name::new("Git.Git"), "2.0").unwrap_err();
+        assert!(err.contains("another winget process"), "was: {err}");
+        assert!(err.contains("re-run"), "was: {err}");
+        // Exactly one call: this arm must not have grown a retry.
+        assert_eq!(fake.calls(), 1);
     }
 }

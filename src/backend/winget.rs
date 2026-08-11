@@ -227,11 +227,10 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
 /// non-Windows platform. `running_ids` is a no-op on an empty root list, so
 /// nothing needs a `cfg`.
 ///
-/// **Structural:** nothing calls this yet, not even a test -- `grep -rn
-/// "package_roots" src/ tests/` finds only this definition and the doc
-/// comment on `running_ids` that names it. Wiring it into the scan/guard path
-/// is a later task in this same plan; the `allow` below is temporary until
-/// then.
+/// **Structural:** no code in this crate calls `package_roots` today -- not
+/// this module's own tests, nor anywhere else. Wiring it into the scan/guard
+/// path is a later task in this same plan; the `allow` below is temporary
+/// until then.
 #[allow(dead_code)]
 pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();

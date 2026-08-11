@@ -318,10 +318,12 @@ pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
 ///   `Running::covers_any` (`src/execute.rs:1032`).
 ///
 /// Neither list has any other source: `guard_for` reads `bins` or falls back to
-/// `winget::guard_names`, and `bins` itself is filled only by
-/// `winget::rows_to_scan` and by this function. So a name added here is seen by
-/// both fences, and adding it at a second point would be redundant rather than
-/// necessary.
+/// `winget::guard_names`, and a **winget** row's `bins` is filled only by
+/// `winget::rows_to_scan` and by this function. (A scoop row's comes from
+/// `scoop::declared_executables`, a third writer this function never touches --
+/// `bins` as a field has three, winget's has two.) So a name added here is seen
+/// by both fences, and adding it at a second point would be redundant rather
+/// than necessary.
 ///
 /// Merging inside `winget::rows_to_scan` instead would mean handing that
 /// function a `Config`. It is a pure function of winget's own `list` output and
@@ -333,12 +335,28 @@ pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
 /// (see `config::WingetSection::guard`), so they are directly comparable
 /// against `Running`'s `names` and are not folded again here.
 ///
-/// A key that matches no installed package and is not declared in
-/// `[winget] packages` gets one warning. Keyed on both, because a declared
-/// package that is merely not installed yet is the ordinary state of a fresh
-/// machine and must not warn on every run; a key that is in neither is a stale
-/// or misspelled entry protecting nothing in silence. This check cannot live in
-/// `config::parse`, which knows the declaration but not the scan.
+/// **A key that matches no installed row has two distinguishable causes, and
+/// they get different warnings**, because a message naming the wrong one sends
+/// the user to fix the wrong thing:
+///
+/// - **The id is in `scan.opaque`.** Winget reported the package with no source,
+///   so `rows_to_scan` gave it no `Installed` row at all -- there is nothing for
+///   a guard name to be merged into -- and `plan()` turns it into
+///   `SkipReason::Opaque` and `continue`s (`src/plan.rs:345`) before either
+///   fence check is reached. So the guard names genuinely protect nothing, but
+///   *not* because nothing is installed. **Measured**, and the ordinary shape
+///   rather than an edge case: 84 of 126 ids on a14 were sourceless (see
+///   `main.rs`'s `reconcile_ghosts` for that figure and its other costs).
+///   Warned whether or not the id is declared, because the package IS there and
+///   "not installed yet" is not available as an explanation.
+/// - **Otherwise**, and only when the id is not declared in `[winget]
+///   packages`: a stale or misspelled entry, protecting nothing in silence.
+///   Keyed on `declared` because a declared package that is merely not
+///   installed yet is the ordinary state of a fresh machine and must not warn
+///   on every run.
+///
+/// Neither check can live in `config::parse`, which knows the declaration but
+/// not the scan.
 pub fn apply_guard_overrides(
     outcome: &mut ScanOutcome,
     guard: &BTreeMap<Name, Vec<String>>,
@@ -356,10 +374,24 @@ pub fn apply_guard_overrides(
     for (id, names) in guard {
         let mut matched = false;
         for inst in scan.installed.iter_mut() {
-            // Both conditions, not either: `[winget.guard]` is keyed by winget
-            // id, and a scoop package that happens to share the spelling is a
-            // different package. Compared as `Name`, so pkg.toml's spelling
-            // need not match winget's canonical casing.
+            // Both conditions, and only the name half can fire today.
+            // **Structural:** every `ScanOutcome` reaching this function comes
+            // from `scan_or_warn(&winget)` -- its two callers are `main.rs`'s
+            // `status` arm and `apply::load_everything`, both passing a
+            // `Winget` -- so every row here already carries `backend ==
+            // WINGET`. `a_scoop_package_of_the_same_name_takes_no_winget_guard_
+            // names` has to hand-build an outcome production cannot produce.
+            //
+            // The backend half is therefore a guard against a future caller
+            // that hands this a MERGED both-backend list, not against a hazard
+            // live at this call site. That shape is not hypothetical one file
+            // over: `apply::guard_for` reads exactly such a list, where the
+            // same mistake is live and is pinned by
+            // `guard_for_needs_both_the_right_backend_and_the_right_name_not_
+            // either_alone`.
+            //
+            // Compared as `Name`, so pkg.toml's spelling need not match
+            // winget's canonical casing.
             if inst.backend != crate::model::WINGET || &inst.name != id {
                 continue;
             }
@@ -370,11 +402,22 @@ pub fn apply_guard_overrides(
                 }
             }
         }
-        if !matched && !declared.contains(id) {
-            warnings.push(format!(
-                "pkg.toml [winget.guard] {id}: nothing installed and nothing declared by that \
-                 name, so these guard names protect nothing"
-            ));
+        if !matched {
+            // The opaque case first: it is the one where something IS installed
+            // under this id, so the "nothing installed" message below would be
+            // false. See this function's own doc comment for both causes.
+            if scan.opaque.iter().any(|o| o == id) {
+                warnings.push(format!(
+                    "pkg.toml [winget.guard] {id}: winget reported this package with no source, \
+                     so dotpkg cannot establish its state and skips it before any process check \
+                     -- these guard names protect nothing while that is so"
+                ));
+            } else if !declared.contains(id) {
+                warnings.push(format!(
+                    "pkg.toml [winget.guard] {id}: nothing installed and nothing declared by that \
+                     name, so these guard names protect nothing"
+                ));
+            }
         }
     }
     warnings
@@ -580,14 +623,62 @@ mod tests {
     }
 
     #[test]
-    fn an_unscannable_winget_backend_takes_no_guard_names_and_does_not_warn() {
-        // Same rule `State::reconcile` follows for the same outcome: an
-        // Unscannable backend yields no facts, so nothing can be said about
-        // whether a guard key matched.
+    fn a_guard_entry_for_an_opaque_package_is_told_the_real_reason_not_not_installed() {
+        // A sourceless winget row lands in `opaque`, never in `installed` -- so
+        // there is no row for a guard name to be merged into, and `plan()` skips
+        // the package before any process check. The names really do protect
+        // nothing, but saying "nothing installed" about a package that IS
+        // installed sends the user to fix the wrong thing. **Measured:** 84 of
+        // 126 ids on a14 were sourceless, so this is the ordinary shape of a
+        // winget machine, not a corner.
+        //
+        // Declared as well, on purpose: unlike the typo case, this warning must
+        // NOT be silenced by a declaration. "Not installed yet" cannot explain
+        // an id winget just reported.
+        let mut outcome = ScanOutcome::Scanned(Scan {
+            opaque: vec![Name::new("Tailscale.Tailscale")],
+            ..Scan::default()
+        });
+        let mut guard = BTreeMap::new();
+        guard.insert(
+            Name::new("Tailscale.Tailscale"),
+            vec!["tailscaled".to_string()],
+        );
+        let warnings =
+            apply_guard_overrides(&mut outcome, &guard, &[Name::new("Tailscale.Tailscale")]);
+        assert_eq!(warnings.len(), 1, "was: {warnings:?}");
+        assert!(
+            warnings[0].contains("no source"),
+            "name the real cause: {warnings:?}"
+        );
+        assert!(
+            !warnings[0].contains("nothing installed"),
+            "must not blame an absence that is not the problem: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unscannable_winget_backend_yields_no_warning_and_is_left_as_it_was() {
+        // Was `..._takes_no_guard_names_and_does_not_warn`, which overstated
+        // itself: an `Unscannable` outcome has no `installed` row, so "takes no
+        // guard names" is vacuous -- there is nothing to take them into. What is
+        // pinnable is the pair below: no warning is invented about a key whose
+        // match could not be established, and the outcome itself survives with
+        // its cause intact rather than being replaced by an empty `Scanned`.
+        //
+        // Same rule `main.rs`'s `reconcile_ghosts` and `winget_fence_ids` apply
+        // to the same outcome: a backend that established no facts supports no
+        // conclusions.
         let mut outcome = ScanOutcome::Unscannable("winget exploded".to_string());
         let mut guard = BTreeMap::new();
         guard.insert(Name::new("Tailscale.Typo"), vec!["x".to_string()]);
         assert!(apply_guard_overrides(&mut outcome, &guard, &[]).is_empty());
+        match &outcome {
+            ScanOutcome::Unscannable(why) => assert_eq!(why, "winget exploded"),
+            ScanOutcome::Scanned(s) => {
+                panic!("a failed scan must not be downgraded to an empty one: {s:?}")
+            }
+        }
     }
 
     #[test]

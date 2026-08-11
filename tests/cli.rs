@@ -1319,22 +1319,28 @@ fn apply_prepare_also_sees_the_winget_scan_and_stays_quiet_about_it() {
 
 // -- Phase 5 task 4: `[winget.guard]` merged into the scan ------------------
 //
-// These two exist because nothing else in the suite can go red when the
-// `backend::apply_guard_overrides` call is deleted from a call site.
-// `tests/planner.rs`'s `a_winget_package_is_held_by_a_guard_name_only_pkg_toml_
-// knows` calls that function itself, so it stays green no matter what `main.rs`
-// does; only the real binary can say whether `main.rs` calls it.
+// These three exist because nothing else in the suite can go red when
+// `backend::apply_guard_overrides`, or one of its arguments, is deleted from a
+// call site. `tests/planner.rs`'s `a_winget_package_is_held_by_a_guard_name_
+// only_pkg_toml_knows` calls that function itself, so it stays green no matter
+// what `main.rs` does; only the real binary can say whether `main.rs` calls it,
+// and with what.
 //
 // They assert the WARNING half rather than the merge half, and that is forced
 // rather than chosen: `Fixture::run` hands the spawned process
 // `path_without_winget()`, so `Winget::scan`'s `NotFound` arm returns an empty
 // `Scan` and there is no installed winget package on this machine for a guard
-// name to be merged INTO. An unmatched, undeclared guard key is the one guard
-// behaviour observable through a real run with no winget present -- and it is
-// produced by the same call, at the same point, so deleting that call takes
-// both halves with it. Proving the merge reaches the fence end-to-end needs a
+// name to be merged INTO. What an empty scan still discriminates is which guard
+// keys draw a warning, which is a function of both remaining arguments -- and it
+// is produced by the same call at the same point, so deleting that call takes
+// the merge with it too. Proving the merge reaches the fence end-to-end needs a
 // real winget package and a live process, which is a Windows-machine
 // measurement, not a test.
+//
+// The third argument, `declared`, gets the third test rather than a share of
+// the first two: it is only observable through the ABSENCE of a warning, and an
+// absence is worth nothing without a present warning beside it in the same run
+// to prove the code was reached at all.
 
 #[test]
 fn status_warns_when_a_winget_guard_entry_protects_nothing() {
@@ -1388,6 +1394,67 @@ fn apply_prepare_also_warns_about_a_winget_guard_entry_that_protects_nothing() {
         "apply must say which guard key protects nothing: {stderr}"
     );
     f.assert_nothing_was_touched(before);
+}
+
+#[test]
+fn a_guard_entry_for_a_declared_package_stays_quiet_in_both_commands() {
+    // The third argument of `apply_guard_overrides` -- `&declared.winget.packages`
+    // -- is what separates "you misspelled an id" from "you have not installed
+    // this yet". Replacing it with `&[]` at either call site is silent in the
+    // whole rest of the suite, and its consequence is a warning on EVERY
+    // `status` and EVERY `apply` for a perfectly correct pkg.toml on a machine
+    // where the app is simply not installed yet.
+    //
+    // Both keys are in one fixture on purpose. The declared key can only be
+    // observed by a warning that is ABSENT, and an absent warning proves nothing
+    // on its own -- a run that died before the scan would satisfy it too. The
+    // undeclared key's warning, in the same run, is what rules that out: exactly
+    // one guard line must appear, and it must be the typo's.
+    //
+    // Both commands in one test, for the same reason: the two call sites must be
+    // compared against a byte-identical fixture, so a divergence between them can
+    // only come from the wiring. Which one broke is still named -- every
+    // assertion message carries the argv.
+    let f = Fixture::new(
+        "[scoop]\nbuckets = [\"main\"]\npackages = [\"fzf\"]\n\n\
+         [winget]\npackages = [\"Tailscale.Tailscale\"]\n\n\
+         [winget.guard]\n\
+         \"Tailscale.Tailscale\" = [\"tailscaled\"]\n\
+         \"Tailscale.Typo\" = [\"tailscaled\"]\n",
+        "{}",
+    );
+
+    for args in [["status"].as_slice(), ["apply", "--prepare"].as_slice()] {
+        let out = f.run(args);
+        let stderr = text(&out.stderr);
+        let guard_lines: Vec<&str> = stderr
+            .lines()
+            .filter(|l| l.contains("[winget.guard]"))
+            .collect();
+
+        // Counted rather than substring-matched: this stays correct if the
+        // message is reworded, and it is what makes the absence assertion below
+        // non-vacuous.
+        assert_eq!(
+            guard_lines.len(),
+            1,
+            "{args:?}: exactly one guard warning -- the typo's, not the declared \
+             package's. stderr: {stderr}"
+        );
+        assert!(
+            guard_lines[0].contains("Tailscale.Typo"),
+            "{args:?}: the one warning must be about the undeclared key: {stderr}"
+        );
+        // Belt and braces on the line above: `Tailscale.Typo` and
+        // `Tailscale.Tailscale` are different strings, so a line naming the
+        // declared id could not be the one counted -- but a future message that
+        // named both ids at once would slip past the count alone.
+        assert!(
+            !guard_lines[0].contains("Tailscale.Tailscale"),
+            "{args:?}: a declared package that is merely not installed yet must \
+             draw no warning: {stderr}"
+        );
+    }
 }
 
 #[test]

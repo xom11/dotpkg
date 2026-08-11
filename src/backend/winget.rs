@@ -422,17 +422,20 @@ pub(crate) fn running_ids(
 /// Two things narrow that gap, neither of them here. `running_ids` catches the
 /// **portable** subset by path regardless of what the process is called -- 4 of
 /// 36 installed ids on a14, so a minority -- and a declared `[winget.guard]`
-/// entry covers the rest: since Phase 5 Task 4,
+/// entry is the only route open to the rest: since Phase 5 Task 4,
 /// `backend::apply_guard_overrides` appends that table's names to the very
 /// `bins` this function filled, in a second pass over the finished `Scan`.
 /// **Deliberately not here:** this is a pure function of winget's own `list`
 /// output -- `tests/winget_scan.rs` drives it with rows and nothing else -- and
 /// taking a `Config` would end that.
 ///
-/// Whether a declared entry covers the right process is the user's claim rather
-/// than a property of this code. What is **measured**
-/// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §2) is only
-/// that three real ids run processes no rule here could have derived.
+/// **A route open is not a gap closed, and how much of the gap is covered is
+/// not a property of this code at all** -- it is whatever the user wrote, for
+/// the packages the user thought to write it for. An empty `[winget.guard]`
+/// leaves the gap exactly as wide as this comment's first half describes. What
+/// is **measured** (`docs/measurements-2026-08-11-phase5-guard-unmanaged-
+/// retry.md` §2) is only that three real ids run processes no rule here could
+/// have derived, which is why the route exists.
 pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
     for row in rows {

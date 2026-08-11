@@ -227,9 +227,11 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
 /// non-Windows platform. `running_ids` is a no-op on an empty root list, so
 /// nothing needs a `cfg`.
 ///
-/// **Structural:** nothing calls this yet. Wiring it into the scan/guard path
-/// is a later task in this same plan; until then this and `running_ids` are
-/// unreachable from anything but their own tests, hence the `allow`s.
+/// **Structural:** nothing calls this yet, not even a test -- `grep -rn
+/// "package_roots" src/ tests/` finds only this definition and the doc
+/// comment on `running_ids` that names it. Wiring it into the scan/guard path
+/// is a later task in this same plan; the `allow` below is temporary until
+/// then.
 #[allow(dead_code)]
 pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -278,8 +280,10 @@ pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
 /// no suffix is accepted too, which is **reasoned, not measured** -- all 5
 /// observed directories carry a suffix.
 ///
-/// **Structural:** see `package_roots`'s doc comment for why this carries the
-/// same `allow(dead_code)` -- nothing calls this until a later task.
+/// **Structural:** unlike `package_roots`, this function is called -- but
+/// only by its own tests in this module; nothing outside `#[cfg(test)]` calls
+/// it yet. Wiring it into the scan/guard path is a later task in this same
+/// plan; the `allow` below is temporary until then.
 #[allow(dead_code)]
 pub(crate) fn running_ids(
     roots: &[std::path::PathBuf],
@@ -292,7 +296,14 @@ pub(crate) fn running_ids(
 
     let mut out = std::collections::BTreeSet::new();
     for root in roots {
-        let prefix = format!("{}/", fold(root));
+        // `trim_end_matches` makes a root with or without its own trailing
+        // separator equivalent. Without it, a root already ending in `/`
+        // would fold to e.g. `c:/root/packages/`, the appended `/` below
+        // would double it to `.../packages//`, and `strip_prefix` would then
+        // match no real process path -- silently disabling this function for
+        // every process under that root, which is the dangerous failure
+        // direction this function exists to avoid.
+        let prefix = format!("{}/", fold(root).trim_end_matches('/'));
         for p in procs {
             // A process whose path cannot be read is `names`' job, not this
             // function's: 22 of 223 on a14.
@@ -1141,6 +1152,32 @@ mod tests {
         // process ran from under WinGet\Packages, and this is its real path.
         let roots = vec![PathBuf::from(
             r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages",
+        )];
+        let procs = vec![Process {
+            name: "vkey".to_string(),
+            exe: Some(PathBuf::from(
+                r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages\PhatMT97.VKey_Microsoft.Winget.Source_8wekyb3d8bbwe\VKey.exe",
+            )),
+        }];
+        let scanned = vec![Name::new("PhatMT97.VKey")];
+        assert_eq!(
+            running_ids(&roots, &procs, &scanned),
+            BTreeSet::from([Name::new("PhatMT97.VKey")])
+        );
+    }
+
+    #[test]
+    fn running_ids_treats_a_root_with_a_trailing_separator_the_same_as_without() {
+        // Same fixture as the test above, except the caller's root already
+        // ends in a separator. Structural: `package_roots()` never produces
+        // one (it builds paths with `.join()`), so nothing in this crate hits
+        // this today -- but `running_ids` is a general-purpose pure function
+        // a later task wires up, and its next caller is not obliged to know
+        // that. Before the fix this went the dangerous direction: the
+        // trailing `\` doubled the appended separator, `strip_prefix` matched
+        // no real path, and the set came back empty.
+        let roots = vec![PathBuf::from(
+            r"C:\Users\kln\AppData\Local\Microsoft\WinGet\Packages\",
         )];
         let procs = vec![Process {
             name: "vkey".to_string(),

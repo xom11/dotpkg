@@ -597,6 +597,43 @@ nobody checks.
   commit>` empty, and the full suite re-run at 598 passed / 0 failed / 14 lines.
   No lasting effect — recorded because a reviewer that modifies the tree is
   exactly what must not be taken on faith.
+- **The `file:line` citation convention failed the same way twice on this one
+  branch, and both times the citation was correct when written.** *Structural*,
+  not a carelessness finding: a citation of this shape is a claim about the
+  Nth line of a file, and any later commit that inserts a line above the target
+  changes what that claim points at without touching the sentence making it —
+  nothing in the build can notice, because the sentence is still grammatical
+  and the line number is still a number.
+  - **Instance 1** — *measured* (`git log -S`, `git diff --numstat`). Task 5's
+    `5c4894c` added `Plan::unmanaged_count`, shifting `src/plan.rs` by +17 lines
+    and `tests/cli.rs` by +20. That falsified five citations that were correct
+    when written: `backend::mod.rs`'s `running_set` and `apply_guard_overrides`,
+    each citing `plan.rs:414`/`:462` and `plan.rs:345` (`running_set` written by
+    Task 2's `db1c50f`; `apply_guard_overrides` by Task 4's `6cbdfa6`), and
+    `apply::sample_fence`'s citation of `tests/cli.rs:980` (also Task 2's
+    `01df082`). Caught by the whole-branch review's fix wave (`2a35df2`); see
+    "Thirteen `file:line` citations corrected inside the shipped `.rs` files"
+    above for the full table.
+  - **Instance 2** — *measured* (content read against `6b2211e`). Task 9b's
+    `ee46172` (the `package_roots` split) added +90/-2 lines to
+    `src/backend/winget.rs` — **two commits after** that same whole-branch
+    review's own re-sweep had just certified all 26 live citation numbers as
+    resolving correctly. It falsified two of those 26:
+    `src/backend/winget_exec.rs:154`'s citation of `resolve_latest`'s and
+    `resolve_installed`'s "no `--exact`" reasoning moved from `:867`/`:956` to
+    `:899`/`:988`. Task 9c found and recorded the drift (see "And then the class
+    recurred" above) but left it unfixed by design, since that task's scope was
+    documentation only; corrected in the `.rs` file by Task 9d, which also
+    re-swept all 21 `file:line` citing sites in `src/` against this tree by
+    content and found no third instance.
+  - **What a reader should conclude.** A citation sweep is evidence about the
+    tree it ran on and about nothing that ships after it — Instance 2 is the
+    proof, since it falsified two citations a sweep had certified two commits
+    earlier. Given the convention as it stands, there are exactly two ways to
+    keep a `file:line` citation from going stale unseen: run the sweep as the
+    last edit before the file ships, or do not put a line number in the
+    citation at all. This branch did neither consistently, on the same file,
+    twice, and paid for it both times.
 
 ### Five in Task 9's own verification work, all the controller's
 

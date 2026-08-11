@@ -550,10 +550,15 @@ difference set was identical across all three: two `#[cfg(unix)]` tests
 absent on Windows, and the one `#[cfg(windows)]` `#[ignore]`d elevated-only
 test absent on macOS, invoked by name and passing every time. Zero
 discrepancies beyond those three predicted `cfg` exclusions, on any run.
-(This file's own count has since grown to 588 -- see "macOS suite" above --
-from three tests the post-merge audit's remediation added after Run #3;
-none is `#[cfg(windows)]`-gated, but none has been run on Windows either, so
-the 583/585 pairing above is Run #3's tree, not this one.)
+- **Run #4**, on the post-audit tree (`a9a6637`, the tree this file describes):
+  **586 passed, 0 failed, 1 ignored**, against a macOS count of **588**. Same
+  name-by-name method, and the same three-name difference set as every run
+  before it.
+
+The sentence that stood here said the 588-test tree "has never been run on
+Windows". It was written between Run #3 and Run #4 and stopped being true the
+moment Run #4 finished -- this file's own named defect, committed inside the
+paragraph correcting an earlier instance of it.
 
 A dogfood on a14 completed in three stages, machine restored byte-identical
 afterwards (`winget list`'s hash matched before and after): a fresh install

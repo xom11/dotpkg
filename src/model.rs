@@ -452,9 +452,14 @@ mod tests {
 
     #[test]
     fn covers_any_sees_a_guard_name_that_covers_name_cannot() {
-        // `covers_name` is dirs-or-names only. For a winget package `dirs` can
-        // never contain the id (it is filled from the scoop root alone) and the
-        // id itself is never a process name, so the mid-run re-sampler was
+        // `covers_name` is dirs-or-names only, and what this test relies on is
+        // that it has no `bins` half at all. This fixture's `dirs` is empty, and
+        // `Brave.Brave` could not be in it in production either: `dirs` does
+        // carry winget ids since Phase 5 (`backend::winget::running_ids`), but
+        // only for a `portable` install with a package directory, and Brave is
+        // measured to be an EXE/MSI package with neither
+        // (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §3).
+        // The id itself is never a process name, so the mid-run re-sampler was
         // 0-of-36 even after `bins` was populated for the planner.
         let r = Running::new(BTreeSet::from(["brave".to_string()]), BTreeSet::new());
         let id = Name::new("Brave.Brave");

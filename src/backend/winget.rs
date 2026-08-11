@@ -1505,9 +1505,10 @@ mod tests {
 
     #[test]
     fn update_source_retries_once_on_the_measured_contention_failure() {
-        // Measured (measurements-2026-08-11 §5): `source update --name winget`
-        // exited 0 of 10 times alone and 3 of 10 with another winget process
-        // alive, every failure 0x8A150001 in 60-72 ms with empty stdout. The
+        // Measured (`docs/measurements-2026-08-11-phase5-guard-unmanaged-
+        // retry.md` §5): `source update --name winget` exited nonzero 0 of 10
+        // times run alone and 3 of 10 with another winget process alive, every
+        // failure 0x8A150001 in 60-72 ms with empty stdout. The
         // consequence today is not a failed run -- update.rs downgrades the
         // Err to a warning -- it is that `dotpkg update` resolves `latest`
         // against an index it failed to refresh, 3 times in 10, and only warns.

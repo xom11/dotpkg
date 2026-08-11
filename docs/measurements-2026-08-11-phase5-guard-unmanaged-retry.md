@@ -53,9 +53,18 @@ and not any suffix of it. `Scoop::running_apps` catches it because it strips
 project exists to avoid is defended, today, by exactly one signal, and winget
 does not have that signal.
 
-The 22 unreadable paths are the known blind spot `src/backend/scoop.rs:212-214`
-already states: "an elevated process reports no `exe` and is caught only by
-name". Measured here rather than assumed.
+The 22 unreadable paths are the known blind spot `Scoop::running_apps`' own doc
+comment already states — `src/backend/scoop.rs:181-182`: "a process at a higher
+integrity level reports no path at all, and that is exactly the case — an
+elevated kanata — where names still work". Measured here rather than assumed.
+
+*Pointer corrected in place by Phase 5 Task 8.* This section originally cited
+`src/backend/scoop.rs:212-214` for "an elevated process reports no `exe` and is
+caught only by name", which was **correct against `1d633c6`**: that sentence lived
+in `Scoop::running_set`'s doc comment, and Phase 5 Task 2 deleted that function
+when `backend::running_set` became the one fence producer. So this phase broke its
+own document's pointer. The claim is unchanged and still stated in the same file;
+only the surviving statement of it moved.
 
 ## 2. What the guard catches today: 3 of 36
 

@@ -46,10 +46,17 @@ Neither changes what dotpkg *does*.
 
 The second is listed second because a `pkg.toml` that does not use it behaves
 identically — but it is a schema change, not a new command, and a reader
-scanning for "what moved" needs both. `docs/phase4b-notes.md`'s own parked
-finding was that its heading announced "the one user-visible behaviour change"
-while the same wave changed the consent prompt for every scoop run; naming both
-halves here is that correction applied forward rather than repeated.
+scanning for "what moved" needs both.
+
+The precedent: Phase 4b's **ledger** parked a finding that
+`docs/phase4b-notes.md`'s heading then read "The one user-visible behaviour change
+that is not an addition" while the same wave also changed the consent prompt's
+wording for every scoop run with a replacement, and changed scoop's ghost
+reconciliation. The heading was fixed — that file has said "two" since `24ba0d6`,
+"Say what status actually tolerates, and stop calling two changes one", the commit
+that closed the finding — but the scoop-side change the finding named is still
+absent from the two it lists, so what was hidden is the same shape as what this
+phase had to disclose: the scoop half of a change measured on winget.
 
 #### 1. `status` and `apply` collapse `Unmanaged` to one line per backend — for BOTH backends
 
@@ -367,13 +374,29 @@ the same PID the phase brief recorded.
 - The retry lives behind `update_source_with(Duration)`, so the test passes
   `Duration::ZERO` and the suite does not sleep; `update_source()` supplies the
   real delay.
-- `INTERNAL_ERROR` is cross-checked against its hex form
-  (`INTERNAL_ERROR as u32 == 0x8A150001`) in the same test as the other five
-  constants — the defect class `NO_AVAILABLE_UPGRADE` already fell into, where a
-  constant existed exactly once in the tree with no test pinning its value.
-- The text-level round-trip guard needed no change: it compares parsed `Config`
-  values, so a new field is covered by construction, and nothing in the tool ever
-  writes `[winget.guard]`.
+- `INTERNAL_ERROR`'s decimal value is cross-checked against the hex form recorded
+  beside its definition (`assert_eq!(INTERNAL_ERROR as u32, 0x8A150001)`), in a
+  test of its own: `the_internal_error_codes_decimal_and_hex_forms_still_agree`
+  (`winget.rs:1497-1504`). The six exit-code constants are pinned across **three**
+  such tests, not one — two in `winget.rs:1479-1494`, this one, and three in
+  `winget_exec.rs:468-470` — so the value is pinned but the constants are not
+  checked together. That matters because the defect class here is a sign flip on a
+  constant's own definition, which every test that builds its `CmdOut` from the
+  constant flips along with it; only the hex cross-check catches it, and only for
+  the constants a cross-check actually names.
+- **Neither `pkg.toml`-editing round-trip guard compares the new field, and the
+  design said one of them did.** `verify_round_trip` (`src/config_edit.rs:117-133`)
+  compares `after.scoop.buckets`, `after.scoop.opts`, `after.winget.packages` and
+  scoop's packages; `verify_round_trip_winget` (`:195-209`) compares
+  `after.scoop == before.scoop` and winget's packages. **Neither reads
+  `after.winget.guard`**, so a `[winget.guard]` table one of those editors dropped
+  or mangled would pass both silently. What makes that harmless *today* is not the
+  guard — it is the second half of the claim: nothing in the tool ever writes
+  `[winget.guard]`. The `Config`-comparing guards are the **semantic** halves
+  (`config_edit.rs:110-116` says so); the text-level guard is
+  `no_comment_was_lost`, which compares comment multisets and never looks at a
+  field at all. Extending one of the semantic guards to cover `guard` is on the
+  still-open list below.
 
 **Reasoned only, and labelled as such at the code that depends on it:**
 
@@ -513,8 +536,21 @@ nobody checks.
     `NO_APPLICATIONS_FOUND` arm instead of `version_liveness`; a report crediting
     the brief with a test-count note that came from the dispatch message, and
     with a citation of *this* file, which no brief contained because Task 8
-    creates it; and a report citing `main.rs:610` where `plan_to_steps` is at
-    `:621`. Each was resolved by content rather than by line number.
+    creates it; and a report citing `main.rs:610` for the `plan_to_steps` call,
+    which is at `main.rs:638` on this tree (the ledger recorded `:621`, and by the
+    end of the branch that too had drifted — the fifth instance of the class in
+    one phase). Each was resolved by content rather than by line number.
+  - Task 3's carry-over note named two **files** where the real subject was two
+    **sentences**, and the plan had baked that wording in at Task 1 with no task
+    slated to revisit it. The result was an orphaned inaccuracy: at Task 3's commit
+    `winget.rs:270` said an EXE/MSI winget package is "reachable only through
+    `names` or `[winget.guard]`", which was false while the guard was parsed and
+    merged into nothing, and no document scheduled its fix. Pre-scheduled into
+    Task 4 once a reviewer raised it.
+  - Task 4's dispatch omitted one of the three sentences the controller's own
+    ledger had already listed as needing a rewrite (`rows_to_scan`'s `bins` doc
+    comment, `winget.rs:416-421` at the time). The implementer found it anyway. The
+    omission was the controller's, the catch was not.
 - **A reviewer touched the real working tree.** One re-reviewer disclosed running
   `git checkout <sha> -- src tests` with a stray `--work-tree` flag, which
   briefly modified the working tree before it restored it. Verified
@@ -526,9 +562,12 @@ nobody checks.
 ## Corrections to earlier documents
 
 Recorded here rather than edited in place, matching the precedent set by the 2a,
-2b-2, Phase 3, Phase 4 and Phase 4b designs. The one exception is this phase's
-own measurement document, which is corrected in place and says so; see the end of
-this section.
+2b-2, Phase 3, Phase 4 and Phase 4b designs. Two exceptions, both because leaving
+them would ship a falsehood rather than a superseded sentence: this phase's own
+measurement document is corrected **in place** in two sections and says so at each
+(see the end of this section), and the two `.rs` comments this phase falsified
+were **fixed in the code**, since a reader of the tree cannot be warned off a
+false comment by a document.
 
 ### From the design's own corrections section
 
@@ -586,6 +625,44 @@ phase's brief, that overstate. The accurate claim is: **`--show-unmanaged`
 restores every line the collapse removed, and the summary gains one clause that
 no run had before.**
 
+### Two `.rs` comments this phase falsified, both corrected here
+
+Recorded rather than left, because a false comment in the shipped tree is the one
+kind of stale sentence a reader cannot be warned about from a document.
+
+- **`src/model.rs`, in `covers_any_sees_a_guard_name_that_covers_name_cannot`:**
+  *"For a winget package `dirs` can never contain the id (it is filled from the
+  scoop root alone)."* Written in Phase 4b, true then, and **falsified by this
+  phase's own Task 2** — `backend::winget::running_ids` inserts winget ids into
+  `dirs` for the `portable` subset, and the same file's type-level doc comment,
+  which this phase rewrote, now says so. The file contradicted itself. Rewritten
+  to state what the test actually relies on: `covers_name` has no `bins` half,
+  this fixture's `dirs` is empty, and `Brave.Brave` could not be in it in
+  production either, because it is measured (§3) to be an EXE/MSI package with no
+  package directory.
+- **`src/backend/winget.rs`, in
+  `update_source_retries_once_on_the_measured_contention_failure`:** *"`source
+  update --name winget` exited 0 of 10 times alone and 3 of 10 with another winget
+  process alive."* Read literally that inverts the measurement — `0` is winget's
+  success code, and what was measured is **nonzero** 0 of 10 and 3 of 10. Written
+  by this phase (Task 6). Rewritten to the same file's authoritative phrasing at
+  `INTERNAL_ERROR`'s own doc comment ("exited nonzero 0 of 10 times run alone and
+  3 of 10 with one other winget process alive"), so the three copies of this one
+  measurement cannot drift again, and with the full document filename, which also
+  closes one of the shorthand citations listed under "Left open".
+
+### The design attributes 105 invocations to one argv
+
+`docs/specs/2026-08-11-phase5-guard-unmanaged-retry-design.md:85-87` reads *"the
+reader argv `version_liveness` uses returned **0 nonzero exits in 105
+invocations**"*, and the Scope table at `:20` compresses it further to "0 of 105".
+**Twenty of those 105 are `list -e --id <id>`**, which is `list_one_argv`'s shape,
+not `version_liveness`'s. This is the same defect the Task 7 review caught in two
+code comments — the code now states the 85 / 20 split correctly at all three sites
+that mention it — and it went unrecorded against the design that seeded it. The
+measurement document itself is not wrong: §5's table lists the argvs separately
+and only totals them in a `| | | **105** | **0** |` row.
+
 ### Nine historical `docs/` sentences this phase falsifies
 
 Found by Task 2's sweep and carried here rather than edited: these documents keep
@@ -638,7 +715,7 @@ from reading, not from a count.
    the change as pending. Correct as forward-looking documents; listed only so
    the sweep is provably complete.
 
-### One correction made in place, in this phase's own measurement document
+### Two corrections made in place, in this phase's own measurement document
 
 **§3 recorded the two machine-scope `Links` directories as absent but never said
 `%ProgramFiles%\WinGet\Packages` had been probed.** It was, and it is absent —
@@ -651,20 +728,31 @@ document was fixed rather than the comment weakened. Corrected in place, not by
 an entry above, because it is this phase's own document and the gap is the
 measurer's.
 
+**§1 cited a sentence this phase then deleted.** It pointed at
+`src/backend/scoop.rs:212-214` for "an elevated process reports no `exe` and is
+caught only by name", which was **correct against `1d633c6`** — that sentence lived
+in `Scoop::running_set`'s doc comment, and Task 2 deleted that function when
+`backend::running_set` became the one fence producer. So the phase broke its own
+document's pointer. §1 now cites the surviving statement of the same claim,
+`Scoop::running_apps`' doc comment at `scoop.rs:181-182`, with the same one-line
+justification recorded beside it. Same treatment as §3, for the same reason: a
+citation that resolves to nothing is not a superseded sentence, it is a dead one.
+
 ## Verification
 
 ### macOS suite
 
-**631 passed, 0 failed, 0 ignored**, across **14** `test result:` lines
+`cargo test --no-fail-fast`, measured on the tree this file describes: **631
+passed, 0 failed, 0 ignored**, across **14** `test result:` lines
 (`unittests src/lib.rs` 304, `unittests src/main.rs` 14, the eleven
-`tests/*.rs` binaries, and `Doc-tests dotpkg` 0). Measured by Task 7's completion
-gate on `4a70826`, the tree this file is written against; no `.rs` file has
-changed since, because this task changed only documentation. Base `main` at
-`1d633c6` was 588, so the phase adds 43 tests.
+`tests/*.rs` binaries, and `Doc-tests dotpkg` 0). Same total Task 7's completion
+gate recorded at `4a70826`; the only code this task touched is two comments, one
+of them inside a test body. Base `main` at `1d633c6` was 588, so the phase adds 43
+tests.
 
-Measured by me now, on the commit that adds this file:
+Also measured now:
 
-- `cargo fmt --check` — clean, no output.
+- `cargo fmt --check` — exit 0, no output.
 - `cargo clippy --all-targets -- -D warnings` — exit 0, zero warnings.
 
 ### Windows target, cross-checked from macOS
@@ -752,7 +840,8 @@ triages whatever remains.
   drop the branch.
 - **The `opaque` warning branch and the guard-merge half have unit coverage
   only**, for the structural reason above (`tests/cli.rs` strips winget from
-  `PATH`). The dogfood exercises both immediately.
+  `PATH`). Task 9's dogfood is the first thing that would exercise either on real
+  hardware; nothing has yet.
 - **`package_roots()` has no direct test anywhere.** A swap of its two
   environment-variable names, or an extra `Microsoft` segment on the
   machine-scope branch, would pass every test in the file; the asymmetry between
@@ -771,12 +860,13 @@ triages whatever remains.
   reported, not fixed)`, observed live. **Pre-existing** — verified byte-identical
   at `main` (`1d633c6`), untouched by this phase, and in the `~` line rather than
   the `?` collapse this phase changed.
-- **Four citations in `winget.rs` use the shorthand `measurements-2026-08-11 §N`
-  with no filename** — `:907`, `:1322`, `:1508`, `:1571` on this tree. Not
-  ellipses and not factual errors, but inconsistent with the now-fully-named
-  citations in the same file. (The ledger recorded one of them at `:1477`; that
-  line number had already drifted by the end of the branch, which is its own
-  small instance of the class this phase kept fixing.)
+- **Three citations in `winget.rs` still use the shorthand
+  `measurements-2026-08-11 §N` with no filename** — `:907`, `:1322`, `:1572` on
+  this tree. Not ellipses and not factual errors, but inconsistent with the
+  now-fully-named citations in the same file. A fourth, at the retry test, was
+  named in full by this task's own comment fix. (The ledger recorded one of them at
+  `:1477`; that line number had already drifted by the end of the branch, which is
+  its own small instance of the class this phase kept fixing.)
 - **`winget.rs:1077-1088` reads "P2 S2's 40, P2 S4's 15, and P7's 30 against a
   continuously running `source update`"**, which can be read as putting S4's 15
   under the continuous loop too. Only P7's 30 were continuous; S4's 15 were
@@ -789,9 +879,10 @@ triages whatever remains.
 
 ## Still open
 
-Renumbered from `docs/phase4b-notes.md`'s list, with each item's status stated
-against it. Items 2, 9 and 11 are the three this phase rewrote; 10 is the one it
-deliberately did not close.
+Items 1-15 are `docs/phase4b-notes.md`'s list renumbered one for one, with each
+item's status stated against it: 2, 9 and 11 are the three this phase rewrote, 10
+is the one it deliberately did not close, and the rest are unchanged. Item 16 is
+new in this phase.
 
 1. **Downgrading a winget package.** *Decided, not deferred.* Unchanged from
    Phase 4b: measured, `install --version <older>` cannot do it, and the
@@ -874,6 +965,15 @@ deliberately did not close.
     session with **no `runas` at all** is still unmeasured. `elevated()` should
     answer `Some(false)` from `TokenIsElevated` alone and never consult
     `CheckTokenMembership`, and nobody has watched it do so.
+16. **Neither `pkg.toml`-editing round-trip guard covers `[winget.guard]`** — new
+    in this phase, and a **future-only** risk. `verify_round_trip` and
+    `verify_round_trip_winget` compare the sections `adopt`'s two editors are
+    allowed to touch and never read `after.winget.guard`, so a dropped or mangled
+    guard table would pass both. Harmless today for one reason only, and it is not
+    the guard: nothing in the tool writes `[winget.guard]` at all. It becomes real
+    the moment any editor does — an `add` that writes the table, or a rewrite of
+    `add_*_package` that touches more of the document than it means to. Structural,
+    and the cheap fix is one clause in each guard rather than a new test.
 
 ### Inherited verification debt, carried unchanged
 

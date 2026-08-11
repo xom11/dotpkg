@@ -33,6 +33,14 @@ fn bucket_repo(
     let dir = scoop_root.join("buckets").join(bucket);
     fs::create_dir_all(dir.join("bucket")).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
+    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
+    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
+    // background maintenance on this temp repo too, preemptively, so it
+    // cannot race a test here the way it was *measured* racing
+    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
+    // `cargo mutants` run over a write git made, not dotpkg.
+    git(&dir, &["config", "gc.auto", "0"]);
+    git(&dir, &["config", "maintenance.auto", "0"]);
     let mut shas = Vec::new();
     for v in versions {
         // Escaped, because the path-escape tests below pin a version that is
@@ -237,6 +245,14 @@ fn two_commits_of_one_version_stage_to_different_paths() {
     let dir = root.path().join("buckets").join("main");
     fs::create_dir_all(dir.join("bucket")).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
+    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
+    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
+    // background maintenance on this temp repo too, preemptively, so it
+    // cannot race a test here the way it was *measured* racing
+    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
+    // `cargo mutants` run over a write git made, not dotpkg.
+    git(&dir, &["config", "gc.auto", "0"]);
+    git(&dir, &["config", "maintenance.auto", "0"]);
     git(&dir, &["config", "user.email", "t@example.invalid"]);
     git(&dir, &["config", "user.name", "t"]);
 
@@ -311,6 +327,14 @@ fn a_manifest_absent_at_the_pinned_commit_does_not_fall_back_to_the_working_tree
     let dir = root.path().join("buckets").join("main");
     fs::create_dir_all(dir.join("bucket")).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
+    // Same fix as `tests/cli.rs`'s `write_lock_and_bucket_for` and
+    // `tests/common/mod.rs`'s `Fixture::bucket`: disable git's own
+    // background maintenance on this temp repo too, preemptively, so it
+    // cannot race a test here the way it was *measured* racing
+    // `assert_nothing_was_touched` in `tests/cli.rs` and abort a
+    // `cargo mutants` run over a write git made, not dotpkg.
+    git(&dir, &["config", "gc.auto", "0"]);
+    git(&dir, &["config", "maintenance.auto", "0"]);
 
     fs::write(
         dir.join("bucket").join("other.json"),

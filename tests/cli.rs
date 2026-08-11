@@ -147,6 +147,26 @@ impl Fixture {
             text(&out.stdout)
         };
         git(&["init", "-q", "-b", "main"]);
+        // *Measured* 2026-08-11: a `cargo mutants` baseline run aborted the
+        // entire run ("cargo test failed in an unmutated tree, so no mutants
+        // were tested") because `apply_prepare_also_sees_the_winget_scan_
+        // and_stays_quiet_about_it` panicked at `assert_nothing_was_touched`'s
+        // `assert_eq!`. The two `Snapshot`s it compared differed in exactly
+        // one of 58 entries: `buckets/main/.git/objects/maintenance.lock`,
+        // present in the `before` snapshot and gone from the `after` one --
+        // git's own background maintenance racing this fixture between the
+        // two snapshots, not a write `dotpkg` made. This only ever surfaced
+        // under the load and relocation `cargo mutants` imposes, never under
+        // a plain `cargo test` run.
+        // *Reasoned*: `maintenance.auto` (git >= 2.30) is the trigger that
+        // creates that specific lock file; `gc.auto` is the older, separate
+        // auto-gc trigger (its own lock is `gc.pid`, not observed here) but
+        // the same failure shape, so both are disabled rather than just the
+        // one actually caught. Every temp repo this suite creates needs this
+        // -- see also `tests/common/mod.rs`'s `Fixture::bucket` and the
+        // three call sites in `tests/prepare.rs`.
+        git(&["config", "gc.auto", "0"]);
+        git(&["config", "maintenance.auto", "0"]);
         fs::write(
             dir.join("bucket").join(format!("{app}.json")),
             format!(r#"{{"version":"{version}","bin":"tool.exe"}}"#),

@@ -48,6 +48,17 @@ impl Fixture {
         let dir = self.bucket_dir(name);
         std::fs::create_dir_all(dir.join("bucket")).unwrap();
         git(&dir, &["init", "-q", "-b", "main"]);
+        // Disables git's own background maintenance on every temp bucket
+        // repo this fixture creates. *Measured* 2026-08-11 in the sibling
+        // fixture `tests/cli.rs`'s `write_lock_and_bucket_for`: left running,
+        // it once wrote `buckets/main/.git/objects/maintenance.lock` between
+        // two disk snapshots and aborted a whole `cargo mutants` run by
+        // tripping `assert_nothing_was_touched` for a reason that had
+        // nothing to do with dotpkg. See that call site for the full
+        // evidence; `gc.auto` is disabled alongside `maintenance.auto` on
+        // the same reasoning given there.
+        git(&dir, &["config", "gc.auto", "0"]);
+        git(&dir, &["config", "maintenance.auto", "0"]);
         git(&dir, &["config", "user.email", "t@example.invalid"]);
         git(&dir, &["config", "user.name", "t"]);
         git(&dir, &["config", "commit.gpgsign", "false"]);

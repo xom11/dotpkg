@@ -100,11 +100,23 @@ impl Plan {
     /// -- decided, not deferred -- so such an action reaches `execute`, fires
     /// `install --version <pin>`, and comes back as winget's own measured
     /// refusal, every run, forever. Counting it here would put it in the "N
-    /// change(s)" a user says yes to and in the plan `--prepare` calls ready,
-    /// and leave exit 1 as the only thing that ever said otherwise. `render`
-    /// prints the same action as the refusal it will be; the two agree on
-    /// purpose, and `a_winget_downgrade_is_announced_as_a_refusal_and_is_not_
+    /// change(s)" a user says yes to -- and that is exactly what this
+    /// exclusion fixes, no more. `render` prints the same action as the
+    /// refusal it will be; the two agree on purpose, and
+    /// `a_winget_downgrade_is_announced_as_a_refusal_and_is_not_
     /// counted_as_a_change` pins both halves together.
+    ///
+    /// **It does NOT reach `--prepare`'s "ready" table or the consent
+    /// prompt's install count.** This is a false claim the post-merge audit's
+    /// I2 found standing here: both of those are built from `Preparation`,
+    /// not from this `Plan`, and excluding an action from one type's count
+    /// does nothing to the other type's. `Preparation::ready_count` had no
+    /// matching exclusion until I2 -- `--prepare` printed `ready` and exited
+    /// 0 for a package `apply` is guaranteed to fail on, and the prompt
+    /// counted it as an install one line below this exact "0 change(s)".
+    /// `Preparation::refused_winget_downgrade_count` is that exclusion now,
+    /// mirroring this method one layer up; see its own doc comment for why
+    /// it is a second method rather than a change to `ready_count` itself.
     ///
     /// Matched on the action's own `backend` rather than on any version
     /// comparison: `plan::is_older` stays cosmetic, and the step is still built
@@ -546,21 +558,32 @@ pub fn plan(
 /// is not purely numeric. Deliberately not semver: scoop versions include
 /// shapes like `26.01` and `2026.07.15.08.55` that semver rejects.
 ///
-/// **Its result is load-bearing only for the arrow `status` prints.** The
-/// decision to change a package is made by `cur.version == want` above; this
-/// function only picks `Upgrade` vs `Downgrade` for the display. So its edge
-/// cases are cosmetic today — but they are not the edge cases this comment
-/// used to claim. `parts` keeps **every** numeric run, so `1.0.0-rc1` reduces
-/// to `[1,0,0,1]`, not `[1,0,0]`: a prerelease sorts *after* its own release,
-/// and the displayed arrow is therefore inverted for suffixed versions.
+/// **This picks `Upgrade` vs `Downgrade`, and that stopped being "just the
+/// arrow" inside this branch.** The decision to change a package at all is
+/// still made by `cur.version == want` above -- this function only decides
+/// which of the two directions it is. But `Plan::change_count` now excludes
+/// `Action::Downgrade` for a winget package from the "N change(s)" a user
+/// says yes to, and `Plan::refused_downgrade_count` reports it separately --
+/// both gate directly on the variant this function chooses. A wrong call
+/// here no longer only points an arrow the wrong way; it moves a package
+/// between "will change" and "will be refused" in the two numbers a user
+/// reads before consenting.
+///
+/// `parts` keeps **every** numeric run, so `1.0.0-rc1` reduces to
+/// `[1,0,0,1]`, not `[1,0,0]`: a prerelease sorts *after* its own release, so
+/// `is_older("1.0.0-rc1", "1.0.0")` is `false` and a machine on the
+/// prerelease is classified `Downgrade` against a pin of the release.
 /// `tests/planner.rs` pins this as a fact rather than leaving it as a claim.
 ///
-/// That stops being true the moment anything *gates* on the distinction: an
-/// `apply` that refuses downgrades without `--allow-downgrade`, a policy that
-/// skips them, a report that counts them separately. Whoever writes that is
-/// promoting this function from cosmetic to load-bearing and owes it a real
-/// version comparison — pre-release ordering, non-numeric suffixes, and the
-/// `pa.is_empty()` string fallback all become answers a user can be hurt by.
+/// **The residual, stated rather than hidden:** for a winget package, that
+/// misclassification is announced as the refusal it will not turn out to be
+/// (`render.rs`'s own doc comment on its `Action::Downgrade` arm) --
+/// `execute` still fires `install --version <pin>`, winget does not see a
+/// downgrade either, and the package is upgraded anyway. Safe direction (the
+/// tool acts where it said it would not, never the reverse), but it is a real
+/// residual now, not a hypothetical one: a real version comparison --
+/// pre-release ordering, non-numeric suffixes, and the `pa.is_empty()` string
+/// fallback -- is what would close it rather than merely disclose it.
 fn is_older(a: &str, b: &str) -> bool {
     let parts = |s: &str| -> Vec<u64> {
         s.split(|c: char| !c.is_ascii_digit())

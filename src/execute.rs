@@ -421,9 +421,12 @@ fn run_scoop_step(
 /// function reads `out.code` only to *disambiguate* two rescan answers that
 /// would otherwise be identical, and never to decide success on its own.
 ///
-/// **`touched` is `false` on all but two of the failure paths here, and the
-/// reasons are of two different kinds. Which is which matters, because only
-/// one of them is a measurement.**
+/// **`touched` is `false` on 7 of the 11 failure paths here, and the reasons
+/// are of two different kinds. Which is which matters, because only one of
+/// them is a measurement.** (Recounted for the post-merge audit's M2: this
+/// comment used to say "all but two" and "the two `touched: true` paths" --
+/// stale counts in the one comment whose entire subject is which paths are
+/// touched.)
 ///
 /// *Structural, not measured* -- the two `Err(e)` arms on `m.set`/`m.remove`
 /// themselves. `RealWingetMutator::run` returns `Err` only when the process
@@ -432,28 +435,35 @@ fn run_scoop_step(
 /// is provable from `RealWingetMutator::run`, and no measurement is claimed
 /// for it.
 ///
-/// *Measured* -- the four shapes where winget **did** run, reported failure,
+/// *Measured* -- the five shapes where winget **did** run, reported failure,
 /// and left the package exactly where it was.
 /// `docs/measurements-2026-08-10-winget-write-path.md` records which
 /// observation says so for each: `0x8A15002B` declining a downgrade (§2, the
 /// "unchanged" column on every row), `0x8A150017` refusing a
 /// version-mismatched uninstall (§8, "still installed? **yes**"),
 /// `0x8A150014` against a package that was absent to begin with (§8, nothing
-/// there to change), and `0x8A15007D` refusing an elevated uninstall (§5 --
-/// the de-elevated control then uninstalled that same package successfully,
-/// which is what proves the refusal had removed nothing).
+/// there to change), `0x8A15007D` refusing an elevated uninstall (§5 -- the
+/// de-elevated control then uninstalled that same package successfully,
+/// which is what proves the refusal had removed nothing), and `0x8A150017`
+/// again -- this time from `install` itself, against a pin no longer in
+/// winget's index (§6). That fifth one was missing from this list before the
+/// audit found the count short: it is the `Set` arm's own generic `At(v)`
+/// case below, and that arm's own doc comment names it as the gap
+/// `NO_AVAILABLE_UPGRADE`'s ordering cannot close -- this is where such a run
+/// actually lands.
 ///
-/// Those four are per-probe observations of *the package's state*. The
+/// Those five are per-probe observations of *the package's state*. The
 /// document does also hash `winget list` itself, but **aggregate only, never
 /// per failing probe**, so "left `winget list` byte-identical" is not a claim
-/// this comment may make for any of the four: W1's bracket (`:33`) covers all
+/// this comment may make for any of the five: W1's bracket (`:33`) covers all
 /// 12 probes at once, and every one of those 12 targeted an absent package or
 /// a nonexistent version rather than any shape above; W2's (`:39`-`:40`) runs
 /// start-to-cleanup and spans the *successful* installs in between.
 ///
-/// **The two `touched: true` paths** are the mutation having run with its
-/// result unseeable -- see the `Unconfirmable` and rescan-`Err` arms, which
-/// carry the reasoning where it applies.
+/// **The four `touched: true` paths** are the mutation having run with its
+/// result unseeable -- see the `Unconfirmable` and rescan-`Err` arms, in both
+/// the `Set` and `Remove` blocks below, which carry the reasoning where it
+/// applies.
 ///
 /// A winget version change is also **one** call -- `install --version`
 /// performs the upgrade directly -- so unlike `ScoopStep::Replace` there is no

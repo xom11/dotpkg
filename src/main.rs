@@ -196,6 +196,33 @@ fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
         })
 }
 
+/// `count_replaces_and_installs`'s `installs`, corrected for a winget
+/// `Downgrade`: that count is right to include the `WingetStep::Set` a
+/// refused downgrade still builds -- the step really is fired, and winget's
+/// own refusal is genuinely what happens -- but `plan.rs`'s own "N
+/// change(s)" line already excludes that exact package from the count of
+/// changes a user is asked to consent to, and post-merge audit I2 found this
+/// prompt disagreeing with it: "0 change(s)" immediately above "1
+/// installed", about the same package, in one run.
+///
+/// Its own function rather than a fix inside `count_replaces_and_installs`:
+/// that function counts real `Step`s, and by the time a `Step` exists it has
+/// already lost which `Action` built it (a `WingetStep::Set` looks identical
+/// whether it came from an `Install`, an `Upgrade`, or a refused
+/// `Downgrade`). Only `Preparation` -- still in scope at the one call site
+/// that needs this -- still knows which. Lifted out for the same reason
+/// `floor_exit_code` and `unrouted_warning` were: `tests/cli.rs`'s `Fixture`
+/// strips `winget` off `PATH` (`path_without_winget`'s own doc comment), so
+/// no real `--yes` run through the compiled binary can ever reach a winget
+/// liveness check, and this exact disagreement is otherwise unreachable from
+/// that file.
+fn installs_a_user_should_be_asked_about(
+    installs: usize,
+    preparation: &dotpkg::apply::Preparation,
+) -> usize {
+    installs.saturating_sub(preparation.refused_winget_downgrade_count())
+}
+
 /// The one line a user reads before saying yes.
 ///
 /// A function, not a `format!` in the `apply` arm, for the reason
@@ -557,7 +584,20 @@ fn main() -> Result<()> {
                 // genuinely changed nothing, so what is left to distinguish
                 // is 0 (fully realised, nothing outstanding) from 1
                 // (something is), and an outstanding skip is the latter.
-                if !preparation.is_ok() || !preparation.outstanding_skips().is_empty() {
+                //
+                // A winget `Downgrade`'s `ReadyToSet` is a third way to be
+                // "something is outstanding", and post-merge audit I2 found
+                // it missing here: `is_ok()` stays true for it (that
+                // outcome's own doc comment says why it must -- a refused
+                // downgrade must not block the rest of the run) and it is
+                // not an `outstanding_skips` shape either, so a run whose
+                // only content was one refused downgrade printed `ready`
+                // above and exited 0 -- a scheduled `--prepare` health check
+                // read clean for a package `apply` is guaranteed to fail on.
+                if !preparation.is_ok()
+                    || !preparation.outstanding_skips().is_empty()
+                    || preparation.refused_winget_downgrade_count() > 0
+                {
                     std::process::exit(1);
                 }
                 return Ok(());
@@ -657,6 +697,7 @@ fn main() -> Result<()> {
 
             let removals = steps.iter().filter(|s| s.is_remove()).count();
             let (replacements, installs) = count_replaces_and_installs(&steps);
+            let installs = installs_a_user_should_be_asked_about(installs, &preparation);
             let question = confirm_question(replacements, installs, removals);
             if !yes {
                 let stdin = std::io::stdin();
@@ -997,6 +1038,61 @@ mod tests {
             (1, 2),
             "one scoop replace; one scoop install plus one winget Set are two \
              installs; neither `Remove` moves either count"
+        );
+    }
+
+    #[test]
+    fn installs_a_user_should_be_asked_about_excludes_a_refused_winget_downgrade() {
+        // I2 (post-merge audit): the consent prompt disagreed with the
+        // plan's own "N change(s)" line about the exact same package -- "0
+        // change(s)" immediately above "1 installed", in one run.
+        // `count_replaces_and_installs` counts the `WingetStep::Set` a
+        // refused downgrade still builds, correctly -- the step really is
+        // fired -- so the correction has to live here, where the
+        // `Preparation` that built it is still in scope.
+        let refused = dotpkg::apply::Preparation {
+            prepared: vec![dotpkg::apply::Prepared {
+                action: dotpkg::plan::Action::Downgrade {
+                    backend: WINGET.into(),
+                    name: Name::new("Brave.Brave"),
+                    from: "151.1.93.134".into(),
+                    to: "151.1.93.132".into(),
+                    arch: None,
+                },
+                outcome: dotpkg::apply::Outcome::ReadyToSet {
+                    id: Name::new("Brave.Brave"),
+                    version: "151.1.93.132".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            installs_a_user_should_be_asked_about(1, &refused),
+            0,
+            "a package the plan already announced as a refusal must not be \
+             counted as an install in the prompt the user says yes to"
+        );
+
+        // The counterweight: a genuine winget install must not be zeroed by
+        // this call just because a `Preparation` happens to be non-empty.
+        let genuine = dotpkg::apply::Preparation {
+            prepared: vec![dotpkg::apply::Prepared {
+                action: dotpkg::plan::Action::Install {
+                    backend: WINGET.into(),
+                    name: Name::new("ripgrep"),
+                    version: "14.1.0".into(),
+                    arch: None,
+                },
+                outcome: dotpkg::apply::Outcome::ReadyToSet {
+                    id: Name::new("BurntSushi.ripgrep.MSVC"),
+                    version: "14.1.0".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            installs_a_user_should_be_asked_about(1, &genuine),
+            1,
+            "a real install must not be subtracted just because a \
+             Preparation exists"
         );
     }
 

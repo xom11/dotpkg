@@ -187,14 +187,34 @@ pub fn render_preparation(p: &Preparation) -> String {
     }
     out.push('\n');
     if !p.prepared.is_empty() {
-        out.push_str(&format!(
-            "  {} of {} changes ready, {} failed, {} skipped, {} not locked.\n",
-            p.ready_count(),
-            p.ready_count() + p.failed_count(),
+        // A winget `Downgrade`'s `ReadyToSet` is subtracted out of the
+        // printed "ready" number here even though `Preparation::ready_count`
+        // itself still counts it -- that method's own doc comment says why
+        // it must. This is the number a user actually reads, and it must
+        // agree with the `!` line `prepared_line` just printed for the same
+        // package, not with an internal bookkeeping count meant for a
+        // different question (`main.rs`'s routing-bug check).
+        let refused = p.refused_winget_downgrade_count();
+        let ready = p.ready_count().saturating_sub(refused);
+        let mut summary = format!(
+            "  {} of {} changes ready, {} failed, {} skipped, {} not locked",
+            ready,
+            ready + p.failed_count(),
             p.failed_count(),
             p.skipped_count(),
             p.not_locked_count(),
-        ));
+        );
+        // Its own clause, matching `render(plan)`'s summary for the same
+        // reason that one has it: `ready` above excludes it, and a printed
+        // `!` line accounted for in no number at all would read as "N of N
+        // ready" with a refusal sitting silently inside N.
+        if refused > 0 {
+            summary.push_str(&format!(
+                ", {refused} winget downgrade(s) that will be refused"
+            ));
+        }
+        summary.push_str(".\n");
+        out.push_str(&summary);
     }
     out
 }
@@ -221,7 +241,7 @@ pub fn render_execution(ex: &Execution) -> String {
         let line = match &item.result {
             // `{name:<14} ` -- a literal space after the padded field, the
             // same fix `prepared_line` needed and got at Task 16
-            // (`src/render.rs:229`; see its own doc comment for the
+            // (`src/render.rs:303`; see its own doc comment for the
             // mechanism). This function used the narrower `{name:<13}` with
             // no literal separator, the identical shape that turned into
             // a real, dogfood-found glued-together line at `prepared_line`
@@ -291,9 +311,25 @@ fn prepared_line(item: &Prepared) -> String {
         // (install)" or "1.2.3 -> 1.2.4 (upgrade)" exactly as a scoop
         // `ReadyToFetch` does. What was fetched, staged or merely confirmed is
         // dotpkg's business, not something a user reads a table to learn.
-        Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove | Outcome::ReadyToSet { .. } => {
+        Outcome::ReadyToFetch { .. } | Outcome::ReadyToRemove => {
             ("ready", ready_rest(&item.action))
         }
+        // **A winget `Downgrade`'s `ReadyToSet` is not this table's idea of
+        // ready.** The pin really is live in winget's index -- that is what
+        // the outcome means, and `check_pin_is_live` has no way to know it
+        // is a downgrade, so it must not guess -- but `execute` fires
+        // `install --version <pin>` and winget refuses it, every run,
+        // forever (`Plan::change_count`'s own doc comment). Post-merge audit
+        // I2: this arm used to fall into the `ready` case above and
+        // `--prepare` printed `ready … (downgrade)` and exited 0 for a
+        // package `apply` is guaranteed to fail on. Now says the identical
+        // words `render(plan)`'s own `Action::Downgrade` arm does, not a
+        // paraphrase, so a user reading both tables for one run sees one
+        // sentence, not two.
+        Outcome::ReadyToSet { .. } if matches!(&item.action, Action::Downgrade { backend, .. } if backend == WINGET) => {
+            ("!", refused_downgrade_rest(&item.action))
+        }
+        Outcome::ReadyToSet { .. } => ("ready", ready_rest(&item.action)),
         Outcome::Failed { why } => ("FAILED", why.clone()),
         Outcome::Skipped { why } => ("!", why.clone()),
         Outcome::NotLocked => ("!", "no lock entry -- run `dotpkg update`".to_string()),
@@ -366,6 +402,30 @@ fn ready_rest(action: &Action) -> String {
             )
         }
         Action::Prune { version, .. } => format!("{version:<18}(prune)"),
+        _ => String::new(),
+    }
+}
+
+/// The right-hand side of a winget `Downgrade`'s refusal line in this
+/// table -- deliberately the same words `render(plan)`'s own
+/// `Action::Downgrade` arm uses, not a paraphrase, so a user who reads both
+/// tables for one run sees one sentence about one refusal, not two. Its own
+/// function rather than a shared one, because the two tables are sized
+/// differently (`{:<18}` here, matching `ready_rest`; `{:<24}` there) and a
+/// string shared across both would misalign one of them.
+fn refused_downgrade_rest(action: &Action) -> String {
+    match action {
+        // `{:<18} ` -- a literal space after the padded field, `prepared_line`'s
+        // own convention and for the same reason: `{from} -> {to}` easily
+        // exceeds 18 characters (Brave.Brave's real shape,
+        // `151.1.93.134 -> 151.1.93.132`, is 29), and `{:<N}` inserts no
+        // minimum gap once the value is already that wide -- it would glue
+        // the closing version straight onto `(dotpkg` with nothing between.
+        Action::Downgrade { from, to, arch, .. } => format!(
+            "{:<18} (dotpkg will not downgrade a winget package -- run `dotpkg update`{})",
+            format!("{from} -> {to}"),
+            arch_suffix(arch)
+        ),
         _ => String::new(),
     }
 }
@@ -677,6 +737,85 @@ mod tests {
   2 of 4 changes ready, 2 failed, 1 skipped, 1 not locked.
 ";
         assert_eq!(render_preparation(&p), expected);
+    }
+
+    #[test]
+    fn a_refused_winget_downgrade_is_not_printed_as_ready_by_prepare() {
+        // I2 (post-merge audit): `apply --prepare` printed `ready …
+        // (downgrade)` and exited 0 for a package `apply` is guaranteed to
+        // fail on, every run, forever -- the same shape
+        // `a_winget_downgrade_is_announced_as_a_refusal_and_is_not_counted_
+        // as_a_change` fixed for `render(plan)`, but `render_preparation`
+        // reads a `Preparation` built from `check_pin_is_live`'s
+        // `Outcome::ReadyToSet` (correct: the pin really is live in winget's
+        // index), never from `Plan::change_count`'s exclusion, so fixing the
+        // plan line never touched this table at all.
+        let p = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Downgrade {
+                    backend: WINGET.into(),
+                    name: "Brave.Brave".into(),
+                    from: "151.1.93.134".into(),
+                    to: "151.1.93.132".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToSet {
+                    id: Name::new("Brave.Brave"),
+                    version: "151.1.93.132".into(),
+                },
+            }],
+        };
+        let out = render_preparation(&p);
+        assert!(
+            out.lines().next().is_some_and(|l| l.starts_with("  !")),
+            "a package winget is guaranteed to refuse must not be marked \
+             ready: {out}"
+        );
+        assert!(
+            !out.contains("ready   winget"),
+            "no winget row in this run may be called ready: {out}"
+        );
+        assert!(
+            out.contains("will not downgrade"),
+            "this table must say what render(plan) already says about the \
+             identical action: {out}"
+        );
+        assert!(
+            out.contains("0 of 0 changes ready"),
+            "the summary must agree with the per-row line it just printed, \
+             not count the refusal as one of its own \"ready\" changes: {out}"
+        );
+        assert!(
+            out.contains("1 winget downgrade(s) that will be refused"),
+            "the summary must account for the line it just printed, the \
+             same as render(plan)'s own summary: {out}"
+        );
+
+        // The counterweight: a genuine winget install must still be counted
+        // and printed as ready.
+        let genuine = Preparation {
+            prepared: vec![Prepared {
+                action: Action::Install {
+                    backend: WINGET.into(),
+                    name: "Git.Git".into(),
+                    version: "2.52.0".into(),
+                    arch: None,
+                },
+                outcome: Outcome::ReadyToSet {
+                    id: Name::new("Git.Git"),
+                    version: "2.52.0".into(),
+                },
+            }],
+        };
+        let genuine_out = render_preparation(&genuine);
+        assert!(
+            genuine_out.contains("  ready   winget"),
+            "a real install must stay ready: {genuine_out}"
+        );
+        assert!(
+            genuine_out.contains("1 of 1 changes ready"),
+            "and stay counted: {genuine_out}"
+        );
     }
 
     #[test]
@@ -1319,7 +1458,7 @@ mod tests {
 
     #[test]
     fn a_done_package_alongside_an_untouched_failure_still_says_some_changed() {
-        // render.rs:181's `changed() > 0 || touched() > 0` looked like it
+        // render.rs:286's `changed() > 0 || touched() > 0` looked like it
         // might be an equivalent mutant under `>` -> `<`, reasoning that
         // `touched()` is a superset of `changed()` (the comment above the
         // line argues `touched()` catches cases `changed()` misses). But the
@@ -1330,8 +1469,12 @@ mod tests {
         //
         // This is the case where it does not: one `Done` and one
         // `Failed { touched: false }` (reachable -- `ScoopStep::Remove`'s
-        // uninstall-command-failed arm, `execute.rs:328`, never touches the
-        // machine). `changed() == 1`, `touched() == 0`. The real code's
+        // uninstall-command-failed arm, `execute.rs:383-388`, never touches
+        // the machine -- post-merge audit M1: this citation had drifted to
+        // `:328`, inside a different arm entirely whose `touched` is a
+        // mutable variable that CAN be `true`, a counterexample to this very
+        // sentence; the sentence was right, the line number had rotted).
+        // `changed() == 1`, `touched() == 0`. The real code's
         // `changed() > 0` disjunct is true and prints the "some changed"
         // sentence. The `>` -> `<` mutant compares a `usize` against 0 with
         // `<`, which is always false, so both disjuncts are permanently

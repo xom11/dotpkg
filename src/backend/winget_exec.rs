@@ -442,18 +442,29 @@ mod tests {
     #[test]
     fn the_three_error_codes_decimal_and_hex_forms_still_agree() {
         // Measured (`docs/measurements-2026-08-10-winget-write-path.md`):
-        // each constant's decimal value came off a real a14 exit code, and
-        // the hex in the trailing comment beside its own definition is
-        // winget's `0x8A1500..` spelling of that identical code, read as a
-        // signed `i32`. This is not a restatement of the same number -- it
-        // is the one place anything checks the decimal against the hex
-        // rather than against itself. Every other test in this crate builds
-        // its `CmdOut::code` from the constant, so a sign flip on the
-        // constant's own definition flips every one of those tests right
-        // along with it and the suite stays green; only cross-checking
-        // against the hex recorded beside it catches that. `ALREADY_INSTALLED`
-        // especially: it is documented as unreachable through `set_argv`, so
-        // this is the *only* test that can ever cover it at all.
+        // each constant's decimal value came off a real a14 exit code. The
+        // hex literals below are typed independently in this test -- NOT
+        // read from the trailing `// 0x8A1500..` comment beside each
+        // constant's own definition; a doc comment is not a value Rust code
+        // can inspect at runtime, so no test can literally check "the
+        // decimal against the hex in the trailing comment" (post-merge
+        // audit M6: this comment used to claim exactly that mechanism).
+        // Hand-verified instead, once, that decimal, this test's hex, the
+        // definition's trailing comment and the measurement doc all agree.
+        //
+        // This is still not a restatement of the same number -- it is the
+        // one place anything checks the decimal against an
+        // independently-typed hex rather than against itself. Every other
+        // test in this crate builds its `CmdOut::code` from the constant, so
+        // a sign flip on the constant's own definition flips every one of
+        // those tests right along with it and the suite stays green; only
+        // this catches that. What this does NOT catch: a drift limited to
+        // the trailing comment alone, with the constant and this test's hex
+        // both left untouched -- weaker than the mechanism the old comment
+        // described, and worth saying plainly rather than leaving implied.
+        // `ALREADY_INSTALLED` especially: it is documented as unreachable
+        // through `set_argv`, so this is the *only* test that can ever cover
+        // it at all.
         assert_eq!(NO_AVAILABLE_UPGRADE as u32, 0x8A15002B);
         assert_eq!(ALREADY_INSTALLED as u32, 0x8A150061);
         assert_eq!(CANNOT_UNINSTALL_ELEVATED as u32, 0x8A15007D);

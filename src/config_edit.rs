@@ -402,7 +402,7 @@ python = { arch = "64bit" }   # force an architecture
     // -- the LAYOUT the edit leaves behind -------------------------------
     //
     // Added by the Task 14 mutation run, which found six survivors in the
-    // `multiline` decision (`src/config_edit.rs:49` and `:52`). Every test
+    // `multiline` decision (`src/config_edit.rs:35` and `:38`). Every test
     // above asserts that the result PARSES and that comments survive; none
     // asserted the shape of the text, so the whole `multiline` branch --
     // the reason this function uses `toml_edit` at all rather than

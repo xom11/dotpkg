@@ -375,6 +375,15 @@ impl Preparation {
     /// routing: every ready outcome must become exactly one `Step`, so
     /// `ready_count()` and `steps + held` agreeing is what says no ready
     /// action was silently dropped by a missing `plan_to_steps` arm.
+    ///
+    /// **Deliberately still counts a winget `Downgrade`'s `ReadyToSet`.** The
+    /// pin really is live in winget's index -- `check_pin_is_live` has no way
+    /// to know it is a downgrade, and must not guess -- and `plan_to_steps`
+    /// really does build a `WingetStep::Set` for it and fire it, so excluding
+    /// it here would make this method's own invariant with `plan_to_steps`
+    /// false for exactly this case. The user-facing "ready" number
+    /// `render_preparation` prints subtracts it separately, at the point
+    /// that number is actually built -- see `refused_winget_downgrade_count`.
     pub fn ready_count(&self) -> usize {
         self.prepared
             .iter()
@@ -407,6 +416,41 @@ impl Preparation {
         self.prepared
             .iter()
             .filter(|p| matches!(p.outcome, Outcome::NotLocked))
+            .count()
+    }
+
+    /// Winget downgrades whose pin was confirmed still live in winget's
+    /// index -- so `check_pin_is_live` produced `Outcome::ReadyToSet` for
+    /// them, and `plan_to_steps` will build a `WingetStep::Set` and fire
+    /// `install --version <pin>` -- but that call is winget's own measured
+    /// refusal every time (`Plan::change_count`'s own doc comment), not a
+    /// change going ahead. The post-merge audit's I2: `--prepare` printed
+    /// `ready` for exactly this shape and exited 0, and the consent prompt
+    /// counted it as "1 installed" one line below the plan's own "0
+    /// change(s)" for the same package.
+    ///
+    /// Deliberately gated on `Outcome::ReadyToSet`, not on the action alone:
+    /// a winget `Downgrade` whose liveness check itself failed is already
+    /// `Outcome::Failed` and already correctly counted as a failure, not a
+    /// refusal. Counting it here too would double one package into two
+    /// explanations, and -- at `main.rs`'s one call site that subtracts this
+    /// from an `installs` count built from real `Step`s -- would subtract a
+    /// package that produced no step at all, undercounting an unrelated
+    /// install sharing the run.
+    ///
+    /// Its own method, mirroring `Plan::refused_downgrade_count` one layer
+    /// up, rather than folded into `ready_count`: excluding it there instead
+    /// would make `ready_count`'s own invariant with `plan_to_steps` (every
+    /// ready outcome becomes exactly one step) false for this one case, for
+    /// a number `main.rs` uses to catch a routing bug, not to inform a user.
+    /// See `ready_count`'s own doc comment.
+    pub fn refused_winget_downgrade_count(&self) -> usize {
+        self.prepared
+            .iter()
+            .filter(|p| {
+                matches!(p.outcome, Outcome::ReadyToSet { .. })
+                    && matches!(&p.action, Action::Downgrade { backend, .. } if backend == WINGET)
+            })
             .count()
     }
 
@@ -1118,6 +1162,20 @@ pub fn gate_removals(steps: Vec<Step>, preparation_ok: bool) -> (Vec<Step>, Vec<
 /// them has to be asked anyway, so stopping early would only ever buy time on
 /// a run that is about to refuse, at the price of naming one package when the
 /// operator needs the whole list to know what de-elevating will fix.
+///
+/// **The refusal says "no package was installed, upgraded or removed", not
+/// "nothing has been changed".** Post-merge audit Minor 5: by the time this
+/// runs, `main.rs` has already git-cloned any missing declared bucket (if
+/// `--clone-missing-buckets` was passed) and run `scoop download` for every
+/// scoop step, populating scoop's cache -- both write to the machine outside
+/// dotpkg's staging root. Narrowed rather than moved earlier: moving this
+/// check ahead of that work is a *behaviour* change (this function only knows
+/// which removals are affected from `steps`, which does not exist until
+/// after staging has already happened), where narrowing the sentence only
+/// asks it to stop claiming more than it can honestly claim -- no package
+/// was installed, upgraded or removed, which is true and is also this
+/// sentence's meaning everywhere else it appears (`--prepare`'s identical
+/// line, printed after the identical staging work).
 pub fn refuse_elevated_winget_removal(
     steps: &[Step],
     elevated: Option<bool>,
@@ -1147,7 +1205,7 @@ pub fn refuse_elevated_winget_removal(
          installed for user scope cannot be uninstalled when running with administrator \
          privileges.\" {} removal(s) in this run are affected: {}. The same uninstall was \
          measured to succeed from a session that is not elevated, so re-run `dotpkg \
-         apply` without elevation. Nothing has been changed.",
+         apply` without elevation. No package was installed, upgraded or removed.",
         blocked.len(),
         blocked.join(", ")
     ))
@@ -2330,6 +2388,88 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_winget_downgrade_is_ready_to_set_but_counted_separately() {
+        // I2 (post-merge audit): a winget package installed ahead of its pin
+        // reaches `check_pin_is_live` exactly like an install or an upgrade
+        // does -- the pin really is live in winget's index, so the outcome
+        // really is `ReadyToSet`, and `plan_to_steps` really does build a
+        // `WingetStep::Set` and fire it. dotpkg does not decide the
+        // direction; winget's own refusal is the gate (`Plan::change_count`'s
+        // own doc comment). `refused_winget_downgrade_count` is what a
+        // caller must consult before calling this "ready" to a user --
+        // `ready_count` itself still counts it, deliberately (see that
+        // method's own doc comment).
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        let plan = Plan {
+            actions: vec![Action::Downgrade {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                from: "151.1.93.134".into(),
+                to: "151.1.93.132".into(),
+                arch: None,
+            }],
+        };
+        let prep = prepare(
+            &plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            &FakeWinget::live("151.1.93.132"),
+            stage_dir.path(),
+            &Config::default(),
+        );
+        assert!(
+            matches!(prep.prepared[0].outcome, Outcome::ReadyToSet { .. }),
+            "the pin really is live -- the liveness check cannot know this \
+             is a downgrade, and must not guess: {:?}",
+            prep.prepared[0].outcome
+        );
+        assert_eq!(
+            prep.ready_count(),
+            1,
+            "the invariant with plan_to_steps holds"
+        );
+        assert_eq!(
+            prep.refused_winget_downgrade_count(),
+            1,
+            "but the user-facing count must know it is a refusal"
+        );
+        assert!(
+            prep.is_ok(),
+            "a refused downgrade must not block the rest of the run -- that \
+             would be a behaviour change, not a reporting fix"
+        );
+
+        // The counterweight: a genuine winget install or upgrade must not be
+        // caught by this count.
+        let genuine_plan = Plan {
+            actions: vec![Action::Upgrade {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+                from: "151.1.93.132".into(),
+                to: "151.1.93.134".into(),
+                arch: None,
+            }],
+        };
+        let genuine = prepare(
+            &genuine_plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            &FakeWinget::live("151.1.93.134"),
+            stage_dir.path(),
+            &Config::default(),
+        );
+        assert_eq!(
+            genuine.refused_winget_downgrade_count(),
+            0,
+            "an upgrade must never be counted as a refused downgrade"
+        );
+    }
+
+    #[test]
     fn a_machine_with_no_winget_exe_fails_preparation_instead_of_installing_into_thin_air() {
         // The one hole the capability flip could have opened, closed here.
         // `Winget::scan` answers `CmdError::NotFound` with an empty `Scan`
@@ -3301,7 +3441,7 @@ mod tests {
     #[test]
     fn a_winget_install_and_a_winget_upgrade_produce_no_scoop_step_and_are_reported_as_unrouted() {
         // Mirrors the test above for the other two `backend == SCOOP`
-        // guards (apply.rs:599 and :618): a winget action ready to fetch
+        // guards (apply.rs:834 and :853): a winget action ready to fetch
         // must not fall through into a `ScoopStep::Install` or
         // `ScoopStep::Replace` either.
         let prep = Preparation {

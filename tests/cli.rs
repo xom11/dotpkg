@@ -1308,6 +1308,64 @@ fn show_unmanaged_restores_the_individual_line_that_the_default_run_collapses() 
     );
 }
 
+#[test]
+fn apply_prepare_show_unmanaged_restores_the_individual_line_in_both_of_its_tables() {
+    // Review Important 1: a full `apply` run, and `--prepare` (which prints
+    // the same two tables and then stops), print `render(plan)`'s table AND
+    // `render_preparation`'s table for the same run. Until this fix only the
+    // first respected `--show-unmanaged` -- the second printed every
+    // individual line regardless of the flag, so the default run's hint
+    // ("pass --show-unmanaged to list them") sat two lines above the exact
+    // list it claimed the flag alone would produce. Hardcoding `false` at
+    // the `render_preparation` call site could not have turned any test red
+    // before this one existed -- `grep show_unmanaged tests/` had exactly
+    // one hit, and it only ever ran `status`.
+    let f = Fixture::new("", "{}");
+    f.install_app("stray-tool", "1.0.0");
+
+    let default_out = f.run(&["apply", "--prepare"]);
+    let shown_out = f.run(&["apply", "--prepare", "--show-unmanaged"]);
+
+    assert_eq!(default_out.status.code(), Some(0), "{:?}", default_out);
+    assert_eq!(shown_out.status.code(), Some(0), "{:?}", shown_out);
+
+    let default_stdout = text(&default_out.stdout);
+    let shown_stdout = text(&shown_out.stdout);
+
+    // Both tables collapse the same way by default: one collapsed line and
+    // one hint from `render(plan)`, one collapsed line and one hint from
+    // `render_preparation` -- never the package's own name from either.
+    assert_eq!(
+        default_stdout
+            .matches("? scoop    1 installed outside dotpkg")
+            .count(),
+        2,
+        "one collapsed line from render(plan), one from render_preparation: \
+         {default_stdout}"
+    );
+    assert_eq!(
+        default_stdout.matches("--show-unmanaged").count(),
+        2,
+        "each table prints its own hint: {default_stdout}"
+    );
+    assert!(
+        !default_stdout.contains("stray-tool"),
+        "collapsed means collapsed in both of apply's tables: {default_stdout}"
+    );
+
+    // `--show-unmanaged` restores the individual line in both tables too.
+    assert!(shown_stdout.contains("stray-tool"), "was:\n{shown_stdout}");
+    assert_eq!(
+        shown_stdout.matches("(unmanaged -- no action)").count(),
+        2,
+        "one line in the plan table, one in the preparation table: {shown_stdout}"
+    );
+    assert!(
+        !shown_stdout.contains("--show-unmanaged"),
+        "was:\n{shown_stdout}"
+    );
+}
+
 // -- Phase 4 task 14: winget wired into the binary --------------------------
 //
 // Before this task nothing outside `src/backend/winget.rs` ever constructed a

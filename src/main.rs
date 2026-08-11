@@ -77,7 +77,8 @@ enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
         /// List every installed-but-unmanaged package instead of collapsing
-        /// them to one line per backend.
+        /// them to one line per backend, in both the plan and the
+        /// preparation table this command prints.
         #[arg(long)]
         show_unmanaged: bool,
     },
@@ -580,7 +581,10 @@ fn main() -> Result<()> {
                 &staging_root,
                 &d.declared,
             );
-            print!("{}", dotpkg::render::render_preparation(&preparation));
+            print!(
+                "{}",
+                dotpkg::render::render_preparation(&preparation, show_unmanaged)
+            );
             // `process::exit` below skips the normal `main` teardown that
             // would otherwise flush a block-buffered stdout (piped output,
             // as in the CLI smoke tests), so the render above would

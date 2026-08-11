@@ -174,19 +174,10 @@ pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
         out.push('\n');
     }
 
-    // One collapsed line per backend, in the order each backend's first
-    // `Unmanaged` action appeared -- never merged into a single line, for the
-    // reason given on the arm above. `unmanaged_counts` is empty whenever
-    // `show_unmanaged` is true (the arm above never populates it on that
-    // path), so the hint below is never printed alongside the per-line form.
-    for (backend, n) in &unmanaged_counts {
-        out.push_str(&format!(
-            "  ? {backend:<6}   {n} installed outside dotpkg -- no action\n"
-        ));
-    }
-    if !unmanaged_counts.is_empty() {
-        out.push_str("      pass --show-unmanaged to list them\n");
-    }
+    // `unmanaged_counts` is empty whenever `show_unmanaged` is true (the arm
+    // above never populates it on that path), so the collapsed lines and the
+    // hint never appear alongside the per-line form.
+    out.push_str(&unmanaged_collapse_lines(&unmanaged_counts));
 
     // A plan whose only actions are `Unmanaged` is NOT empty -- `is_empty()`
     // reads `plan.actions` itself, which still holds them regardless of
@@ -232,6 +223,32 @@ pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
     out
 }
 
+/// One collapsed line per backend, in the order given, plus one hint line --
+/// never one hint per backend, however many backends `counts` names --
+/// printed only when `counts` is non-empty. Written as one function and
+/// called from both `render(plan)` and `render_preparation` rather than
+/// copied twice: those two tables were caught by review disagreeing about
+/// this exact collapse (`render(plan)` collapsed from the start of this
+/// task, `render_preparation` did not, and printed a false hint on a
+/// machine's second table while the first had already collapsed correctly)
+/// -- sharing this one implementation is what makes that specific
+/// disagreement unable to recur between them. `render(plan)` and
+/// `render_preparation` build `counts` themselves, each from its own
+/// backend-name field on the action shape it walks, and each empties it
+/// on the `show_unmanaged == true` path before ever calling this.
+fn unmanaged_collapse_lines(counts: &[(String, usize)]) -> String {
+    let mut out = String::new();
+    for (backend, n) in counts {
+        out.push_str(&format!(
+            "  ? {backend:<6}   {n} installed outside dotpkg -- no action\n"
+        ));
+    }
+    if !counts.is_empty() {
+        out.push_str("      pass --show-unmanaged to list them\n");
+    }
+    out
+}
+
 /// Renders what `prepare` found out.
 ///
 /// It does **not** print "Nothing has been changed." — that sentence is
@@ -239,14 +256,48 @@ pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
 /// printed before the mutations begin, which would make the run state the
 /// promise and then break it. `main.rs` prints the promise itself, in the
 /// `--prepare` branch, where it is true.
-pub fn render_preparation(p: &Preparation) -> String {
+///
+/// `show_unmanaged` means exactly what it means for `render(plan)`, and
+/// collapses only `Action::Unmanaged` reports the same way -- **not**
+/// `Action::ArchDrift` ones, which print a different marker (`~`, not `?`)
+/// and are not the flood this task measured or scoped. Added because a full
+/// `apply` run (not just `--prepare`) prints this table right after
+/// `render(plan)`'s own, and until this fix `render(plan)` collapsed while
+/// this function still printed one line per `Unmanaged` package regardless
+/// of the flag -- so a real run showed a collapsed line and its hint from
+/// the first table, then every individual line the hint had just said the
+/// flag would restore, from the second. See this task's review for the
+/// measured transcript.
+pub fn render_preparation(p: &Preparation, show_unmanaged: bool) -> String {
     let mut out = String::new();
+    // Same shape as `render(plan)`'s own `unmanaged_counts`, and for the same
+    // reason: built in the same pass as the loop below, so backend order is
+    // the literal iteration order over `p.prepared`, not one re-derived
+    // after the fact.
+    let mut unmanaged_counts: Vec<(String, usize)> = Vec::new();
     if p.prepared.is_empty() {
         out.push_str("  nothing to prepare\n");
     } else {
         for item in &p.prepared {
+            // Only `Action::Unmanaged` under `Outcome::Report` collapses --
+            // matched on both together, not on the action alone, so a
+            // hypothetical future `Unmanaged` outcome that is not a bare
+            // report (there is none today) would fall through to
+            // `prepared_line` rather than being silently swallowed here.
+            if !show_unmanaged {
+                if let (Action::Unmanaged { backend, .. }, Outcome::Report) =
+                    (&item.action, &item.outcome)
+                {
+                    match unmanaged_counts.iter_mut().find(|(b, _)| b == backend) {
+                        Some((_, n)) => *n += 1,
+                        None => unmanaged_counts.push((backend.clone(), 1)),
+                    }
+                    continue;
+                }
+            }
             out.push_str(&prepared_line(item));
         }
+        out.push_str(&unmanaged_collapse_lines(&unmanaged_counts));
     }
     out.push('\n');
     if !p.prepared.is_empty() {
@@ -709,18 +760,30 @@ mod tests {
         // phase5-guard-unmanaged-retry.md` §4), and the fixture carries 36
         // real entries: a `vec![]` or a one-entry plan cannot tell the
         // collapsed form from the per-line form at all.
+        //
+        // Scoop pushed first, winget second -- matching the order `plan()`
+        // actually produces (`plan::plan`'s `backends` array is
+        // `[SCOOP, WINGET]`, and its one `actions.extend(reports)` appends
+        // each backend's `Unmanaged` reports in the order that backend's
+        // view ran, not the order this test happens to build them in). A
+        // fixture that instead pushed winget first, as an earlier version of
+        // this test did, cannot tell "collapsed lines follow this backend
+        // order" from "collapsed lines follow whatever order the fixture
+        // used" -- reviewed and named as a gap: this task's own new tests
+        // were the only fixtures in the crate asserting an order production
+        // cannot produce.
         let mut plan = Plan::default();
-        for i in 0..36 {
-            plan.actions.push(Action::Unmanaged {
-                backend: WINGET.to_string(),
-                name: Name::new(format!("Vendor.Pkg{i}")),
-                version: "1.0".to_string(),
-            });
-        }
         for i in 0..6 {
             plan.actions.push(Action::Unmanaged {
                 backend: SCOOP.to_string(),
                 name: Name::new(format!("app{i}")),
+                version: "1.0".to_string(),
+            });
+        }
+        for i in 0..36 {
+            plan.actions.push(Action::Unmanaged {
+                backend: WINGET.to_string(),
+                name: Name::new(format!("Vendor.Pkg{i}")),
                 version: "1.0".to_string(),
             });
         }
@@ -733,7 +796,27 @@ mod tests {
             out.contains("? scoop    6 installed outside dotpkg"),
             "was:\n{out}"
         );
+        // The order claim, pinned rather than left as a comment only
+        // `plan()` proves: scoop's collapsed line must come first, matching
+        // the backend order production actually emits, not merely the order
+        // this fixture happens to build actions in.
+        let scoop_at = out.find("? scoop").expect("scoop line present");
+        let winget_at = out.find("? winget").expect("winget line present");
+        assert!(
+            scoop_at < winget_at,
+            "scoop's collapsed line must precede winget's, matching plan()'s \
+             own backend order: {out}"
+        );
         assert!(out.contains("--show-unmanaged"), "was:\n{out}");
+        // The hint is printed once for the whole run, never once per
+        // backend, even though two backends are collapsed here -- a mutant
+        // that moved this push inside the per-backend loop would satisfy
+        // every `contains` check above while printing it twice.
+        assert_eq!(
+            out.matches("--show-unmanaged").count(),
+            1,
+            "one hint total, not one per backend: {out}"
+        );
         // Collapsed means collapsed: no individual id survives.
         assert!(!out.contains("Vendor.Pkg17"), "was:\n{out}");
         assert!(!out.contains("app3"), "was:\n{out}");
@@ -842,7 +925,7 @@ mod tests {
         // `apply` prints this same table before it starts changing things, so
         // the promise cannot live here. main.rs prints it in the --prepare
         // branch, and tests/cli.rs asserts it appears there.
-        let out = render_preparation(&Preparation::default());
+        let out = render_preparation(&Preparation::default(), false);
         assert!(
             !out.contains("Nothing has been changed."),
             "the promise belongs to --prepare's caller: {out}"
@@ -933,7 +1016,7 @@ mod tests {
 
   2 of 4 changes ready, 2 failed, 1 skipped, 1 not locked.
 ";
-        assert_eq!(render_preparation(&p), expected);
+        assert_eq!(render_preparation(&p, false), expected);
     }
 
     #[test]
@@ -962,7 +1045,7 @@ mod tests {
                 },
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(
             out.lines().next().is_some_and(|l| l.starts_with("  !")),
             "a package winget is guaranteed to refuse must not be marked \
@@ -1004,7 +1087,7 @@ mod tests {
                 },
             }],
         };
-        let genuine_out = render_preparation(&genuine);
+        let genuine_out = render_preparation(&genuine, false);
         assert!(
             genuine_out.contains("  ready   winget"),
             "a real install must stay ready: {genuine_out}"
@@ -1044,7 +1127,7 @@ mod tests {
                 },
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(
             out.contains("JanDeDobbeleer.OhMyPosh 29.36.0.0 -> 30.6.3"),
             "a literal space must separate the name from what follows even \
@@ -1069,7 +1152,7 @@ mod tests {
                 outcome: ready_to_fetch("fzf", "14.1.0"),
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(
             out.contains("  ready   scoop  fzf            14.1.0            (install)\n"),
             "a short name must still be padded out to the column width, not \
@@ -1089,7 +1172,7 @@ mod tests {
                 outcome: Outcome::ReadyToRemove,
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(out.contains("ready   scoop  aichat"), "got: {out}");
         assert!(out.contains("(prune)"), "got: {out}");
         assert!(out.contains("1 of 1 changes ready"), "got: {out}");
@@ -1111,7 +1194,7 @@ mod tests {
                 outcome: ready_to_fetch("python", "3.14.6"),
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(
             out.contains("(install, arm64)"),
             "the resolved architecture must be visible: {out}"
@@ -1134,7 +1217,7 @@ mod tests {
                 outcome: ready_to_fetch("python", "3.14.6"),
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(out.contains("(install)"), "got: {out}");
         assert!(
             !out.contains("arm64") && !out.contains("(install, )"),
@@ -1156,7 +1239,7 @@ mod tests {
                 outcome: ready_to_fetch("fzf", "0.74.1"),
             }],
         };
-        let out = render_preparation(&p);
+        let out = render_preparation(&p, false);
         assert!(out.contains("0.74.2 -> 0.74.1"), "got: {out}");
         assert!(out.contains("(downgrade)"), "got: {out}");
     }
@@ -1193,7 +1276,9 @@ mod tests {
                 },
             ],
         };
-        let out = render_preparation(&p);
+        // `true`: this test reads the individual `?       scoop  antigravity`
+        // line below, which the default (`false`) collapses away.
+        let out = render_preparation(&p, true);
         assert!(out.contains("?       scoop  antigravity"), "got: {out}");
         assert!(out.contains("(unmanaged -- no action)"), "got: {out}");
         assert!(out.contains("~       scoop  python"), "got: {out}");
@@ -1206,6 +1291,136 @@ mod tests {
         assert!(
             out.contains("1 of 1 changes ready"),
             "reports must not count as changes: {out}"
+        );
+    }
+
+    // -- render_preparation's own Unmanaged collapse (review Important 1) --
+    //
+    // `render(plan)` collapsed from the start of this task; `render_
+    // preparation` did not, because the brief that started this task never
+    // named it. Review measured the real binary printing a collapsed line
+    // and its hint from the plan table, then every individual line the hint
+    // had just promised the flag would restore, from the preparation table
+    // two lines below -- on a full `apply` run, both tables print. These
+    // tests are `render_preparation`'s side of the same guarantee
+    // `thirty_six_unmanaged_winget_packages_collapse_to_one_line_per_
+    // backend` pins for `render(plan)`.
+
+    fn unmanaged_report(backend: &str, name: &str) -> Prepared {
+        Prepared {
+            action: Action::Unmanaged {
+                backend: backend.to_string(),
+                name: Name::new(name),
+                version: "1.0".to_string(),
+            },
+            outcome: Outcome::Report,
+        }
+    }
+
+    #[test]
+    fn render_preparation_collapses_unmanaged_reports_by_default_and_restores_them_with_the_flag() {
+        let p = Preparation {
+            prepared: vec![
+                unmanaged_report(SCOOP, "app0"),
+                unmanaged_report(SCOOP, "app1"),
+                unmanaged_report(SCOOP, "app2"),
+            ],
+        };
+        let collapsed = render_preparation(&p, false);
+        assert!(
+            collapsed.contains("? scoop    3 installed outside dotpkg"),
+            "was:\n{collapsed}"
+        );
+        assert!(collapsed.contains("--show-unmanaged"), "was:\n{collapsed}");
+        assert!(
+            !collapsed.contains("app0"),
+            "collapsed means collapsed here too: {collapsed}"
+        );
+        // A `Preparation` whose only items are `Unmanaged` reports is not
+        // empty -- `p.prepared.is_empty()` is what gates "nothing to
+        // prepare", and it still holds 3 items -- so this must not claim
+        // there was nothing to prepare.
+        assert!(
+            !collapsed.contains("nothing to prepare"),
+            "3 unmanaged reports are not nothing: {collapsed}"
+        );
+
+        let shown = render_preparation(&p, true);
+        assert!(shown.contains("app0"), "was:\n{shown}");
+        assert_eq!(
+            shown
+                .lines()
+                .filter(|l| l.contains("(unmanaged -- no action)"))
+                .count(),
+            3
+        );
+        assert!(!shown.contains("--show-unmanaged"), "was:\n{shown}");
+    }
+
+    #[test]
+    fn render_preparation_never_collapses_arch_drift_alongside_unmanaged() {
+        // Important 1's own precision requirement: `Outcome::Report` covers
+        // `Action::ArchDrift` as well as `Action::Unmanaged`, and drift
+        // prints its own `~` marker and is not the flood this task measured
+        // or scoped. A version that collapsed every `Report`, not just
+        // `Unmanaged` ones, would still pass every unmanaged-only assertion
+        // above.
+        let p = Preparation {
+            prepared: vec![
+                unmanaged_report(SCOOP, "app0"),
+                Prepared {
+                    action: Action::ArchDrift {
+                        backend: SCOOP.into(),
+                        name: "python".into(),
+                        have: "64bit".into(),
+                        want: "arm64".into(),
+                    },
+                    outcome: Outcome::Report,
+                },
+            ],
+        };
+        let out = render_preparation(&p, false);
+        assert!(
+            out.contains("? scoop    1 installed outside dotpkg"),
+            "the one Unmanaged report still collapses: {out}"
+        );
+        assert!(
+            out.contains("~       scoop  python"),
+            "the ArchDrift report must still print its own line, uncollapsed: {out}"
+        );
+        assert!(
+            out.contains("(architecture drift -- reported, not fixed)"),
+            "was:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_preparation_prints_the_hint_once_across_two_backends_not_once_per_backend() {
+        // The `render_preparation` half of Minor 4: `unmanaged_collapse_
+        // lines` is the one function both tables call, so this and
+        // `thirty_six_unmanaged_winget_packages_collapse_to_one_line_per_
+        // backend` together prove the property from both call sites --
+        // asserted with `.matches(..).count()`, not `contains`, which a
+        // duplicated hint would also satisfy.
+        let p = Preparation {
+            prepared: vec![
+                unmanaged_report(SCOOP, "app0"),
+                unmanaged_report(WINGET, "Vendor.Pkg0"),
+            ],
+        };
+        let out = render_preparation(&p, false);
+        assert!(
+            out.contains("? scoop    1 installed outside dotpkg"),
+            "{out}"
+        );
+        assert!(
+            out.contains("? winget   1 installed outside dotpkg"),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("--show-unmanaged").count(),
+            1,
+            "one hint total, not one per backend: {out}"
         );
     }
 

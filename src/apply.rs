@@ -1203,9 +1203,9 @@ pub fn refuse_elevated_winget_removal(
         "this run is elevated, and winget refuses to uninstall a package installed for \
          user scope from an elevated process -- measured exit 0x8A15007D, \"The package \
          installed for user scope cannot be uninstalled when running with administrator \
-         privileges.\" {} removal(s) in this run are affected: {}. The same uninstall was \
-         measured to succeed from a session that is not elevated, so re-run `dotpkg \
-         apply` without elevation. No package was installed, upgraded or removed.",
+         privileges.\" {} removal(s) in this run are affected: {}. The same removal was \
+         measured to succeed from a session this check reads as not elevated, so re-run \
+         `dotpkg apply` without elevation. No package was installed, upgraded or removed.",
         blocked.len(),
         blocked.join(", ")
     ))

@@ -254,9 +254,14 @@ caught 518   missed 9   timeout 71   unviable 72
 manufacture a timeout; it cannot turn a genuinely failing test into a
 passing one, so these three columns describe the code, not the machine that
 measured it. **The `timeout` column is unresolved** — the two `verify.rs`
-mutants above are known-real hangs; the other 69 (71 minus the 17
-confirmed-cannot-hang) have not been individually re-run to a clean verdict
-and must not be reported as either survivors or as closed. Re-running just
+mutants above are known-real hangs; the other 69 (71 minus those 2) have not
+been individually re-run to a clean verdict and must not be reported as
+either survivors or as closed. That 69 **includes** the 17
+confirmed-cannot-hang ones: knowing a timeout was starvation rules out
+"the mutation loops forever", but it does not supply the `caught` or
+`missed` verdict that mutant still lacks. An earlier version of this
+sentence read "71 minus the 17 confirmed-cannot-hang", which computes to 54
+and contradicted the 69 beside it. Re-running just
 the `timeout` set on an otherwise-idle machine, with the `TMPDIR` fix from
 run 2 already in place, is the concrete next step — not another full run.
 

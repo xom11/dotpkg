@@ -1698,9 +1698,15 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_i
 // `main.rs:882` (the undeclared-package refusal), `main.rs:943` (three
 // mutants on `failed_count() > 0`), `main.rs:955` (the relative `--state`
 // refusal) and `main.rs:1004` (adopt's refusal exit) -- all of which are
-// killed by the tests below. Those four numbers name this tree; the survivors
-// were reported against Phase 3's, where the same four checks sat at `:438`,
-// `:459`, `:470` and `:496`.
+// killed by the tests below. Those four numbers name this tree.
+//
+// HISTORICAL, DO NOT RE-POINT: the survivors were reported against Phase 3's
+// tree (58c8e29), where the same four checks sat at `:438`, `:459`, `:470` and
+// `:496`. Those four are kept only so the report in
+// docs/phase3-notes.md's mutation section stays findable. They are NOT claims
+// about any current tree, so a citation sweep must leave them alone --
+// "correcting" them to this tree's numbers would turn a true statement about
+// Phase 3 into a duplicate of the line above.
 //
 // The exit code IS the product for these commands: `update` runs unattended
 // and a scheduled task learns "a package could not be re-resolved" only from

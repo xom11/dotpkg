@@ -28,11 +28,11 @@ run, and never of the mutation run:
 - the **mutation run**, on neither — it completed **twice**, on `4673517` (70
   mutants) and on `ee46172` (72), both of them commits *before* `4bbe3be` existed.
 
-Why the mutation run's numbers still describe the tree that ships is an argument
-about *attributability* rather than a measurement taken there, and it lives where
-the run is recorded ("The mutation run" under Verification) instead of being
-restated here — collapsing it into "measured on the shipping tree" is exactly the
-move the promise two paragraphs above forbids.
+Why the mutation run's numbers still describe the code that merged is an argument
+about *attributability* rather than a measurement taken on a later tree, and it
+lives where the run is recorded ("The mutation run" under Verification) instead of
+being restated here — collapsing it into "measured on the shipping tree" is exactly
+the move the promise two paragraphs above forbids.
 
 **Two of the questions the dogfood was meant to settle** came back
 **inconclusive**, and those are recorded as inconclusive and given
@@ -681,6 +681,63 @@ nobody checks.
     This branch did none of the three consistently and paid for it three times —
     twice on citations *into* `src/backend/winget.rs`, from two different
     directories.
+  - **A second failure mode, distinct from drift and invisible to every sweep
+    that looks for it: a citation can be wrong the moment it is written, by
+    anchoring one line off the thing it names.** *Structural.* Drift is a
+    citation that was right and stopped being right; this one is never right, and
+    it survives indefinitely because the cited line **exists** and reads
+    plausibly — a sweep that asks "does this line resolve" gets yes, and only a
+    reader asking "does it hold what the sentence claims" gets no. Both of the
+    post-merge audit's own proposed targets failed this way, in the same
+    direction: each pointed at the *explanation* of the thing rather than at the
+    thing.
+    - `tests/cli.rs:1109`'s target was proposed as `src/render.rs:493`, the start
+      of the comment block that explains the column width. The citation is about
+      the width itself, and at its origin `6683dd3` it pointed at
+      `format!("  {marker:<8}{backend:<6} {name:<14} {rest}\n")`, which is
+      **`:505`** here. `:493` resolves, reads like the right neighbourhood, and is
+      twelve lines above the claim.
+    - `tests/execute.rs:1534`'s target was proposed as `execute.rs:221`,
+      `order`'s `sort_by_key` line. The citation is about the *group assignment*
+      for `WingetStep::Set`, and at its origin `4ebd831` it pointed at the group-0
+      match arm, which is **`:223`** here.
+    - **The anchor that resolves it, and it is not judgement:** re-point to
+      whatever line the citation pointed at **in the commit that wrote it**. That
+      is the only definition of "the target" that does not require re-deciding
+      the author's intent years later, and `git show <origin>:<file>` settles it
+      in one command. Both corrections above were made that way.
+
+- **A self-referential version claim is a `file:line` citation one level up.**
+  *Structural*, and the same mechanism exactly: a sentence that names which commit
+  contains **this document** is a claim about the document's own future, made
+  inside the document, and the next commit to the document falsifies it while
+  leaving the sentence grammatical. Nothing in the build can notice, for the
+  identical reason. **This file wrote that claim three times and was wrong three
+  times**, and a reviewer caught it every time — no sweep, no gate and no test
+  ever will:
+  - `137fc35` (Task 8) said the suite total was "measured on the tree this file
+    describes" while `05023fd` and `c8c7f0d` had already landed. Caught by the
+    whole-branch review (Important 2).
+  - `6b2211e` (Task 9c) said the three runs happened "all on `4bbe3be`, the tree
+    that ships this file", and labelled a table row the same way. **`6b2211e`'s
+    parent is `4bbe3be`**, so both sentences were false at the instant they were
+    committed, before any later commit existed. Task 9e (`3dda7e9`) hedged the
+    table row and retracted the phrase in a correction paragraph but left the
+    summary sentence standing; the post-merge audit caught that residue
+    (Important 1).
+  - `3dda7e9` (Task 9e) then said the suite was "measured on `765e091`, the tree
+    that ships this file". Two commits later that was stale again, which is where
+    the pattern stopped being a recurrence and became a property of the form.
+  - **Not fixed a fourth time — removed.** Correcting the sha buys exactly one
+    commit, and three corrections is enough evidence that the next one would too.
+    What a reader actually needs is the per-run attribution this file already
+    carries, and it now carries it alone: see the standing claim opening
+    Verification. The general lesson, worth more than the three instances: **a
+    document must not assert its own version.** It can name the sha of every
+    measurement inside it, which is a claim about the past and stays true, and it
+    can state a rule about what later commits are allowed to be — but the moment
+    it says "this is the tree you are reading", it has written a `file:line`
+    citation whose file is itself.
 
 ### Five in Task 9's own verification work, all the controller's
 
@@ -894,14 +951,16 @@ Task 9c with `git diff --numstat 1d633c6 -- src/backend/winget.rs` at each point
 |---|---|---|---|
 | `c8c7f0d` | 535 | 15 | before the fix wave |
 | `4673517` | 611 | 15 | after the fix wave; the tree the citations below were re-pointed against |
-| **`4bbe3be`** | **699** | **15** | **the tree that ships this file at the time this row was written** |
+| **`4bbe3be`** | **699** | **15** | **the tree the figure was measured against when Task 9c wrote this row** |
 
 **The single figure for this phase is therefore 699 added against 15 deleted, and
 it still is**: `git diff --numstat 4bbe3be 765e091 -- src/backend/winget.rs` is
 empty, so neither `6b2211e` nor `765e091` moves this number. `4bbe3be` is kept as
 the row's label rather than replaced with `765e091` because the row is a
-historical measurement, not a running total — the tree that ships this file *now*
-is named where it is used as a live claim, in Verification below.
+historical measurement, not a running total. **No row and no sentence in this file
+claims to name the tree that ships it** — see the standing claim opening
+Verification below for what replaced that, and why replacing it was cheaper than
+keeping it correct.
 
 The other two are kept only because the citation table below needs them: the
 **+171/+184** shift the table's two `winget.rs` rows record was caused by the 535,
@@ -986,7 +1045,7 @@ four tests in the `#[cfg(test)]` module. Every citation whose target sits after
 those two insertion points moved — **+32** for targets before the test module,
 **+88** for targets inside it. The independent citation sweep that certified "26
 live citation numbers, all 26 resolving" ran on the tree **before** `ee46172`, so
-it is not evidence about the tree that ships.
+it is not evidence about any tree after it.
 
 **One citing site in `src/` was stale on `4bbe3be`, and Task 9c did not fix it** —
 this task's scope was documentation only, so the `.rs` files were left untouched
@@ -1102,12 +1161,15 @@ Three details worth keeping rather than flattening:
   3, where they named the five `cargo mutants` survivors that section exists to
   close) and had already drifted by ~400 lines before this branch started. The
   comment now says which tree its four numbers describe, and keeps the Phase 3
-  figures beside them — labelled as Phase 3's, matching what
-  `docs/phase3-notes.md:320-322` records — so a reader can still find the survivor
-  report. **A future sweep will see those four old numbers and must not re-point
-  them:** they are not claims about any current tree, which is the trap Task 1's
-  `package_roots` comment fell into twice by quoting numbers a sweep would then
-  match.
+  figures beside them so a reader can still find the survivor report
+  (`docs/phase3-notes.md:320-322`, which records the same four).
+  **Those four old numbers are labelled `HISTORICAL, DO NOT RE-POINT` in the
+  comment itself**, not merely mentioned here, because the next sweep will see them
+  and "correcting" them to this tree would turn a true statement about Phase 3 into
+  a duplicate of the line above it. That is the trap Task 1's `package_roots`
+  comment fell into twice — a comment that quotes numbers a sweep will then
+  match — and the label is the cheapest thing that closes it, since the
+  alternative is a sweep smart enough to read tense.
 - **`tests/execute.rs:1534`'s target never moved on this branch at all** — it is
   `:223` at `1d633c6` and `:223` now. The citation says `:190`, correct at
   `4ebd831` where it was written. This is the case the drift sweep is structurally
@@ -1126,10 +1188,24 @@ Three details worth keeping rather than flattening:
 
 **The sweep, stated with its scope so this one does not read as complete either.**
 After the fixes: **26 citation numbers on 21 lines in `src/`, all 26 resolving**,
-and **9 numbers on 8 lines in `tests/`, all 9 resolving** — both measured on the
-tree this commit ships, by reading each target's current content. It is evidence
-about that tree and no later one, which is the lesson two sweeps on this branch
-already paid for.
+and **9 numbers on 8 lines in `tests/`, all 9 resolving** — measured on the tree of
+the commit that records this, by reading each target's current content. Both halves
+are evidence about that tree and about `src/` and `tests/` only; nothing later, and
+nothing under `docs/`, which carries its own line-number citations and has never
+been swept.
+
+**And a cost this section creates rather than removes, said out loud because the
+alternative is discovering it later.** The two tables above are themselves new
+`file:line` citations — into `tests/cli.rs:726`, `:1109`, `:1698`–`:1700`,
+`tests/execute.rs:1534` and `tests/winget_resolve.rs:232` — so the record of the
+drift class has just added surface for the drift class. That is the same trade this
+document already accepted for its `src/` tables, and it is no better here: any
+insertion above those lines falsifies the left-hand column and nothing in the build
+can notice. The durable answer named at the end of the previous section — cite by
+**symbol name** — would fix both, and it is **still not implemented**, because it
+is a production change no task in this phase was given and inventing one here would
+be precisely the unscoped widening this phase kept declining. Recorded as a known,
+priced cost, not as an oversight.
 
 ### The design attributes 105 invocations to one argv
 
@@ -1307,13 +1383,41 @@ line is a dead pointer, not a superseded one.
 
 ## Verification
 
+**Every measurement below names the tree it ran on, and none of them claims to
+name "the tree that ships this file". That omission is deliberate.** *Structural.*
+A sentence inside this document about which commit contains this document is
+falsified by the next commit to it, and nothing in the writing can notice —
+identical in form to a `file:line` citation, one level up, and this file has made
+the claim three times and been wrong three times (`137fc35`, `6b2211e`,
+`3dda7e9`; see "A self-referential version claim is a `file:line` citation one
+level up" under Method failures). Fixing the sha buys exactly one commit, so the
+claim is gone rather than corrected again.
+
+**How a tree gets named, since one case cannot use a sha.** Every run that
+happened before the commit writing it up is named by **sha**, which is a claim
+about the past and stays true. The one measurement taken *in* the commit that
+records it is named as **"the commit that records this"** — a commit cannot contain
+its own sha, and inventing a label for it is how the retired claim got written in
+the first place. `git log --oneline -- docs/phase5-notes.md` resolves it in one
+command.
+
+**What replaces it, and it is a standing claim rather than a sha.** *Structural.*
+**Every commit to this repository after a measurement recorded below is
+documentation or comment text, unless this record says otherwise.** Where a commit
+did touch code a measurement had observed, the section for that measurement says
+so and either re-runs it or argues attributability at that spot — the mutation
+run's own paragraph and the Windows suite's second run are the two worked examples,
+and they are the only two. A reader who wants to check rather than trust should run
+`git log --numstat <measured-sha>..HEAD -- src/ tests/` and read the diff; prose
+cannot notice a commit, and a sha embedded in prose is a claim about the future.
+
 ### macOS suite
 
-`cargo test --no-fail-fast`, **measured on `765e091`, the tree that ships this
-file** — named as a sha rather than as "the tree above", because that is the
-phrase this section has already been caught by twice, and named as the *current*
-sha rather than `4bbe3be` because two more commits landed after Task 9c measured
-that one (below): **exit 0, 638 passed, 0 failed, 0 ignored**, across **14**
+`cargo test --no-fail-fast`, **measured on `765e091`** — named as a sha rather
+than as "the tree above" or "the tree that ships this file", both of which this
+section has been caught by, and named as `765e091` rather than `4bbe3be` because
+two more commits landed after Task 9c measured that one (below): **exit 0, 638
+passed, 0 failed, 0 ignored**, across **14**
 `test result:` lines (`unittests src/lib.rs` 311, `unittests src/main.rs` 14, the
 eleven `tests/*.rs` binaries totalling 313, and `Doc-tests dotpkg` 0). Base `main`
 at `1d633c6` was 588, so the phase adds **50** tests. **Measured directly by Task
@@ -1345,9 +1449,19 @@ tree sitting under a sentence that named a different one:
   without re-running exactly the mistake the 631 entry above already names once.
   Re-run instead, by Task 9e: same **638 / 0 / 0**, same **14** lines. A comment
   cannot change a test count, but this section does not get to assume that — it
-  gets to measure it, which is what makes **638 the figure `765e091` — the tree
-  that ships this file now — actually earns**, rather than one it merely
-  inherited.
+  gets to measure it, which is what makes **638 a figure `765e091` actually
+  earns**, rather than one it merely inherited.
+- **638 again after the post-merge audit's remediation, which changed comment text
+  in `src/backend/winget.rs` and three `tests/*.rs` files and nothing else** — the
+  same 638 / 0 / 0 across the same 14 lines, re-measured rather than inherited,
+  on the same principle the entry above states. Named as *the commit that says
+  this* rather than as a sha, because a commit cannot contain its own sha; a
+  reader locates it with `git log --oneline -- docs/phase5-notes.md`.
+- **There is no fourth sha entry, by design.** The standing claim at the top of
+  this section is what covers everything after these runs: a commit that changes
+  code a measurement observed has to say so at that measurement. Three entries
+  above are three re-measurements chasing a sentence that could not stay true, and
+  the rule is what the list was reaching for the whole time.
 
 Also **measured directly by Task 9e on `765e091`**, for the same reason — not
 carried forward from Task 9c's `4bbe3be` run:
@@ -1551,8 +1665,10 @@ mutants` can mutate, so it changes nothing this run could have tested
 differently — verified here rather than assumed: `git diff ee46172 765e091 --
 src/` touches exactly `src/backend/winget_exec.rs`, one insertion and one
 deletion, both inside a `///` comment. **`765e091`'s code is functionally
-identical to `ee46172`'s for mutation-testing purposes**, so this run's numbers
-are still the ones that describe the tree that ships.
+identical to `ee46172`'s for mutation-testing purposes**, so this run's numbers are
+still the ones that describe the code as it merged. This is one of the two worked
+examples the standing claim opening this section points at: the argument is made
+here, at the measurement, rather than by relabelling the run onto a later sha.
 
 **Zero timeouts at `-j 2`, matching Phase 4b** — the second consecutive phase to
 measure that, which is what turns Phase 4's 69 unresolved `timeout` mutants
@@ -1667,7 +1783,7 @@ about the rest of the branch, and the rest of the branch is what falsified it:
 two more commits landed after `4bbe3be` — `6b2211e` (docs only) and `765e091`
 (one comment line in `src/backend/winget_exec.rs`, see "And then the class
 recurred" above, plus documentation) — so the tree this section described stopped
-being the tree that ships. A run whose validity is proven by a sha carried inside
+being the tree that would merge. A run whose validity is proven by a sha carried inside
 its own tarball cannot be relabelled onto a later commit by arguing the code did
 not meaningfully change; it has to run again on the sha that now matters. It did,
 below.
@@ -1926,8 +2042,8 @@ is the point of keeping the list:
   this**, so it stays open with a measurement attached rather than with nothing.
 
 The standing rules that governed the runs, carried forward unchanged for the next
-phase: the Windows suite runs on the tree that ships, with the sha carried inside
-the artefact; the cross-reference is **name by name**, never by subtracting
+phase: the Windows suite runs on the tree that will merge, with the sha carried
+inside the artefact; the cross-reference is **name by name**, never by subtracting
 totals, and its name set comes from `--list` rather than from run output;
 `cargo mutants -j 2` on an idle machine with nothing editing the tree; fixture
 bytes checked **by sha** first.

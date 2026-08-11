@@ -93,20 +93,32 @@ fn verdict(is_elevated: Option<bool>, in_admins: Option<bool>) -> Option<bool> {
 /// alone.
 ///
 /// The Phase 4b dogfood on that same machine overturned the single-signal
-/// version: from a `runas /trustlevel:0x20000` child of an elevated
-/// PowerShell, `TOKEN_ELEVATION.TokenIsElevated` still read 1 (inherited from
-/// the elevated parent) while `winget uninstall -e --id ducaale.xh`
-/// **succeeded** (exit 0) from that same child shell. `runas
-/// /trustlevel:0x20000` builds a restricted token: the Administrators SID is
-/// present but marked DENY_ONLY, so `TOKEN_ELEVATION` no longer predicts
-/// winget's behaviour on it. `CheckTokenMembership` honours DENY_ONLY, which
-/// is why this function now requires both signals -- `verdict` above is the
-/// combination rule, tested on its own.
+/// version, on one restricted token: from a `runas /trustlevel:0x20000`
+/// child of an elevated PowerShell, .NET's `IsInRole(Administrators)`
+/// reported `False` while `TOKEN_ELEVATION.TokenIsElevated` still read 1
+/// (inherited from the elevated parent), and `winget uninstall -e --id
+/// ducaale.xh` **succeeded** (exit 0) from that same child shell. So exactly
+/// two states have been observed: a real elevated session, where winget
+/// refuses, and this restricted token, where winget allows. An ordinary
+/// non-elevated interactive session was NOT exercised in that round (the
+/// dogfood's "medium integrity" run did not actually de-elevate -- a bug in
+/// the test script, recorded in progress.md) -- it is expected to behave
+/// like the restricted token (`TokenIsElevated` false, so `verdict` answers
+/// `Some(false)` without needing the second signal at all), but that is
+/// reasoned, not measured.
 ///
-/// This is established on the three states actually measured -- an ordinary
-/// user session, a real elevated session, and a restricted token from an
-/// elevated session -- not proven correct for every way Windows can shape a
-/// token.
+/// `runas /trustlevel:0x20000` is understood to build a *restricted* token by
+/// marking the Administrators SID DENY_ONLY rather than removing it
+/// (`SaferComputeTokenFromLevel`'s documented mechanism) -- nobody dumped
+/// this token's group attributes to confirm it, so that is the reasoned
+/// explanation for the `IsInRole` result, not itself an observation.
+/// `CheckTokenMembership` is believed to honour DENY_ONLY the same way
+/// `IsInRole` does -- `WindowsPrincipal.IsInRole` calls it internally -- but
+/// `CheckTokenMembership` is the half of this function that has never
+/// actually run on a Windows machine: what was measured was .NET's
+/// `IsInRole`, on that one token, not this Win32 call. Both gaps -- the
+/// unmeasured ordinary session and the never-run `CheckTokenMembership` --
+/// are open until a Windows run exercises them.
 #[cfg(windows)]
 pub fn elevated() -> Option<bool> {
     use std::mem;
@@ -141,9 +153,12 @@ pub fn elevated() -> Option<bool> {
         // stack buffer -- 68 bytes is `SECURITY_MAX_SID_SIZE` from the
         // Windows SDK, large enough for any SID `CreateWellKnownSid` can
         // produce; that constant is not bound by the `windows` crate itself,
-        // hence the literal.
-        let mut sid_buf = [0u8; 68];
-        let mut sid_len = sid_buf.len() as u32;
+        // hence the literal. `u32` elements, not `u8`: a SID's subauthorities
+        // are a `DWORD` array and the kernel writes it by that struct layout,
+        // so the buffer needs 4-byte alignment -- `[u8; N]` only guarantees
+        // alignment 1.
+        let mut sid_buf = [0u32; 17];
+        let mut sid_len = mem::size_of_val(&sid_buf) as u32;
         let sid = PSID(sid_buf.as_mut_ptr() as *mut _);
         let in_admins = if CreateWellKnownSid(
             WinBuiltinAdministratorsSid,
@@ -157,8 +172,13 @@ pub fn elevated() -> Option<bool> {
             // above: `CheckTokenMembership` requires an impersonation-level
             // token when non-NULL, but `OpenProcessToken` above returns a
             // primary token. NULL asks it to duplicate the calling thread's
-            // own effective token internally, which is the token this
-            // question is actually about.
+            // own effective token internally instead. That is not quite the
+            // token this question is about -- winget runs as a *child
+            // process*, which inherits the process token, not a thread's
+            // impersonation token -- but the two agree here because this
+            // crate never impersonates, so the process token and the
+            // thread's effective token are the same token. If that ever
+            // changes, this NULL must change with it.
             let mut is_member = BOOL::default();
             if CheckTokenMembership(HANDLE::default(), sid, &mut is_member).is_ok() {
                 Some(is_member.as_bool())

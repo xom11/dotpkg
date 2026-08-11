@@ -1050,6 +1050,80 @@ pub struct Driver {
     pub running: crate::model::Running,
 }
 
+/// The whole fence, sampled: which winget ids count, which winget roots to look
+/// under, and the union with scoop's half. **Every production path calls this
+/// and passes nothing but the three things it already holds.**
+///
+/// **This is here rather than inline in `main.rs` because the INPUTS were the
+/// part no test could reach.** `backend::running_set` takes `winget_ids` and
+/// `winget_roots` as parameters, so before this function existed, each of the
+/// three call sites chose them for itself -- and one of the three lives in
+/// `main.rs`'s per-step re-sampler closure, which no test in this repository can
+/// observe at all: `main.rs` is the binary crate and an integration test links
+/// only the library. That was measured, not assumed. With the closure reverted
+/// to pass `&[]` for `winget_ids`, `cargo test --no-fail-fast` stayed entirely
+/// green; the only automated signal was an `unused variable: fence_ids` warning,
+/// which `-D warnings` does promote to an error but which any future refactor
+/// that legitimately stops binding that local would silence.
+///
+/// This is the same remedy, for the same finding, that `gate_the_run` above
+/// applies: Task 15's review found four driver lines whose *order* and
+/// *arguments* no test pinned, and hoisting them into one library function
+/// "leaves the driver one call to get wrong instead of three separately-placed
+/// ones". Here it is not an order but a pair of inputs; the shape of the fix is
+/// identical.
+///
+/// **Why two functions.** The split is load-bearing in both directions:
+///
+/// - If `winget_roots` were a parameter of the only entry point, `main.rs` could
+///   still hand it `&[]` and no library test could stop it. The hole would move
+///   up one level rather than close.
+/// - If `winget_roots` were only ever read inside the one function, no test
+///   could exercise the winget path half at all, because `package_roots()` reads
+///   `LOCALAPPDATA` / `ProgramFiles` and returns an empty vector on every
+///   non-Windows platform -- including the machine this crate is developed on.
+///
+/// So `sample_fence` takes no roots and is what production calls;
+/// `sample_fence_with_roots` takes fabricated ones and is what
+/// `the_fence_unions_scoop_paths_with_winget_package_dirs` drives. A caller
+/// cannot pass the wrong roots, and the union is still reachable from a test on
+/// any OS.
+///
+/// **Residual, stated plainly rather than claimed closed:** each of the three
+/// sites still contains one call to this function, and `main.rs`'s two are still
+/// unpinned by any test -- nothing goes red if someone deletes the re-sampler
+/// closure's call outright or swaps it for `Running::default()`. That is exactly
+/// the residual `gate_the_run` accepted and recorded ("one call to get wrong
+/// instead of three"), and it is narrower than what it replaces: the choice of
+/// ids and roots is no longer expressible at a call site, so the only remaining
+/// mistake is not calling this at all, rather than calling it with half its
+/// inputs.
+pub fn sample_fence(
+    scoop: &Scoop,
+    winget_scan: &crate::backend::ScanOutcome,
+    procs: &[crate::sys::Process],
+) -> crate::model::Running {
+    sample_fence_with_roots(
+        scoop,
+        winget_scan,
+        &crate::backend::winget::package_roots(),
+        procs,
+    )
+}
+
+/// `sample_fence`'s tested seam: the same union, against roots the caller
+/// supplies. See `sample_fence`'s own doc comment for why this pair is two
+/// functions and not one, and why production must never call this one directly.
+pub fn sample_fence_with_roots(
+    scoop: &Scoop,
+    winget_scan: &crate::backend::ScanOutcome,
+    winget_roots: &[PathBuf],
+    procs: &[crate::sys::Process],
+) -> crate::model::Running {
+    let winget_ids = crate::backend::winget_fence_ids(winget_scan);
+    crate::backend::running_set(scoop, &winget_ids, winget_roots, procs)
+}
+
 pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<Driver> {
     let declared = crate::config::load(config)?;
     let locked = crate::lock::load_or_empty(lock)?;
@@ -1061,13 +1135,7 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
     // half of this run. See `crate::backend::scan_or_warn`'s own doc comment.
     let winget_scan = crate::backend::scan_or_warn(&winget);
     let procs = crate::sys::running_processes();
-    let winget_ids = crate::backend::winget_fence_ids(&winget_scan);
-    let running = crate::backend::running_set(
-        &scoop,
-        &winget_ids,
-        &crate::backend::winget::package_roots(),
-        &procs,
-    );
+    let running = sample_fence(&scoop, &winget_scan, &procs);
     Ok(Driver {
         declared,
         locked,

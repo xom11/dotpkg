@@ -467,13 +467,7 @@ fn main() -> Result<()> {
             // `scan_or_warn`'s own doc comment.
             let winget_scan = dotpkg::backend::scan_or_warn(&winget);
             let procs = dotpkg::sys::running_processes();
-            let winget_ids = dotpkg::backend::winget_fence_ids(&winget_scan);
-            let running = dotpkg::backend::running_set(
-                &scoop,
-                &winget_ids,
-                &dotpkg::backend::winget::package_roots(),
-                &procs,
-            );
+            let running = dotpkg::apply::sample_fence(&scoop, &winget_scan, &procs);
 
             // Before the plan, not after: a package missing from the plan
             // because dotpkg could not read it is the one thing the plan
@@ -719,17 +713,18 @@ fn main() -> Result<()> {
             let opts = dotpkg::execute::ExecOptions {
                 recovery_path: recovery_path.clone(),
             };
-            // The winget ids are sampled once: a package cannot become
-            // installed part-way through this run without dotpkg installing
-            // it, and a step that installs one is not a step this fence gates.
-            // The PROCESSES are re-sampled per step, which is the whole point.
-            let fence_ids = dotpkg::backend::winget_fence_ids(&d.winget_scan);
-            let fence_roots = dotpkg::backend::winget::package_roots();
+            // Only the PROCESSES are re-sampled per step, which is the whole
+            // point of the closure. Everything else the fence needs -- which
+            // winget ids count, which roots to look under -- is chosen inside
+            // `sample_fence`, where a test can reach it; see its doc comment.
+            // Re-reading the ids per step would cost a `winget list` subprocess
+            // per step and buy nothing: a package cannot become installed
+            // part-way through this run without dotpkg installing it, and a
+            // step that installs one is not a step this fence gates.
             let sample = || {
-                dotpkg::backend::running_set(
+                dotpkg::apply::sample_fence(
                     &d.scoop,
-                    &fence_ids,
-                    &fence_roots,
+                    &d.winget_scan,
                     &dotpkg::sys::running_processes(),
                 )
             };

@@ -626,6 +626,7 @@ fn a_bucket_add_that_cannot_run_at_all_is_recorded_with_its_error_text() {
     );
 }
 
+use dotpkg::backend::{Scan, ScanOutcome};
 use dotpkg::model::{Installed, SCOOP, WINGET};
 
 fn installed_pkg(name: &str, bins: &[&str]) -> Installed {
@@ -713,12 +714,22 @@ fn the_running_set_detects_both_signals_at_once() {
     )));
 }
 
-// `backend::running_set` is the ONE producer of a `Running` in production, and
-// it must union three inputs, not two. The winget half is what Phase 5 added;
-// a caller that kept scoop's old two-input version is green on all three tests
-// above, which is why this one exists.
+// `apply::sample_fence` is the ONE place production chooses what the fence sees,
+// and it must union three signals, not two. This drives its tested seam,
+// `sample_fence_with_roots`, so the assertions cover BOTH halves of the choice
+// the three call sites used to make for themselves: extracting the winget ids
+// out of a `ScanOutcome`, and unioning winget's package dirs into scoop's.
+//
+// A fabricated root is why the seam is split in two. `sample_fence` reads
+// `package_roots()`, which returns empty on every non-Windows platform, so a
+// test calling it could never exercise the winget path half at all -- see
+// `sample_fence`'s own doc comment.
+//
+// Proven red twice, in both directions: dropping the winget `extend` from
+// `backend::running_set` fails on "winget path half lost", and replacing
+// `scoop.running_apps(procs)` with an empty set fails on "scoop path half lost".
 #[test]
-fn the_running_set_unions_scoop_paths_with_winget_package_dirs() {
+fn the_fence_unions_scoop_paths_with_winget_package_dirs() {
     let root = PathBuf::from("/tmp/dpk-root");
     let wg_root = PathBuf::from("/tmp/dpk-winget/Packages");
     let scoop = Scoop::new(root.clone());
@@ -741,8 +752,14 @@ fn the_running_set_unions_scoop_paths_with_winget_package_dirs() {
             ),
         ),
     ];
-    let winget_ids = [Name::new("PhatMT97.VKey")];
-    let running = dotpkg::backend::running_set(&scoop, &winget_ids, &[wg_root], &procs);
+    // A real `ScanOutcome`, not a bare id list: the extraction from `installed`
+    // is part of what this pins. `bins` deliberately EMPTY here too, so no
+    // guard name can leak into the `names` half by way of the scan.
+    let winget_scan = ScanOutcome::Scanned(Scan {
+        installed: vec![installed_winget_pkg("PhatMT97.VKey", &[])],
+        ..Scan::default()
+    });
+    let running = dotpkg::apply::sample_fence_with_roots(&scoop, &winget_scan, &[wg_root], &procs);
 
     assert!(
         running.covers(&installed_pkg("kanata", &[])),
@@ -753,6 +770,34 @@ fn the_running_set_unions_scoop_paths_with_winget_package_dirs() {
     assert!(
         running.covers(&installed_winget_pkg("PhatMT97.VKey", &[])),
         "winget path half lost"
+    );
+}
+
+// The other direction of the same seam: a winget scan that FAILED contributes no
+// fence entries, so the id is not held merely because a process happens to run
+// under a winget package directory bearing its name. Without this, a
+// `sample_fence_with_roots` that ignored `winget_scan` entirely and fabricated
+// its own id list would pass the test above.
+#[test]
+fn a_winget_scan_that_failed_contributes_no_fence_entries() {
+    let root = PathBuf::from("/tmp/dpk-root");
+    let wg_root = PathBuf::from("/tmp/dpk-winget/Packages");
+    let scoop = Scoop::new(root);
+    let procs = [proc(
+        "vkey",
+        Some(
+            wg_root
+                .join("PhatMT97.VKey_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                .join("VKey.exe"),
+        ),
+    )];
+    let winget_scan = ScanOutcome::Unscannable("list exited 1".to_string());
+
+    let running = dotpkg::apply::sample_fence_with_roots(&scoop, &winget_scan, &[wg_root], &procs);
+
+    assert!(
+        !running.covers(&installed_winget_pkg("PhatMT97.VKey", &[])),
+        "an Unscannable winget scan must contribute no ids to the fence"
     );
 }
 

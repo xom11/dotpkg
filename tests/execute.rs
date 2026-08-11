@@ -1656,19 +1656,23 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
     assert!(matches!(&ex.results[0].result, ItemResult::Held(_)));
 }
 
-// The mid-run re-sampler is the THIRD wiring site for `backend::running_set`,
-// and the easiest to forget: `main.rs`'s closure used to be
-// `d.scoop.running_set(...)`, which has no winget half at all. What this test
-// pins is the half of that hole `execute` owns -- that a winget step held by
-// nothing but a `dirs` entry IS held, with an empty guard list and no related
-// process name, so the `dirs` a Phase 5 sampler now fills for winget actually
-// reaches the fence rather than being consulted for scoop names only.
+// **What this proves:** `execute`'s consumption of the fence. A winget step held
+// by nothing but a `dirs` entry -- empty guard list, no related process name --
+// IS held, so the winget ids a Phase 5 sampler now puts in `dirs` actually reach
+// the hold path rather than `covers_any` consulting `dirs` for scoop only.
+// Mutating `Running::covers_name` to drop its `dirs` half turns this red, and it
+// goes red in the dangerous direction: `FakeWingetMutator::unreachable` catches a
+// real `winget uninstall` reaching the executor.
 //
-// **What it does not pin, structurally:** the wiring in `main.rs` itself.
-// `main.rs` is the binary crate; an integration test links only the library, so
-// no test in this suite can observe which closure `main.rs` builds. That site is
-// held instead by the compiler -- `Scoop::running_set` was deleted in this same
-// task, so a scoop-only sampler is no longer a thing that can be written there.
+// **What this does NOT prove, and must not be read as covering:** that
+// `main.rs`'s re-sampler closure builds the fence correctly. `main.rs` is the
+// binary crate and an integration test links only the library, so no test in this
+// suite can observe which closure `main.rs` builds -- verified by reverting that
+// closure to a winget-blind sampler and watching the whole suite stay green.
+// `apply::sample_fence` is what closes that gap, by moving the choice of ids and
+// roots into a library function; `the_fence_unions_scoop_paths_with_winget_package_dirs`
+// in `tests/scoop_scan.rs` is the test that pins it. Read `sample_fence`'s doc
+// comment for the residual that remains after both.
 #[test]
 fn the_re_sampler_holds_a_winget_step_caught_only_by_its_package_directory() {
     let t = Tree::new();

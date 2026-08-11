@@ -1740,8 +1740,12 @@ mod tests {
     #[test]
     fn version_liveness_names_the_contention_cause_without_retrying_it() {
         // No retry here, deliberately: the argv this function uses returned 0
-        // nonzero exits in 105 invocations (measurements-2026-08-11 §5),
-        // including 30 against a continuous source-update loop. Building a
+        // nonzero exits in **85** invocations (measurements-2026-08-11 §5),
+        // including 30 against a continuous source-update loop. The other 20 of
+        // that document's 105 are `list -e --id <id>`, which is
+        // `list_one_argv`'s shape and not this function's -- writing 105 here
+        // attributes another call's evidence to this one, which is exactly the
+        // defect the Task 7 review caught in two sibling comments. Building a
         // retry loop on an unobserved failure mode only slows a certain
         // failure down. What it CAN do is say what the code has been measured
         // to mean elsewhere.

@@ -851,8 +851,12 @@ directory over.
     scoop's included.
   - **`status` is already resilient.** It never calls `version_liveness`; it uses
     `backend::scan_or_warn` (`main.rs:481` on this tree; the measurement document
-    records `:468`, from the base tree this phase then edited), which exists so a
-    winget hiccup cannot abort scoop's half. Item 11 is an `apply` problem only.
+    **also** records `:481`, having been re-pointed in place by the fix wave —
+    the table at "Five corrections made in place" below records that very edit,
+    so this sentence and that table disagreed until 2026-08-12. `:468` survives
+    there only as the historical value read against the base tree), which exists
+    so a winget hiccup cannot abort scoop's half. Item 11 is an `apply` problem
+    only.
 
 ### `--show-unmanaged` does not restore the previous output byte for byte
 
@@ -1246,8 +1250,16 @@ reader argv `version_liveness` uses returned **0 nonzero exits in 105
 invocations**"*, and the Scope table at `:20` compresses it further to "0 of 105".
 **Twenty of those 105 are `list -e --id <id>`**, which is `list_one_argv`'s shape,
 not `version_liveness`'s. This is the same defect the Task 7 review caught in two
-code comments — the code now states the 85 / 20 split correctly at all three sites
-that mention it — and it went unrecorded against the design that seeded it. The
+code comments. ~~the code now states the 85 / 20 split correctly at all three
+sites that mention it~~ — **corrected 2026-08-12: there are five sites in
+`src/backend/winget.rs` that mention the 105, not three, and one of them still
+carried the defect.** `version_liveness_names_the_contention_cause_without_
+retrying_it`'s comment read "the argv this function uses returned 0 nonzero exits
+in 105 invocations" — the singular attribution, in the test comment, while the
+three prose sites beside it had been fixed. It now says 85 and names where the
+other 20 belong. The sentence claiming the class was closed everywhere was
+itself the last instance of it. It also went unrecorded against the design that
+seeded it. The
 measurement document itself is not wrong: §5's table lists the argvs separately
 and only totals them in a `| | | **105** | **0** |` row.
 
@@ -1678,9 +1690,13 @@ still on disk and are what the counts above were re-derived from for this sectio
 `Unviable`, 2 `MissedMutant`, and the baseline's own `Success` — with both
 `start_time` and `end_time` present (`12:44:55Z` → `12:48:05Z`), `missed.txt`
 holding exactly two lines, `caught.txt` 59, `unviable.txt` 11, and `timeout.txt`
-**empty**. Only one `mutants.out` exists on disk and it is the second run's, so the
-first run's numbers come from the ledger and are **not** independently
-re-derivable from artifacts today. Said rather than glossed: the 70/57 row is a
+**empty**. The first run's numbers come from the ledger and are **not**
+independently re-derivable from artifacts today. *(Corrected 2026-08-12: this
+used to argue that from "only one `mutants.out` exists on disk". `mutants.out` is
+git-ignored — `.gitignore` lists `/mutants.out` and `/mutants.out.old` — so how
+many exist is a fact about one machine at one moment, not something any reader of
+this repository can check, and every later run overwrites the same default
+directory. The conclusion stands; the evidence offered for it never did.)* Said rather than glossed: the 70/57 row is a
 ledger record, the 72/59 row is a re-derivation.
 
 **The baseline passing at all is the direct proof the flake fix above worked** —
@@ -2028,8 +2044,13 @@ machine's scoop half had been counted. **A number now exists — 24 — but it i
 that number, and this file will not let it stand in for it.** The dogfood ran from
 its own directory with its own `pkg.toml`; a14's real `pkg.toml` was verified
 **unchanged** (`32A238FF…`) and was never the input. So the 24 counts scoop apps
-undeclared *by the dogfood config*, and it is not comparable either to §4's
-fixture-illustrative 6 or to the 25 scoop packages a14's real `pkg.toml` declares.
+undeclared *by the dogfood config*, and it is not comparable either to this
+file's own fixture-illustrative 6 or to the 25 scoop packages a14's real
+`pkg.toml` declares. *(Corrected 2026-08-12: the 6 was attributed to the
+measurement document's §4, which contains no scoop count of 6 — its only scoop
+figure is the 25. The 6 comes from `src/render.rs`'s fixture, which this file
+says correctly elsewhere. Setting a real §4 number beside one §4 does not hold
+is the same pointer defect this file already records fixing once.)*
 What the 24 does establish, and it is worth having: **the collapse fires for
 scoop on real hardware**, with a real scoop install and a real count, so the
 "this changes scoop's output too" claim above is no longer structural-only.

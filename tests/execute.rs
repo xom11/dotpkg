@@ -1656,6 +1656,55 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
     assert!(matches!(&ex.results[0].result, ItemResult::Held(_)));
 }
 
+// The mid-run re-sampler is the THIRD wiring site for `backend::running_set`,
+// and the easiest to forget: `main.rs`'s closure used to be
+// `d.scoop.running_set(...)`, which has no winget half at all. What this test
+// pins is the half of that hole `execute` owns -- that a winget step held by
+// nothing but a `dirs` entry IS held, with an empty guard list and no related
+// process name, so the `dirs` a Phase 5 sampler now fills for winget actually
+// reaches the fence rather than being consulted for scoop names only.
+//
+// **What it does not pin, structurally:** the wiring in `main.rs` itself.
+// `main.rs` is the binary crate; an integration test links only the library, so
+// no test in this suite can observe which closure `main.rs` builds. That site is
+// held instead by the compiler -- `Scoop::running_set` was deleted in this same
+// task, so a scoop-only sampler is no longer a thing that can be written there.
+#[test]
+fn the_re_sampler_holds_a_winget_step_caught_only_by_its_package_directory() {
+    let t = Tree::new();
+    t.empty_apps();
+    let fake = Fake::honest(&t);
+    let wm = FakeWingetMutator::unreachable();
+    let steps = vec![Step::Winget(WingetStep::Remove {
+        id: Name::new("PhatMT97.VKey"),
+        version: "1.0.0".to_string(),
+        // EMPTY, unlike the test above: with a guard entry this would be held
+        // on the `names` half and prove nothing about `dirs`.
+        guard: Vec::new(),
+    })];
+    let mut state = State::default();
+    let sample = || {
+        Running::new(
+            // Nothing related to the package: "vkey" here would make the
+            // `names` half sufficient on its own.
+            std::collections::BTreeSet::from(["explorer".to_string()]),
+            std::collections::BTreeSet::from([Name::new("PhatMT97.VKey")]),
+        )
+    };
+    let ex = execute(
+        t.root(),
+        steps,
+        &fake,
+        &wm,
+        &mut state,
+        &sample,
+        &ExecOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(ex.held(), 1, "got {:?}", ex.results);
+    assert!(matches!(&ex.results[0].result, ItemResult::Held(_)));
+}
+
 // -- Task 7: root_looks_like_scoop only when a scoop step exists ----------
 
 #[test]

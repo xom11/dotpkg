@@ -467,7 +467,13 @@ fn main() -> Result<()> {
             // `scan_or_warn`'s own doc comment.
             let winget_scan = dotpkg::backend::scan_or_warn(&winget);
             let procs = dotpkg::sys::running_processes();
-            let running = scoop.running_set(&procs);
+            let winget_ids = dotpkg::backend::winget_fence_ids(&winget_scan);
+            let running = dotpkg::backend::running_set(
+                &scoop,
+                &winget_ids,
+                &dotpkg::backend::winget::package_roots(),
+                &procs,
+            );
 
             // Before the plan, not after: a package missing from the plan
             // because dotpkg could not read it is the one thing the plan
@@ -713,7 +719,20 @@ fn main() -> Result<()> {
             let opts = dotpkg::execute::ExecOptions {
                 recovery_path: recovery_path.clone(),
             };
-            let sample = || d.scoop.running_set(&dotpkg::sys::running_processes());
+            // The winget ids are sampled once: a package cannot become
+            // installed part-way through this run without dotpkg installing
+            // it, and a step that installs one is not a step this fence gates.
+            // The PROCESSES are re-sampled per step, which is the whole point.
+            let fence_ids = dotpkg::backend::winget_fence_ids(&d.winget_scan);
+            let fence_roots = dotpkg::backend::winget::package_roots();
+            let sample = || {
+                dotpkg::backend::running_set(
+                    &d.scoop,
+                    &fence_ids,
+                    &fence_roots,
+                    &dotpkg::sys::running_processes(),
+                )
+            };
             // Constructed here, not passed in: `main.rs` is the one place a
             // real winget mutation is ever allowed to happen, same as
             // `d.scoop` for the scoop half of this call. Every test uses

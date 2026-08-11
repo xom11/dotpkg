@@ -236,6 +236,65 @@ pub fn scan_or_warn(backend: &dyn Backend) -> ScanOutcome {
     }
 }
 
+/// The `Running` every production path receives: process names, scoop's package
+/// directories, and winget's package directories, unioned.
+///
+/// **The only producer of a `Running` outside tests, deliberately.**
+/// **Structural**, checkable by grepping `Running::new` across `src/`: every
+/// other call site is inside `model.rs`'s own `#[cfg(test)] mod tests`, and the
+/// three production sites (`apply::load_everything`, `main.rs`'s `status` arm,
+/// `main.rs`'s per-step re-sampler closure) all call this function.
+///
+/// `Scoop::running_set` used to be that producer and was removed here rather
+/// than kept. Its doc comment carried the reasoning this union still rests on,
+/// moved here verbatim in substance: name matching and path matching each cover
+/// the other's blind spot -- an elevated process reports no `exe` and is caught
+/// only by name; a package naming no executable at all (`nodejs`) is caught
+/// only by path -- so a caller that drops either input silently loses whatever
+/// only that half could see. A scoop-only producer left in place keeps exactly
+/// that mistake writable. Phase 4b named the consequence: fixing the scanner
+/// and not the mid-run sampler "would close the plan-time hole and leave the
+/// during-the-run hole exactly as wide".
+///
+/// Assembling the union here rather than in `main.rs` is also what makes it
+/// testable at all: `main.rs` is the binary crate, so no integration test can
+/// reach a closure built there, while this function takes fabricated `Process`
+/// values on any OS.
+///
+/// `winget_ids` is the winget scan's `installed` names and never its `opaque`
+/// ones. **Structural:** `plan()` only ever reaches `Running::covers` through an
+/// `Installed` (`src/plan.rs:414` and `:462`, both passing an `&Installed`), and
+/// an `opaque` id is turned into `SkipReason::Opaque` and `continue`d at
+/// `src/plan.rs:345`, before either fence check is reached.
+pub fn running_set(
+    scoop: &scoop::Scoop,
+    winget_ids: &[Name],
+    winget_roots: &[PathBuf],
+    procs: &[crate::sys::Process],
+) -> crate::model::Running {
+    let names = procs.iter().map(|p| p.name.clone()).collect();
+    let mut dirs = scoop.running_apps(procs);
+    dirs.extend(winget::running_ids(winget_roots, procs, winget_ids));
+    crate::model::Running::new(names, dirs)
+}
+
+/// The winget `installed` names a `running_set` call needs, or none when the
+/// scan failed outright. An `Unscannable` winget backend contributes no fence
+/// entries, which matches how the same outcome is already treated elsewhere:
+/// **structural**, `main.rs`'s `reconcile_ghosts` guards its winget
+/// `State::reconcile` call behind `if let ScanOutcome::Scanned(..)` and so
+/// reconciles nothing for a winget scan that failed.
+///
+/// `installed` only, deliberately -- unlike `main.rs`'s `present_after`, which
+/// unions `installed` with `opaque`. See `running_set`'s own doc comment for the
+/// structural reason an `opaque` id can never be asked about here.
+pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
+    match outcome {
+        ScanOutcome::Scanned(s) => s.installed.iter().map(|i| i.name.clone()).collect(),
+        ScanOutcome::Unscannable(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

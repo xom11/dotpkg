@@ -201,6 +201,12 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
 /// aliases, `xh` and `xhs`, and `xhs` is neither the id, the display name,
 /// nor the last segment of either. A package's second alias is invisible to
 /// this, and no scan-time source for it exists.
+///
+/// That is one case, not the whole class -- a single-alias package is missed
+/// too whenever the id's last segment is a build or vendor qualifier
+/// (**measured:** `rg` / `BurntSushi.ripgrep.MSVC`). `rows_to_scan`'s doc
+/// comment on `bins` carries the corrected framing and what narrows it; it is
+/// not repeated here.
 pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let last = id.rsplit('.').next().unwrap_or(id);
@@ -227,12 +233,9 @@ pub(crate) fn guard_names(id: &str, display: &str) -> Vec<String> {
 /// non-Windows platform. `running_ids` is a no-op on an empty root list, so
 /// nothing needs a `cfg`.
 ///
-/// **Structural:** no code in this crate calls `package_roots` today -- not
-/// this module's own tests, nor anywhere else. Wiring it into the scan/guard
-/// path is a later task in this same plan; the `allow` below is temporary
-/// until then.
-#[allow(dead_code)]
-pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
+/// `pub`, not `pub(crate)`, for one reason: `src/main.rs` is a separate crate
+/// from the library and its per-step re-sampler closure needs these roots.
+pub fn package_roots() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         out.push(
@@ -279,11 +282,9 @@ pub(crate) fn package_roots() -> Vec<std::path::PathBuf> {
 /// no suffix is accepted too, which is **reasoned, not measured** -- all 5
 /// observed directories carry a suffix.
 ///
-/// **Structural:** unlike `package_roots`, this function is called -- but
-/// only by its own tests in this module; nothing outside `#[cfg(test)]` calls
-/// it yet. Wiring it into the scan/guard path is a later task in this same
-/// plan; the `allow` below is temporary until then.
-#[allow(dead_code)]
+/// **Structural:** `backend::running_set` is the one non-test caller, and it is
+/// the only producer of a `Running` outside tests -- so every winget entry that
+/// ever reaches the fence's `dirs` half comes from here.
 pub(crate) fn running_ids(
     roots: &[std::path::PathBuf],
     procs: &[crate::sys::Process],
@@ -395,10 +396,24 @@ pub(crate) fn running_ids(
 /// `arch` and `bucket` are always `None`: winget exposes neither. `bins` is
 /// filled by `guard_names` (see its own doc comment) from `group[0]`'s
 /// display `id` and `name` -- not a manifest, because winget has none, but
-/// the two guesses measured to catch a live process. `guard_names` still has
-/// one known residual gap: a package's *second* alias (measured on
-/// `ducaale.xh`, whose install created both `xh` and `xhs`) is invisible to
-/// it, and no scan-time source for that exists.
+/// the two guesses measured to catch a live process.
+///
+/// **The residual gap is wider than this comment used to claim.** It said the
+/// missed case was a package's *second* alias (`ducaale.xh`, whose install
+/// created both `xh` and `xhs`). That example is real, but the framing was too
+/// narrow: **measured**
+/// (`docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md` §4) `rg` is
+/// ripgrep's *only* command and `guard_names` misses it too, because
+/// `BurntSushi.ripgrep.MSVC`'s last dotted segment is `MSVC` and the display
+/// name folds to `ripgrep msvc`. Any id whose last segment is a build or
+/// vendor qualifier rather than the command is in this class, not just an id
+/// with two aliases. No scan-time source for the real command exists.
+///
+/// Two things narrow that gap, neither of them here. `running_ids` catches the
+/// **portable** subset by path regardless of what the process is called -- 4 of
+/// 36 installed ids on a14, so a minority -- and a declared `[winget.guard]`
+/// entry is meant to cover the rest. That config key is Phase 5 Task 3 and does
+/// **not** exist in this tree yet.
 pub fn rows_to_scan(rows: Vec<WingetRow>) -> Scan {
     let mut groups: BTreeMap<Name, Vec<WingetRow>> = BTreeMap::new();
     for row in rows {

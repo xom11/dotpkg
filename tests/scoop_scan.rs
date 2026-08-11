@@ -626,11 +626,22 @@ fn a_bucket_add_that_cannot_run_at_all_is_recorded_with_its_error_text() {
     );
 }
 
-use dotpkg::model::{Installed, SCOOP};
+use dotpkg::model::{Installed, SCOOP, WINGET};
 
 fn installed_pkg(name: &str, bins: &[&str]) -> Installed {
     Installed {
         backend: SCOOP.to_string(),
+        name: Name::new(name),
+        version: "0".to_string(),
+        arch: None,
+        bucket: None,
+        bins: bins.iter().map(|b| b.to_string()).collect(),
+    }
+}
+
+fn installed_winget_pkg(name: &str, bins: &[&str]) -> Installed {
+    Installed {
+        backend: WINGET.to_string(),
         name: Name::new(name),
         version: "0".to_string(),
         arch: None,
@@ -656,7 +667,9 @@ fn the_running_set_detects_a_package_reachable_only_by_path() {
         Some(root.join("apps/nodejs/current/node.exe")),
     )];
 
-    let running = scoop.running_set(&procs);
+    // The two empty slices are the winget half -- ids and package roots --
+    // which this test deliberately does not exercise.
+    let running = dotpkg::backend::running_set(&scoop, &[], &[], &procs);
 
     assert!(running.covers(&installed_pkg("nodejs", &[])));
 }
@@ -670,7 +683,9 @@ fn the_running_set_detects_a_package_reachable_only_by_name() {
     let scoop = Scoop::new(root);
     let procs = [proc("kanata_windows_tty_winiov2_arm64", None)];
 
-    let running = scoop.running_set(&procs);
+    // The two empty slices are the winget half -- ids and package roots --
+    // which this test deliberately does not exercise.
+    let running = dotpkg::backend::running_set(&scoop, &[], &[], &procs);
 
     assert!(running.covers(&installed_pkg(
         "kanata",
@@ -687,13 +702,58 @@ fn the_running_set_detects_both_signals_at_once() {
         proc("kanata_windows_tty_winiov2_arm64", None),
     ];
 
-    let running = scoop.running_set(&procs);
+    // The two empty slices are the winget half -- ids and package roots --
+    // which this test deliberately does not exercise.
+    let running = dotpkg::backend::running_set(&scoop, &[], &[], &procs);
 
     assert!(running.covers(&installed_pkg("nodejs", &[])));
     assert!(running.covers(&installed_pkg(
         "kanata",
         &["kanata_windows_tty_winiov2_arm64"]
     )));
+}
+
+// `backend::running_set` is the ONE producer of a `Running` in production, and
+// it must union three inputs, not two. The winget half is what Phase 5 added;
+// a caller that kept scoop's old two-input version is green on all three tests
+// above, which is why this one exists.
+#[test]
+fn the_running_set_unions_scoop_paths_with_winget_package_dirs() {
+    let root = PathBuf::from("/tmp/dpk-root");
+    let wg_root = PathBuf::from("/tmp/dpk-winget/Packages");
+    let scoop = Scoop::new(root.clone());
+    let procs = [
+        // Caught only by its scoop path. Measured on a14: this is kanata's real
+        // process name, and it resembles neither the package name nor any
+        // prefix or suffix of it.
+        proc(
+            "kanata_windows_tty_winiov2_arm64",
+            Some(root.join("apps/kanata/current/kanata_windows_tty_winIOv2_arm64.exe")),
+        ),
+        // Caught only by its winget package dir. Measured: the one live process
+        // under WinGet\Packages on a14.
+        proc(
+            "vkey",
+            Some(
+                wg_root
+                    .join("PhatMT97.VKey_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                    .join("VKey.exe"),
+            ),
+        ),
+    ];
+    let winget_ids = [Name::new("PhatMT97.VKey")];
+    let running = dotpkg::backend::running_set(&scoop, &winget_ids, &[wg_root], &procs);
+
+    assert!(
+        running.covers(&installed_pkg("kanata", &[])),
+        "scoop path half lost"
+    );
+    // `bins` deliberately EMPTY: with "vkey" in it this would pass on the
+    // `names` half alone and prove nothing about the path half.
+    assert!(
+        running.covers(&installed_winget_pkg("PhatMT97.VKey", &[])),
+        "winget path half lost"
+    );
 }
 
 // `std::os::windows::fs::symlink_dir` needs Developer Mode or an elevated

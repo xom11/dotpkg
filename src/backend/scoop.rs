@@ -1,7 +1,7 @@
 use super::{Backend, ResolveCtx, Scan};
 use crate::bucket::{self, BucketChoice};
 use crate::lock::Pin;
-use crate::model::{Installed, Name, Running, SCOOP};
+use crate::model::{Installed, Name, SCOOP};
 use crate::sys::{Process, EXECUTABLE_SUFFIXES};
 use crate::update::Resolution;
 use anyhow::{Context, Result};
@@ -206,22 +206,6 @@ impl Scoop {
             }
         }
         out
-    }
-
-    /// The `Running` the planner receives: name matching and path matching,
-    /// unioned. Each covers the other's blind spot -- an elevated process
-    /// reports no `exe` and is caught only by name; a package naming no
-    /// executable at all (`nodejs`) is caught only by path -- so a caller that
-    /// drops either input silently loses whatever only that half could see.
-    ///
-    /// This one-line union used to live in `main.rs`, which is not reachable
-    /// from a test at all. Assembling it here instead makes it testable on
-    /// any OS with fabricated `Process` values, no real process required.
-    pub fn running_set(&self, procs: &[Process]) -> Running {
-        Running::new(
-            procs.iter().map(|p| p.name.clone()).collect(),
-            self.running_apps(procs),
-        )
     }
 }
 

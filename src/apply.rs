@@ -1061,7 +1061,13 @@ pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<
     // half of this run. See `crate::backend::scan_or_warn`'s own doc comment.
     let winget_scan = crate::backend::scan_or_warn(&winget);
     let procs = crate::sys::running_processes();
-    let running = scoop.running_set(&procs);
+    let winget_ids = crate::backend::winget_fence_ids(&winget_scan);
+    let running = crate::backend::running_set(
+        &scoop,
+        &winget_ids,
+        &crate::backend::winget::package_roots(),
+        &procs,
+    );
     Ok(Driver {
         declared,
         locked,

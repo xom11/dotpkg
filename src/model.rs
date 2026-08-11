@@ -210,10 +210,16 @@ pub const WINGET: &str = "winget";
 /// that names no executable in its manifest at all, which on the author's
 /// machine is `nodejs` and `rustup`.
 ///
-/// `dirs` is scoop-only by construction: `Scoop::running_apps` is its only
-/// producer, and it only ever inserts path segments found under the scoop
-/// root (`$SCOOP/apps` or `$SCOOP/persist`), so a winget package's name can
-/// never land in it.
+/// `dirs` carries both backends since Phase 5. `Scoop::running_apps` inserts a
+/// path segment under `$SCOOP/apps` or `$SCOOP/persist`;
+/// `backend::winget::running_ids` inserts a winget id whose own package
+/// directory holds a running executable. **Measured:** winget creates such a
+/// directory only for a `portable` package -- 4 of 36 installed ids on a14 --
+/// so a winget EXE/MSI application still reaches this fence only through
+/// `names` (matched against `bins`, which `winget::guard_names` guesses) or,
+/// once Phase 5 Task 3 adds it, a declared `[winget.guard]` entry. That config
+/// key does **not** exist in this tree yet; `names` is the whole of the
+/// non-portable coverage today.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Running {
     names: BTreeSet<String>,

@@ -19,7 +19,14 @@ including several corrections made to the controller — is
 
 ## Read this first
 
-### The one user-visible behaviour change that is not an addition
+### The two user-visible behaviour changes that are not additions
+
+The first is the only one that can make a previously-passing `apply` refuse.
+The second only ever lets a run through that used to be stopped, so it is
+listed second — but it is a behaviour change, not an addition, and a reader
+scanning for "what moved" needs both.
+
+#### 1. A declared winget package with no lock entry now fails the run
 
 **A declared winget package with no `pkg.lock` entry now fails the whole
 `apply` run (exit 2), where it used to be a benign report line.** Identical to
@@ -32,6 +39,17 @@ could not when the exemption was written.
 
 Structural, and pinned by `tests/cli.rs`. It is the only change on this branch
 that can make a previously-passing `apply` refuse.
+
+#### 2. A winget-only run no longer needs a scoop root
+
+`apply` used to require a discoverable scoop root before it would do anything.
+A machine with winget packages and no scoop was therefore refused, even though
+nothing in the run touched scoop. The root is now required only for runs that
+actually contain a scoop step.
+
+This can only turn a refusal into a run — never the reverse — so it cannot
+break a working setup. It is here because it changes what `apply` does on a
+machine whose configuration did not change.
 
 ### winget's exit code is never the verdict. The verdict is always the re-scan
 

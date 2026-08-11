@@ -26,9 +26,11 @@ resolved to), `state.json` (what dotpkg installed, so prune can never reach a
 package it did not put there), scoop's own `apps/*/current/manifest.json` on
 disk, and `winget list`.
 
-`status` is the one command that never refuses over an unreadable lock: it
-warns and prints the plan anyway, because that plan is the information you need
-in order to fix the lock.
+`status` is the one command that never refuses over an *incoherent* lock — one
+that parses, but that `apply` would reject. It warns and prints the plan
+anyway, because that plan is the information you need in order to fix the lock.
+A lock it cannot read at all (malformed TOML, or an I/O error that is not
+"missing") still stops `status`, because there is no plan to print.
 
 ## `apply`
 

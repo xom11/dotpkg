@@ -1531,7 +1531,7 @@ fn a_winget_step_and_a_scoop_step_are_different_types() {
 fn a_winget_set_sorts_before_every_removal_of_either_backend() {
     // `WingetStep` appeared in exactly one test before this (as `Remove`
     // only, above); `WingetStep::Set` appeared in none. This pins `order`'s
-    // group assignment for it (execute.rs:190): it must sort into group 0,
+    // group assignment for it (execute.rs:223): it must sort into group 0,
     // with installs, ahead of every removal -- scoop's or winget's --
     // because install-before-uninstall exists so that a run that dies
     // partway leaves an extra package rather than a missing one, per

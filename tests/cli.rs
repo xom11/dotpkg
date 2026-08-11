@@ -723,7 +723,7 @@ fn a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_note() {
 #[test]
 fn a_ready_prune_with_nothing_held_back_gets_no_routing_bug_warning() {
     // `unrouted_warning(preparation.ready_count(), steps.len() + held.len())`
-    // (main.rs:602). A single adopted, undeclared package with nothing else
+    // (main.rs:670). A single adopted, undeclared package with nothing else
     // declared routes to exactly one step and zero held items, so the two
     // numbers already agree without needing addition's identity element to
     // save them -- a product would not: with `held.len() == 0`,
@@ -1106,7 +1106,7 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     // either fix existed -- pinned here so the exit code stays explainable
     // on this branch too, matching the format `render_preparation`'s own
     // test (`src/render.rs`) pins for the identical shape. The name column is
-    // one wider than it used to be (`src/render.rs:229`, Task 16's Windows
+    // one wider than it used to be (`src/render.rs:505`, Task 16's Windows
     // fix wave) so a real winget id no longer runs into what follows it.
     assert!(
         stdout.contains("  !       scoop  aichat         running -- stop it first\n"),
@@ -1695,10 +1695,12 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_i
 // reading: before these, `tests/cli.rs` invoked only `apply` and `status`, so
 // every exit-code decision in the `Update` and `Adopt` arms of `main.rs` was
 // unreachable from the suite. cargo-mutants reported five survivors there --
-// `main.rs:438` (the undeclared-package refusal), `main.rs:459` (three
-// mutants on `failed_count() > 0`), `main.rs:470` (the relative `--state`
-// refusal) and `main.rs:496` (the refusal exit) -- all of which are killed by
-// the tests below.
+// `main.rs:882` (the undeclared-package refusal), `main.rs:943` (three
+// mutants on `failed_count() > 0`), `main.rs:955` (the relative `--state`
+// refusal) and `main.rs:1004` (adopt's refusal exit) -- all of which are
+// killed by the tests below. Those four numbers name this tree; the survivors
+// were reported against Phase 3's, where the same four checks sat at `:438`,
+// `:459`, `:470` and `:496`.
 //
 // The exit code IS the product for these commands: `update` runs unattended
 // and a scheduled task learns "a package could not be re-resolved" only from

@@ -1717,9 +1717,16 @@ mod tests {
         // `DELAY` is 200 ms, not the production 1 s: enough that the 100 ms
         // margin on either side of the split cannot be crossed by ordinary
         // scheduling noise, and small enough that the suite pays 0.2 s once.
-        // That margin is *reasoned*, not measured against a loaded machine --
-        // if this test ever flakes, the fix is a larger `DELAY`, not a wider
-        // threshold, because the threshold is what does the detecting.
+        // That margin was *reasoned* when this sentence was first written and
+        // was *measured* immediately afterwards, by the scoped re-review of the
+        // fix wave that added this test: on `2a35df2`, 20 consecutive runs
+        // under 20 busy loops on 10 CPUs, 0 flakes. See
+        // `docs/phase5-notes.md`'s "The suite's one wall-clock assertion" for
+        // the numbers. Structurally, only the `tail` assertion
+        // is timing-sensitive at all -- `total >= DELAY` cannot fail, because
+        // `sleep` never returns early. If this test ever flakes anyway, the fix
+        // is a larger `DELAY`, not a wider threshold, because the threshold is
+        // what does the detecting.
         const DELAY: std::time::Duration = std::time::Duration::from_millis(200);
         let fake = ScriptedWinget::new(vec![
             Ok(CmdOut {

@@ -428,10 +428,105 @@ project keeps paying for.
    captures a function's pipeline output, so `$x = Invoke-Status …` collects
    every reported line instead of displaying it. Caught by reading the script,
    not by any gate.
-4. **I reported an `scp` exit code that was `grep`'s.** `scp … | grep -v …; echo
+4. **I wrote down trap 3 and then walked into it, one script later.**
+   `p6b-trigger.ps1`'s `Measure-SourceUpdate` reports with the same
+   `Write-Output` helper and its result was assigned, so every reported line was
+   captured into the caller's variable and then re-emitted inside the summary
+   string. The data survived and is readable, but only because the summary
+   happened to print the variable; it was luck, not design. Documenting a trap is
+   not the same as putting a gate in front of it.
+5. **I reported an `scp` exit code that was `grep`'s.** `scp … | grep -v …; echo
    $?` reports the last element of the pipeline. The upload was verified
    afterwards by listing the files on the machine, which is what should have
    been done first.
+
+## 9. The Windows suite on the branch tree
+
+The suite in §6 describes `c7086f0`. This branch changes `.rs`, so it was run
+again on **`ea6d91f`**, shipped the same way — whole-tree manifest, 72 files,
+recomputed on the machine, `unlisted on disk : 0`.
+
+- **exit 0, 641 passed / 0 failed / 1 ignored**, across **14** `test result:`
+  lines.
+- Fixture unchanged: 30958 bytes, 143 CRLF pairs, sha256 `c71284a393f87686…`.
+- **Name by name**: macOS **643**, Windows **642**, common **641**. The
+  difference set is byte-identical to every previous run — the same two
+  `#[cfg(unix)]` tests missing on Windows, the same one `#[cfg(windows)]
+  #[ignore]` test missing on macOS.
+- The `#[ignore]`d elevated test passes when invoked by name.
+
+The five-test rise (638 → 643) is this branch's own: two round-trip guard tests,
+one `SourceRefresh` unit test, and two `update.rs` integration tests.
+
+## 10. Item 20 live: the retry still has not fired, and now that means something
+
+**The point of the instrumentation was to make a zero informative.** Stage C's
+zero could not distinguish "the contention never reproduced" from "it reproduced
+and the retry absorbed it". This round's zero can: the line is printed whenever
+`AfterRetry` comes back, so its absence says the retry did not fire.
+
+**Measured, on `ea6d91f`, 70 contended `dotpkg update` rounds in three
+configurations, and a quiet counterweight before each:**
+
+| configuration | rounds | rounds printing the retry line |
+|---|---|---|
+| no competitor (counterweight) | 5 + 5 + 5 | **0** |
+| one `winget list` loop | 20 | **0** |
+| four `winget list` loops | 30 | **0** |
+| two `winget source update` loops | 20 | **0** |
+
+**The plumbing was proven rather than assumed**, because otherwise this table is
+a gate that narrates its own result. Two checks:
+
+1. The shipped binary contains both new strings (`0x8A150001` and `succeeded
+   on…`).
+2. **Positive control on the sibling arm of the same `match`**: with winget
+   removed from `PATH` for one run, the real binary printed
+   `warning: winget: could not refresh its index (winget source update could not
+   be run: winget.exe is not on PATH); resolving against whatever it already
+   has.` So the `warnings` vector from exactly this code path reaches the
+   terminal. A zero from the other arm is a fact about the trigger, not about
+   the wiring.
+
+**So item 20 is half closed.** The ambiguity it was written about is gone; the
+observation it asked for has not happened. What is now known and was not: 70
+contended rounds through `dotpkg update` are not enough, which is itself a bound
+nobody had.
+
+## 11. The trigger, re-measured — and §5's account of it has aged
+
+Run because 0 of 70 through `dotpkg update` disagrees with §5's `3 of 10`, and
+this project's rule is to re-measure the number that disagrees before explaining
+it. Same argv as §5, invoked directly, exit codes captured by direct invocation.
+
+| condition | calls | `0x8A150001` | 2026-08-11 recorded |
+|---|---|---|---|
+| alone | 10 | **0** | 0 of 10 |
+| one concurrent `winget list` | 10 | **0** | **3 of 10** |
+| four concurrent `winget list` | 10 | **1** | not measured |
+
+**The trigger still exists but is rarer than the record says.** One competitor
+reproduced it 3 of 10 times on 2026-08-11 and 0 of 10 today; it took four
+competitors to see one. That is enough to explain the dogfood zero without
+appealing to anything about dotpkg.
+
+**Two things about §5 that no longer hold, both worth the record:**
+
+- **Duration no longer distinguishes a failure from a success.** §5: failures
+  60–72 ms, successes 348–623 ms, "distinguishable on three independent axes —
+  exit code, duration, and output presence". Today the one failure took
+  **1245 ms** and a success in the same round took **1266 ms** — 21 ms apart.
+  Exit code and empty stdout still separate them; duration does not.
+- **The 1 s retry delay no longer clears the success range.** `update_source`'s
+  own comment reasons that 1 s "clears that success range with margin" against
+  348–623 ms. Measured today on the same machine, successful `source update`
+  calls take **1.2–5.4 s**. A 1 s wait is now *inside* the range of how long the
+  competitor it is waiting out takes to finish. Still-open item 11 asks whether
+  1 s is "sufficient on a slower machine"; it is now measured to be insufficient
+  on *this* machine, against today's durations. **Nothing here says the retry is
+  wrong** — a retry that fires too early simply fails twice and warns, which is
+  the behaviour already shipped — but the comment's stated justification is no
+  longer true and should not be read as if it were.
 
 ## 8. What is still outstanding, and exactly what it needs
 

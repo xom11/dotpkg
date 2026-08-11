@@ -1253,8 +1253,8 @@ not `version_liveness`'s. This is the same defect the Task 7 review caught in tw
 code comments. ~~the code now states the 85 / 20 split correctly at all three
 sites that mention it~~ — **corrected 2026-08-12: there are five sites in
 `src/backend/winget.rs` that mention the 105, not three, and one of them still
-carried the defect.** `version_liveness_names_the_contention_cause_without_
-retrying_it`'s comment read "the argv this function uses returned 0 nonzero exits
+carried the defect.** The comment on
+`version_liveness_names_the_contention_cause_without_retrying_it` read "the argv this function uses returned 0 nonzero exits
 in 105 invocations" — the singular attribution, in the test comment, while the
 three prose sites beside it had been fixed. It now says 85 and names where the
 other 20 belong. The sentence claiming the class was closed everywhere was
@@ -2424,8 +2424,10 @@ Windows run could settle.
     item said closing it "means writing test scaffolding for a producer that
     doesn't exist". No scaffolding was needed: both guards are private `fn`s that
     the suite **already** exercises directly, bypassing the public editors
-    entirely (`src/config_edit.rs`'s `the_round_trip_guard_rejects_a_result_that_
-    changes_more_than_packages` and its two winget-side siblings). Pinning a
+    entirely: `the_round_trip_guard_rejects_a_result_that_changes_more_than_packages`
+    and the two `the_winget_round_trip_guard_*` tests beside it all call the
+    guards by name. *(Named rather than cited by line on purpose -- this file has
+    paid for that class four times, and a test name does not drift.)* Pinning a
     guard before a producer exists is the only moment at which the pinning is
     free.
     - `verify_round_trip` (the scoop editor) now compares `after.winget ==
@@ -2588,13 +2590,39 @@ Windows run could settle.
       because `update::run` calls the real `update_source()`; threading a
       test-only `Duration` into the function the binary calls is the worse trade.
 
-    **What is still missing is the observation itself**, and the item stays open
-    for it: nothing has yet watched that line appear on real hardware, because
-    a14 went offline before the round could run. But it is now open on a
-    *dogfood round* rather than on a production change -- the first time it has
-    been reachable at all. Also still open from item 11: whether `show` or `list`
-    ever return `0x8A150001` under the same contention, and whether 1 s is
-    sufficient on a slower machine.
+    **The round ran on 2026-08-12, and the retry still has not fired -- but the
+    zero now means something.** 70 contended `dotpkg update` rounds in three
+    configurations (one reader loop, four reader loops, two competing *updaters*),
+    each with a quiet counterweight first: **0 rounds printed the retry line.**
+    Stage C's zero could not distinguish two explanations; this one can, because
+    the line is printed whenever `AfterRetry` comes back. **The plumbing was
+    proven rather than assumed**: with winget removed from `PATH`, the real binary
+    printed the sibling arm of the same `match`, so a zero from the other arm is
+    a fact about the trigger and not about the wiring.
+
+    **And re-measuring the trigger explains it.** The same argv §5 used, invoked
+    directly: **0 of 10** alone, **0 of 10** with one concurrent `winget list`
+    (§5 recorded **3 of 10** for that condition), **1 of 10** with four. The
+    trigger still exists and is rarer than the record says, which accounts for the
+    dogfood zero without appealing to anything about dotpkg.
+
+    **Two of §5's statements have aged, and item 11 inherits both**
+    (`docs/measurements-2026-08-12-phase5-residuals.md` §11): the failure is no
+    longer distinguishable by duration (the observed failure took 1245 ms; a
+    success in the same round took 1266 ms), and **the 1 s delay no longer clears
+    the success range** -- successful `source update` calls now take 1.2-5.4 s on
+    this machine, against the 348-623 ms `update_source`'s own comment reasons
+    from. Item 11 asks whether 1 s is "sufficient on a slower machine"; it is now
+    measured to be insufficient on *this* machine, against today's durations.
+    Nothing here says the retry is wrong -- firing too early just fails twice and
+    warns, which is the shipped behaviour -- but the comment's justification is
+    no longer true and must not be read as if it were.
+
+    **So the item is half closed:** the ambiguity it was written about is gone,
+    the observation it asked for has not happened, and there is now a bound
+    nobody had -- 70 contended rounds is not enough. Also still open from item
+    11: whether `show` or `list` ever return `0x8A150001` under the same
+    contention.
 21. ~~**The winget path signal ships structurally verified and
     live-unverified**~~ -- **CLOSED 2026-08-12**
     (`docs/measurements-2026-08-12-phase5-residuals.md` §1). The signal has now

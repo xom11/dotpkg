@@ -230,6 +230,54 @@ Three deliberate narrowings, each because the measurement did not reach further:
 `--force` and `--purge` against this refusal are **unmeasured** — the
 de-elevated route succeeded first and the round stopped there.
 
+### `sys::elevated()` reads two signals, not one
+
+**Not mentioned anywhere else in this file, or in
+`docs/specs/2026-08-10-phase4b-winget-executor-design.md`, before the
+post-merge audit found the omission.** Both documents still describe a
+single Win32 signal (`TOKEN_ELEVATION.TokenIsElevated`). A reader of only the
+shipped documents would have concluded `sys::elevated()` reads one signal --
+wrong, and the omission ran in the direction of hiding this branch's single
+most safety-relevant change.
+
+`elevated()` is now built on `verdict(is_elevated: Option<bool>, in_admins:
+Option<bool>) -> Option<bool>`, a pure function extracted so macOS can test
+the rule a Windows-only body implements: `Some(true)` only from
+`(Some(true), Some(true))` -- `TokenIsElevated` says elevated **and**
+`CheckTokenMembership` says the token is still an enabled member of the
+built-in Administrators group. Any Win32 failure, on either signal, still
+yields `None`, and both callers still treat `None` as "do not refuse".
+
+**Why:** a `runas /trustlevel:0x20000` shell -- a restricted token, the exact
+shell this branch's own refusal message sends an operator to re-run `apply`
+from -- reports `TokenIsElevated = 1` while `IsInRole(Administrators)`
+reports `false`, and a real `winget uninstall` from that shell **succeeds**.
+The single-signal version refused it anyway: the over-refusal this whole
+elevation pre-check exists to prevent, reproduced by the pre-check itself.
+
+**Measured, on a14, in the direction the fix exists for:** from that same
+restricted-token shell, `dotpkg apply --yes --allow-prune` of a user-scope
+`ducaale.xh` exited 0, printed `done winget ducaale.xh verified on disk`, and
+the package was really gone -- where the single-signal version returned exit
+2 and refused that same shape. `CheckTokenMembership` honours DENY_ONLY for
+this shape, and `verdict` has now been seen answering `Some(false)` where
+`TokenIsElevated` alone says otherwise.
+
+**Still unmeasured: an ordinary non-elevated session with no `runas` at
+all.** It should answer on the first signal alone and never consult the
+second, but nobody has watched it do so. This is the exact condition this
+file's own pre-merge watch-list named ("both halves of the elevation
+pre-check, at both integrity levels -- a pass on only the elevated half is a
+refusal that might be refusing everything") and it was not met by merge: the
+two Windows suite runs that exercised `CheckTokenMembership` at all did so
+only through the `#[ignore]`d elevated-only test, which asserts `Some(true)`
+-- a function hardcoded to `Some(true)` would pass that test too, so neither
+run is evidence the second signal does anything.
+
+`src/sys.rs`'s own doc comment on `elevated()` and `verdict` states this
+precisely, measured against reasoned; nothing above changes what it says,
+only makes sure this file says it too.
+
 ### `Running::covers` could not see a single winget package, and a green test stood in front of it
 
 Phase 4's own carried-forward item, cleared here, and the numbers are worth
@@ -406,6 +454,17 @@ Recorded here rather than edited in place, matching the precedent set by the 2a,
   and no test referenced the first — so a later test reaching for it by name for
   the `NO_AVAILABLE_UPGRADE` case would have paired the wrong bytes with the
   wrong code, silently. Bytes unchanged.
+- **`docs/measurements-2026-08-10-winget-write-path.md` §3's "three of them
+  unknown to this crate" has expired.** Its table still marks `0x8A15002B`,
+  `0x8A150061` and `0x8A15007D` **absent** from `src/backend/winget.rs` under
+  a present-tense column header. All three are now named constants --
+  `NO_AVAILABLE_UPGRADE`, `ALREADY_INSTALLED`, `CANNOT_UNINSTALL_ELEVATED` --
+  in `src/backend/winget_exec.rs:56/67/79`, added by the executor this
+  measurement document is cited as the authority for. Post-merge audit M4.
+- **`docs/specs/2026-08-10-phase4b-winget-executor-design.md:270-273` still
+  specifies a single-signal `TOKEN_ELEVATION` implementation for
+  `sys::elevated()`.** It is now two signals; see "`sys::elevated()` reads
+  two signals, not one" above for what changed and why. Post-merge audit I3.
 - **Corrections made to this phase's own controller, by implementers and
   reviewers**, kept because a controller that is never wrong on the record is a
   controller nobody checks:
@@ -439,10 +498,14 @@ compiled fine on both platforms.
 
 ### macOS suite
 
-`cargo test --no-fail-fast`, on the tree that ships: **566 passed, 0 failed, 0
+`cargo test --no-fail-fast`, on the tree that ships: **588 passed, 0 failed, 0
 ignored**, across **14** `test result:` lines. `cargo fmt --check` clean;
 `cargo clippy --all-targets -- -D warnings` clean; `cargo build --all-targets`
-zero warnings.
+zero warnings. (Was 585 at merge, `834589e`; the post-merge audit's
+remediation added three tests -- one each to `src/apply.rs`, `src/render.rs`
+and `src/main.rs` -- pinning the fix for its I2. The 566 this section
+previously reported was already stale by five commits before that
+remediation even started; see the post-merge audit for the full account.)
 
 Windows collects one more: `on_a_real_elevated_windows_session_the_pre_check_
 refuses_a_user_scope_removal` is `#[cfg(windows)]` and `#[ignore]`d, so it is
@@ -464,26 +527,87 @@ been normalised by a checkout makes every downstream assertion meaningless:
 `tests/fixtures/winget/list-full.txt` is 30958 bytes with 143 CRLF pairs,
 exactly the expected values. `.gitattributes` pins these paths `-text`.
 
-### Still outstanding at the time this file was written
+### The Windows suite and the dogfood: done, not still outstanding
 
-The Windows suite runs, the medium-integrity dogfood, and `cargo mutants` were
-sequenced **after** the whole-branch review rather than before it, deliberately:
-Phase 4 needed three Windows runs because the tree changed twice after the
-first, and absorbing the review's fixes first means the Windows runs happen on a
-tree that already ships. `cargo mutants` needs an idle machine — Phase 4
-discarded two runs for contamination, first a concurrent `cargo test`, then I/O
-starvation — so it is the one step that genuinely needs its own window.
+This section used to say these were still ahead. They happened before merge,
+as the plan's own standing rule requires; recorded here because the version
+of this file that shipped did not carry any of it.
 
-**Watch-list for those runs**, from the whole-branch review:
+Three real Windows runs on a14, sequenced **after** the whole-branch review
+rather than before it, deliberately: the tree changed twice after the first
+run, and absorbing the review's fixes first means later runs happen on a tree
+that already ships.
 
-- The expected Windows test count is **567**, not the 562 the ledger recorded
-  before this review's fixes.
-- **The wrong-case case is one `pkg.toml` line away from proving the canonical-id
-  defect was live.** Declare a winget package in a different case from its lock
-  key and confirm the install now succeeds.
-- Re-derive every machine number rather than reusing a fixture's.
-- Both halves of the elevation pre-check, at both integrity levels. **A pass on
-  only the elevated half is a refusal that might be refusing everything.**
+- **Run #1**, tree `e1bb95e`: 564 passed, 0 failed, 1 ignored.
+- **Run #2**, on the tree the whole-branch review shipped (`24ba0d6`): 568
+  passed, 0 failed, 1 ignored, against a macOS count of 570.
+- **Run #3, final**, on the tree the branch actually merged at (`cc7452f`):
+  **583 passed, 0 failed, 1 ignored**, against a macOS count of **585**.
+
+Every run was cross-referenced **name by name**, never by subtracting totals
+-- the discipline that caught Phase 4's own `resolve_root` defect. The
+difference set was identical across all three: two `#[cfg(unix)]` tests
+absent on Windows, and the one `#[cfg(windows)]` `#[ignore]`d elevated-only
+test absent on macOS, invoked by name and passing every time. Zero
+discrepancies beyond those three predicted `cfg` exclusions, on any run.
+(This file's own count has since grown to 588 -- see "macOS suite" above --
+from three tests the post-merge audit's remediation added after Run #3;
+none is `#[cfg(windows)]`-gated, but none has been run on Windows either, so
+the 583/585 pairing above is Run #3's tree, not this one.)
+
+A dogfood on a14 completed in three stages, machine restored byte-identical
+afterwards (`winget list`'s hash matched before and after): a fresh install
+and a wrong-case upgrade that proved the canonical-id fix live; a genuinely
+elevated removal attempt refused exactly as designed; and an opaque owned
+package surviving reconciliation, followed by a real removal in cleanup. Its
+own attempt to *also* cover a restricted, de-elevated token failed on a
+script bug and never actually de-elevated -- the one gap a later, separate
+dogfood closed, in one direction only. See "`sys::elevated()` reads two
+signals, not one" above.
+
+`cargo mutants` ran twice. First scoped to this branch's diff -- 253 mutants,
+`-j 2`, 11 minutes, **0 `TIMEOUT`** -- which is the clean, idle-machine
+re-measurement Phase 4's own notes said its 69 unresolved timeouts still
+needed, settling that question by demonstration rather than inference (Phase
+4 could only reason "very likely starvation"; this measured zero). Then
+again, scoped by *file* rather than by diff -- a superset, redone clean after
+an implementer's own verification run was found contaminated by a concurrent
+edit: **419 mutants, 347 caught, 19 missed, 53 unviable** over the touched
+files, after two independently hand-verified fix rounds closed twelve of the
+thirteen real gaps the first pass found (`src/apply.rs` alone is now 105
+mutants, 0 missed). See "Genuinely still open" below for what the
+file-scoped pass's own 19 missed mutants leave.
+
+### Genuinely still open
+
+- **An ordinary, non-elevated Windows session -- no `runas` at all -- has
+  never been measured.** `sys::elevated()` should answer `Some(false)` from
+  `TokenIsElevated` alone and never consult `CheckTokenMembership`, but
+  nobody has watched it do so. See "`sys::elevated()` reads two signals, not
+  one" above.
+- **Three `#[cfg(windows)]` mutants in `sys.rs`** -- two in `elevated()`'s
+  `Some(true)`/`Some(false)` returns, one in a `!=`/`==` inside it -- **are
+  inert on macOS and unresolved.** Not test gaps: that function's body is not
+  even compiled off Windows, so no macOS mutation run can exercise them at
+  all. A platform gap, only resolvable by a mutation run *on* Windows.
+- **`main.rs:773`'s mutant (`delete !` on the `outstanding_skips` check) is
+  accepted as an equivalent mutant, not closed.** It survives because
+  whenever `outstanding_skips` is non-empty, those skips are already pushed
+  as `Held`, which forces `code == 1` before `floor_exit_code` ever runs,
+  regardless of the deleted `!`. Closing it needs a fake scoop binary (a
+  standing test policy forbids one) or a production change -- out of scope
+  for a test task.
+- **14 mutants in `src/backend/winget.rs`, in Phase 4 code, not this
+  branch's diff** -- `floor_char_boundary` (6), `parse_list` (6),
+  `parse_versions` (1), `RealWinget::run` (1) -- surfaced only because the
+  file-scoped mutation pass covered the whole file rather than the diff.
+  Not this phase's scope to close; the next phase inherits a named list
+  instead of a surprise.
+- **Two mutants in `winget_exec.rs`, inside `RealWingetMutator::run`** -- a
+  `NotFound == -> !=` and an `unwrap_or(-1) -> unwrap_or(1)` -- are the one
+  seam every test in this crate replaces with a fake. Covering them means
+  spawning a real `winget.exe` from the test suite, which this project does
+  not do.
 
 ## Deferred minors, by originating task
 
@@ -614,9 +738,21 @@ still open, plus what this phase added.
     missing-`Version` refusal branch being untested defensive code; no fixture
     pairing a plain `show` with `show --versions` for the same package; and
     `resolve_installed`'s `fell_back_to_tip` warning path being untested.
-14. **The 69 unresolved `timeout` mutants from Phase 4's final mutation run**,
-    still needing a clean re-run of just the timeout set with `--timeout 600` on
-    an idle machine. Not survivors and not closed.
-15. **`sys::elevated()`'s runtime `Some(true)`/`Some(false)` under real elevated
-    versus de-elevated Windows sessions is unverified.** Correctly deferred to
-    the dogfood; the `#[ignore]`d Windows test is where it gets checked.
+14. ~~The 69 unresolved `timeout` mutants from Phase 4's final mutation run~~
+    **-- settled, not still open.** This phase's own mutation run (253
+    mutants, `-j 2`, 11 minutes) recorded **0 `TIMEOUT`**, which is the
+    clean, idle-machine re-run this item asked for, by demonstration rather
+    than inference: Phase 4 could only reason "very likely starvation"; this
+    phase measured zero timeouts under the same resource-limited settings
+    and that is the re-measurement. Left numbered rather than deleted, so a
+    reader following an old reference here finds the resolution, not a gap
+    in the numbering.
+15. **`sys::elevated()`'s runtime behaviour is now measured in one direction,
+    not both.** The dogfood found a real defect in the direction this item
+    flagged as open (a restricted, DENY_ONLY token was refused when winget
+    itself would have allowed the removal) and the code changed in response
+    -- `verdict` now requires two signals, not one. What remains open is
+    narrower than this item originally was: an ordinary, non-elevated
+    session with no `runas` at all is still unmeasured. See
+    "`sys::elevated()` reads two signals, not one" and "Genuinely still
+    open", both above.

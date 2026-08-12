@@ -33,10 +33,11 @@ before and after.
    the 4 `portable (zip)` ids of the 41 installed, and for none of the other
    37** -- no exception in either direction, across all eight installer types
    present.
-2. **The denominator is 41, not 36**, by winget's own machine-readable
-   instrument. The gap is 37 ids, not 32. The record's 36 came from a different
-   instrument and this round did **not** reconcile the two by name; that is a
-   residual, not an agreement.
+2. **The record's 36 and winget's 41 were never in conflict, and now the
+   difference has a mechanism.** Diffed by name on one machine on one day:
+   41 = 36 + 5, and the five are exactly the ids dotpkg refuses to read a
+   version for. Each figure answers a different question, and each now says
+   which it answers.
 3. **The strongest lead the record deliberately left unopened was opened, and it
    is worth less than it looked and costs more.** `installed.db` really is
    SQLite and really does carry a populated `commands` table -- and it would
@@ -104,15 +105,42 @@ reads a VCRedist row's version as an id, misses `Warp.Warp`, and cannot parse on
 `WinAppRuntime.Main.1.8` row whose Id column holds an MSIX package full name.
 39 of the 41 are common to both.
 
-**The 36 is not reconciled by this round, and pretending it is would be the
-defect this project keeps recording.** It is a different instrument (dotpkg's own
-scan, through `parse_list`) taken on a different day, and closing the gap means
-running dotpkg's scan and diffing the id sets by name. That is cheap and it is
-now a still-open item rather than a sentence explaining it away.
+### 2.1 Reconciled, by name, and the two instruments never disagreed
 
-**What this changes about the shipped claim:** the fence's path half covers
-**4 of 41**, and the uncovered set is **37**. Every "4 of 36" in the record is
-now a figure from an unreconciled instrument, not a wrong one.
+Run on the same machine, the same day, the same tree: `dotpkg status
+--show-unmanaged` against a config declaring nothing reports **36** unmanaged
+winget ids -- the record's figure, reproduced exactly.
+
+**The difference set is one-sided and it has a mechanism:**
+
+| | |
+|---|---|
+| `winget export -s winget` | 41 |
+| dotpkg's own scan | 36 |
+| common | **36** |
+| in export, not in dotpkg's scan | **5** |
+| in dotpkg's scan, not in export | **0** |
+
+The five are `7zip.7zip`, `Microsoft.UI.Xaml.2.8`,
+`Microsoft.VisualStudio.2022.BuildTools`, `Microsoft.WindowsAppRuntime.1.8` and
+`Microsoft.WindowsAppRuntime.2` -- **exactly the five that print `installed, but
+its state could not be read` in §6**, because winget reports each of them either
+at two disagreeing versions or as a `> x.y.z` lower bound, and dotpkg refuses to
+guess which.
+
+So **41 = 36 + 5**, and the two counts are not a disagreement at all: one
+instrument declines, by design, to count what it cannot establish a fact about.
+
+**What this settles about the shipped claim.** Both denominators are right about
+different questions, and each should now say which:
+
+- **4 of 41** ids winget reports installed own a package directory.
+- **4 of 36** ids dotpkg can establish a fact about, so **32** is the number of
+  packages dotpkg could act on and could not see -- which is exactly the "32 of
+  36" the record already used when it called a per-package line a flood.
+
+The record's figures were never wrong; they were about dotpkg's view, and this
+document's are about winget's.
 
 ## 3. `installed.db`: opened, measured, and priced
 
@@ -397,9 +425,11 @@ attributed otherwise above.
 
 ## 11. Still outstanding
 
-1. **The 41-versus-36 disagreement is not reconciled by name.** Two instruments,
-   one tree, one machine, no diff. Closing it means running dotpkg's own scan on
-   a14 and comparing the id sets one by one.
+1. ~~**The 41-versus-36 disagreement is not reconciled by name.**~~ --
+   **closed inside this round, §2.1.** 41 = 36 + 5, the five are exactly the
+   ones dotpkg refuses to read a version for, and dotpkg's scan holds nothing
+   winget's export does not. Both denominators are correct about different
+   questions and each now says which.
 2. **The two `main.rs` call sites are unpinned.** `tests/cli.rs` hands every
    spawned binary a `PATH` with winget removed *by construction*, so no
    integration test can produce a winget action at all, and nothing goes red if

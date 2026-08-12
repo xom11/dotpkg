@@ -2393,9 +2393,14 @@ measured reason rather than an estimated one. **And the `portable`-only bound
 that items 5, 9 and 10 all rest on is measured for the first time**: a package
 directory exists for exactly the 4 `portable (zip)` ids of the 41 installed and
 for none of the other 37, across eight installer types, no exception in either
-direction. **Two numbers in this list are now known to be from an unreconciled
-instrument**: every "4 of 36" is 4 of **41** by `winget export`, and the two
-counts have not been diffed by name.
+direction. **And this list's "36" is confirmed rather than corrected**: diffed by
+name on one machine, `winget export -s winget` reports 41, dotpkg's own scan
+reports 36, the common set is 36, and the five extra are exactly the ids dotpkg
+refuses to read a version for (two disagreeing versions, or a `> x.y.z` lower
+bound). 41 = 36 + 5. Both denominators are right about different questions --
+4 of 41 ids winget reports, 4 of 36 ids dotpkg can establish a fact about --
+so **"32 of 36" remains the correct figure for how many packages dotpkg could
+act on and could not see.**
 
 **A decision about this file, since it was asked for.** The strikethrough
 convention **continues**; this file is not consolidated. The 21 in-place
@@ -2468,10 +2473,12 @@ rounds*.
    covers.** It adds **no coverage** — 4 of 41 before and after — and says so;
    what it removes is the silence.
 
-   **Three corrections to this item's own numbers, from that round.** The
-   denominator is **41**, not 36, by `winget export -s winget`; the two figures
-   come from different instruments and are **not** reconciled by name, which is
-   now its own still-open item. The `portable`-only bound was an assumption
+   **Three notes on this item's own numbers, from that round.** The "4 of 36" is
+   **confirmed, not corrected**: `winget export -s winget` reports 41 and
+   dotpkg's own scan reports 36 on the same machine the same day, the common set
+   is 36, and the five extra are exactly the ids dotpkg refuses to read a version
+   for. 41 = 36 + 5, and each denominator answers a different question. The
+   `portable`-only bound was an assumption
    nobody had checked and is **now measured true**: a package directory exists
    for exactly the 4 `portable (zip)` ids and none of the other 37, no exception
    in either direction across eight installer types. And the first half of this

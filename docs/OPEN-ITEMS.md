@@ -212,11 +212,32 @@ This is the section the README's "Verified on" table is the summary of.
   about it. The design's promise is now true for reading, true for the plumbing
   of writing, and honestly false for the four decisions, which is as close to
   true as it should get.
-- **25. The design's third test layer has never existed.** It specified *"Real
-  scoop in a throwaway `$env:SCOOP` on a Windows runner, gated"*. `tests/cli.rs`
-  is hermetic — `SCOOP` and `LOCALAPPDATA` point at temporary directories and
-  winget is stripped from `PATH` — and the real-machine leg is manual dogfood on
-  a14, which is more rigorous per run and does not run on any push.
+- ~~**25. The design's third test layer has never existed.**~~ — **built and
+  green 2026-08-12.** It specified *"Real scoop in a throwaway `$env:SCOOP` on a
+  Windows runner, gated"*, and `tests/cli.rs` was never it: that suite is
+  hermetic on purpose, with `SCOOP` and `LOCALAPPDATA` pointed at temporary
+  directories and winget stripped from `PATH`, so nothing in it had ever run the
+  scoop binary.
+
+  The `scoop-integration` job in `.github/workflows/ci.yml` installs **scoop
+  0.5.3** into a throwaway root, builds a bucket that is a real git repository,
+  and serves a real archive over HTTP from `127.0.0.1` so that **scoop performs
+  its own download and its own hash check** — the part that must not be faked,
+  since dotpkg never verifies a hash itself and must never pass
+  `--skip-hash-check`. Hermetic despite being real: the only outbound call is
+  scoop's own installer.
+
+  First green run, read from its own output rather than from a job status:
+  payload sha256 `f0d25d4f…`, bucket head `0ad53670…`, `+ scoop ci-payload 1.0.0
+  (new pin)` → `ready` under `--prepare` with no app directory and no ownership
+  → `done scoop ci-payload verified on disk`, `1 verified on disk, 0 failed, 0
+  held` → **`refusal_exit: 2`** with the package still installed → `- scoop
+  ci-payload 1.0.0 (dropped, no longer declared)` → `(prune, owned)` → `done …
+  verified on disk`.
+
+  **What it still does not cover:** a version change. The job installs and
+  removes; a scoop `Replace` needs a second manifest in the bucket and is the
+  obvious next step for it. See item 29.
 - **26. `dotpkg` cannot install itself.** The design's phase 5 said release
   *"through the existing scoop bucket"*. The release is GitHub binaries plus
   `SHA256SUMS`; there is no scoop manifest, so the tool is not distributed by the

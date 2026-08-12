@@ -259,8 +259,24 @@ the interactive shell holds the user's *filtered* token, so having
 | process launched via `Shell.Application.ShellExecute` | `isinrole_admin=True`, **High Mandatory Level** (S-1-16-12288) |
 
 The launched process runs in session 0 with the same token. **This route does
-not de-elevate either**, and the item still needs an ordinary PowerShell window
-opened on the desktop by hand. `tests/cli.rs` now carries the test that window
+not de-elevate either.**
+
+**Two further routes were tried and neither produced an observation** -- which
+is a different and weaker result than "measured not to de-elevate", and is
+recorded as such so a later round does not read it as settled:
+
+| route | what happened | what it settles |
+|---|---|---|
+| `schtasks /RL LIMITED /IT` (Phase 4b tested `/RL LIMITED` without `/IT`) | task created and triggered, `Last Result: 0`, but `Status: Queued` and no output after 30 s | **nothing about elevation** -- the task never ran |
+| duplicate `explorer.exe`'s token, `CreateProcessWithTokenW` (needs `SeImpersonatePrivilege`, which an elevated admin holds, unlike `CreateProcessAsUser`) | process created, `win32_error 0`, in session 1; redirected output file **0 bytes** across two variants | **nothing about elevation** -- no output was recovered |
+
+**The guard was positive-controlled while finding this out:**
+`scripts/nonelevated-mutants.ps1` run over ssh reported `session_id 0`,
+`isinrole_admin True`, `High Mandatory Level`, and refused with exit 1. It
+cannot pass from the wrong place.
+
+So the item still needs an ordinary PowerShell window opened on the desktop by
+hand. `tests/cli.rs` now carries the test that window
 would run, `#[ignore]`d, asserting `elevated() == Some(false)` and failing
 loudly if the session it is run from is elevated.
 

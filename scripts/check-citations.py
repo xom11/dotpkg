@@ -51,10 +51,25 @@ CITATION = re.compile(
 
 
 def tracked_files() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
-    )
-    return [line for line in out.stdout.splitlines() if line]
+    """Every file git would ship, plus every new file not yet staged.
+
+    `git ls-files` alone was the first version, and it let this gate skip a
+    document that had been written but not `git add`ed -- which is exactly when
+    a citation is most likely to be wrong, because nobody has read it back yet.
+    The second list is untracked-but-not-ignored files, so a new document is
+    scanned the moment it exists rather than the moment it is staged.
+
+    Ignored files stay out on purpose: the `.superpowers/` ledger is deliberately
+    not committed, and citations into it are unresolvable for every reader who
+    clones this repository, which is the finding rather than an oversight.
+    """
+    seen: dict[str, None] = {}
+    for args in (["git", "ls-files"], ["git", "ls-files", "--others", "--exclude-standard"]):
+        out = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, check=True)
+        for line in out.stdout.splitlines():
+            if line:
+                seen[line] = None
+    return list(seen)
 
 
 def main() -> int:

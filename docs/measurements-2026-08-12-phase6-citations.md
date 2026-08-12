@@ -517,34 +517,53 @@ proven non-elevated (session 1, `IsInRole` False, Medium Mandatory Level):
 | `ph6-neutral-probe.exe` | no | **LAUNCHED**, exit 0 |
 | `ph6-setup-probe.exe` | yes, a *different* one | **LAUNCHED**, exit 0 |
 
-**All three launch. The filename explanation is false**, and the third name is
-why the refutation covers the class rather than one file.
+~~**All three launch. The filename explanation is false**, and the third name is
+why the refutation covers the class rather than one file.~~ ~~**And the symptom
+does not reproduce at all** -- same file, same path, same kind of session:
+`os error 740` then, exit 0 now.~~
 
-**Two more candidate mechanisms, also checked and also negative:** there is no
-`RUNASADMIN` entry for the binary under `AppCompatFlags\Layers` in either hive
-(the only two entries on the machine are OneDrive's DPI flags), and the file
-carries **0** alternate data streams, so no zone identifier.
+**Both of those are withdrawn within the hour, and the second correction is
+worth more than the first.** Two things came in:
 
-**And the symptom does not reproduce at all.** The binary that failed has
-`LastWriteTime 2026-08-12T09:15:35`, which **predates the failure** and it has
-not been rebuilt since -- the sha256 the probe reports is the file that failed.
-Same file, same path, same kind of session: `os error 740` then, exit 0 now.
+1. **The symptom is reproducible.** `cargo test --no-fail-fast` from an ordinary
+   session fails on the same binary with the same `os error 740`, after the
+   probe above had reported it launching. So "does not reproduce" was false.
+2. **The probe that produced the table above cannot be trusted, and the flaw is
+   mine.** It decided `LAUNCHED` from `$LASTEXITCODE` alone. **PowerShell leaves
+   `$LASTEXITCODE` at its previous value when it fails to start a native
+   command**, so a stale `0` is indistinguishable from a success, and the
+   scan for an error string can miss a message it did not anticipate. The probe
+   never checked that the binary produced any *output*. A libtest binary asked
+   to `--list` prints one line per test; checking for those lines is the
+   difference between observing a launch and assuming one.
 
-**So what is actually known is narrow, and the record now says only that:** one
-launch of one test binary failed once with `ERROR_ELEVATION_REQUIRED`, three
-explanations have been refuted, and no explanation is offered. The `--test cli`
-scoping in `scripts/nonelevated-mutants.ps1` stays as a workaround for a failure
-observed once, labelled as such, and **no claim is made that the suite cannot be
-run unelevated** -- what is true is the much weaker statement that nobody has
-ever tried, because every Windows run in this project's history has been from an
-elevated ssh session.
+   **This is defect class 4 -- a check whose output narrates its own result --
+   committed inside the tool written to refute a claim, one commit after the
+   document describing that class.**
 
-**Why this is in the record rather than quietly deleted.** The withdrawn
-sentence is a better artefact than the correct one would have been: it was
-plausible, it fit the evidence, it named a real Windows behaviour, and it was
-wrong -- which is precisely the shape of the defect class this phase exists to
-gate, committed by the person building the gate, three commits after building
-it. The cheapest possible check refuted it in one run.
+**So the position is now precisely this, and it is smaller than either previous
+version of it:**
+
+| claim | status |
+|---|---|
+| `cargo` cannot start `update-<hash>.exe` from a non-elevated session, `os error 740` | **measured, reproduced twice** (mutants baseline, then the full suite) |
+| the cause is the filename (UAC installer detection) | **untested** -- the probe that "refuted" it was unsound |
+| a `RUNASADMIN` compatibility layer | **negative**, and this one holds: it was a registry read, not a launch |
+| a zone-identifier stream | **negative**, same reason: 0 alternate data streams |
+| the same binary launched *directly* rather than by cargo | **unknown** -- this is the axis the corrected probe adds |
+
+`scripts/uac-name-probe.ps1` is rewritten to verify every launch **by output**
+and to separate the two axes -- three names (is it the name?) and two launchers,
+PowerShell versus cargo (is it who calls `CreateProcess`?). Until it has run, no
+mechanism is claimed.
+
+**Why all of this is in the record rather than tidied away.** The first
+explanation was plausible, fitted the evidence, named a real Windows behaviour,
+and went into two documents and two commit messages before it was tested. The
+first refutation of it was itself unsound in the exact way this document spends
+a section warning about. Both were committed by the person who built the gates,
+within an hour of building them, and both were caught the same way: by running
+the thing again and looking at what it actually printed.
 
 ## 12. Still outstanding
 

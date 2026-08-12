@@ -2352,16 +2352,16 @@ session while dying in the elevated one.
 ~~**New, and larger than the item it came out of: the suite cannot be run in
 full from an ordinary Windows shell.** `tests/update.rs` builds
 `update-<hash>.exe`, which UAC installer detection flags as requiring elevation
-by filename alone.~~ -- **the symptom is real and the explanation is measured
-false; both halves are withdrawn.** Cargo did fail to start that binary from an
-ordinary session with `os error 740`, once. The filename explanation was tested
-by copying the same binary to a name with no keyword and to a name with a
-*different* keyword: **all three launch**. There is no RUNASADMIN compatibility
-layer for it and no zone-identifier stream. And the file that failed -- unchanged
-since before the failure, by its own mtime -- launches now. **The cause is
-unknown and the symptom is not reproducible**, so no claim is made about whether
-the suite can be run unelevated; what is claimed is that it has never been
-*tried* except this once. See
+by filename alone.~~ -- **the symptom is real and reproducible; the explanation
+is unproven and was briefly and wrongly declared refuted.** `cargo test
+--no-fail-fast` from an ordinary session fails on that binary with `os error
+740`, twice now. The filename explanation has **not** been tested: the probe
+that appeared to refute it decided "launched" from `$LASTEXITCODE`, which
+PowerShell leaves stale when it cannot start a native command, and never checked
+that the binary printed anything. Two other candidates are genuinely negative
+because they were registry and file reads rather than launches: no `RUNASADMIN`
+compatibility layer, no zone-identifier stream. **The cause is unknown**, and no
+claim is made about whether the suite can be run unelevated. See
 `docs/measurements-2026-08-12-phase6-citations.md`. **20 is decided rather than measured further -- see below.**
 **11 gains a correction that cuts the other way:** the 1.2-5.4 s success range
 this file records was itself measured on a busy machine and does not reproduce;

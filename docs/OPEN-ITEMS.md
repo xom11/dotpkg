@@ -228,10 +228,29 @@ This is the section the README's "Verified on" table is the summary of.
   in which the package is absent. Ownership survived it too. This is the first
   time anything has watched scoop's irreducible gap happen.
 
-  **Still open:** the **published binary** has never performed a version change
-  on real hardware — the a14 round did Install and Remove only — and **no winget
-  mutation has run anywhere** outside the Phase 4b rounds and their own trees.
-  CI proves the logic; it does not prove the artifact.
+  ~~**Still open:** the published binary has never performed a version change on
+  real hardware~~ — **closed for scoop 2026-08-12**
+  (`docs/measurements-2026-08-12-phase11-release-version-change.md`), and in
+  **both directions**: the published artifact drove `jq` 1.8.2 → 1.8.1
+  (`v … downgrade, from lock, arm64`) and 1.8.1 → 1.8.2 (`^ … upgrade, 64bit`),
+  each `verified on disk`, with the shims and the ownership surviving the window
+  in which the package is absent. Both bucket commits were resolved from the
+  bucket by the script rather than typed.
+
+  Two things came out of it that nobody was looking for: the **architecture
+  changed underneath the version** (arm64 at 1.8.1, 64bit at 1.8.2 on an ARM64
+  machine) and dotpkg named it on the plan line before the user consented, which
+  is the `arch` design working; and **`ScanOutcome::Unscannable` fired on real
+  hardware for the first time** when winget became unreachable on that machine
+  between rounds — the unmanaged count dropped to scoop's 24 and the winget
+  backend was reported unreadable rather than empty.
+
+  **Still open: no winget mutation has run anywhere** outside the Phase 4b
+  rounds and their own trees. A round was planned for the same sitting and
+  **deliberately not attempted**: dotpkg cannot currently reach winget on a14,
+  and nothing else in that session can either — so the tool would have both
+  performed and reported the mutation, which `src/execute.rs`'s own module doc
+  names as proving only self-consistency.
 - **One machine, one architecture, one winget version, one scoop layout, and one
   elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
   observed `apply` from an ordinary non-elevated session.

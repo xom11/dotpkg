@@ -13,7 +13,7 @@ behind 0.1.0, stated before the feature list rather than after it.
 | real Windows machines it has been run on | **one** |
 | that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
 | Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
-| what the **published binary** has done on real hardware | installed one package and pruned it again, both verified on disk — **not** a version change, and no winget mutation |
+| what the **published binary** has done on real hardware | installed a package, changed its version **in both directions**, and pruned it — each verified on disk. **No winget mutation, ever** |
 | automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request, plus a Windows job that drives **real scoop** in a throwaway root |
 | suite size | **659** test names on macOS, **660** on Windows — 658 run there and 2 `#[ignore]`d. Both figures read from a run's own output on 2026-08-12, not carried forward |
 
@@ -421,6 +421,10 @@ fails, say) is reported as what really changed on disk versus what did not
   — the first time the artifact a user downloads installed and removed a real
   package, the counterweight that proves the prune guard was in the way, and the
   three things the round found that nobody was looking for.
+- [Release-binary version-change measurements](docs/measurements-2026-08-12-phase11-release-version-change.md)
+  — the uninstall-then-install window, driven in both directions by the
+  published artifact, plus an architecture that changed underneath a version and
+  the first live firing of the unreadable-backend path.
 
 **Twenty documents are no longer in the tree — the narrative and the plans.**
 Removed 2026-08-12 in two waves totalling about 28,200 lines: six dogfood

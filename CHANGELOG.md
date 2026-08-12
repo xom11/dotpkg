@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+Eleven commits since `v0.1.0` (`7ab9413`). **Nothing a user of the binary would
+notice has changed** — no command, flag, exit code or output line is different,
+and the one refactor was measured to be behaviour-preserving rather than
+asserted to be. What changed is the evidence behind 0.1.0 and the shape of the
+code underneath it.
+
+### The claims got stronger without the features moving
+
+- **`apply` has now run from the published binary**, sha256 `9daeae0c…` and not
+  a rebuild of it, installing and then pruning a real package on real hardware
+  and verifying both on disk. Until this it had only ever run `status`, which
+  mutates nothing. The prune was preceded by its own counterweight: the same
+  command with the flags withheld refused at exit 2 and left the package
+  installed.
+- **The design's third test layer exists at last.** "Real scoop in a throwaway
+  `$env:SCOOP` on a Windows runner" was specified on 2026-08-08 and never built;
+  `tests/cli.rs` was never it, being hermetic by design. A CI job now installs
+  scoop into a throwaway root, builds a bucket that is a real git repository,
+  and serves a real archive over HTTP so scoop does its own hash check.
+- **What that still does not cover is stated rather than left to be assumed:** a
+  version change — scoop's uninstall-then-install window — and any winget
+  mutation. Neither has release-binary or CI evidence. See `docs/OPEN-ITEMS.md`
+  item 29.
+
+### Code
+
+- **`execute::Mutates`** names the write half of a backend, which had no
+  contract at all: the two per-backend seams were threaded through `execute` and
+  `run_step` as a hand-written pair of parameters, so a third backend meant a
+  third parameter at 27 call sites. `execute::Backends` carries both sides in one
+  value. Measured name by name: identical 658-name test sets before and after,
+  0 lost, 0 added.
+- One test added, joining `Backend::scan` to the `[winget.guard]` opaque warning
+  — two halves that were each pinned and never connected.
+
+### Record
+
+- **`docs/OPEN-ITEMS.md`** is the one live list, keeping every item under the
+  number it already had.
+- Twenty documents removed, about 28,200 lines: the phase narratives and then
+  all eight task-breakdown plans. Every one still reads with `git show`; both
+  waves name their commit in `OPEN-ITEMS.md`.
+- **`LICENSE` now exists.** `Cargo.toml` had claimed MIT since the first commit
+  with no such file in the tree.
+- A flake was added and removed the same day; the reasoning is in the README.
+- **`flake.lock` was left behind by that removal and is now gone too** — a lock
+  file for a flake that does not exist, in a project whose whole thesis is that a
+  lock records what was actually resolved.
+
 ## 0.1.0 — 2026-08-12
 
 First release. 321 commits over five days, and the whole of it is one idea:

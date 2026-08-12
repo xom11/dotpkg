@@ -401,8 +401,6 @@ fails, say) is reported as what really changed on disk versus what did not
 - [winget write-path measurements](docs/measurements-2026-08-10-winget-write-path.md)
   — the 27 write-verb invocations that design rests on, exit codes and stdout
   included.
-- [Phase 1 plan](docs/plans/2026-08-08-phase1-status-scoop.md) — the task
-  breakdown the first phase was built from.
 - [Phase 5 measurements](docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md)
   — the running-process fence, the `Unmanaged` flood, and whether winget has a
   transient failure at all.
@@ -411,12 +409,16 @@ fails, say) is reported as what really changed on disk versus what did not
   package, the counterweight that proves the prune guard was in the way, and the
   three things the round found that nobody was looking for.
 
-**The six dogfood records and six phase notes are no longer in the tree.** They
-were removed on 2026-08-12, about 8,700 lines of narrative whose live content is
-now [`docs/OPEN-ITEMS.md`](docs/OPEN-ITEMS.md) and whose evidence was already in
-the `docs/measurements-*` documents above. Nothing was lost: each one reads with
-`git show 07dd86b:docs/phase5-notes.md` and so on, and `OPEN-ITEMS.md` lists all
-twelve. Documents that cite them by name were left as written, because a
+**Twenty documents are no longer in the tree — the narrative and the plans.**
+Removed 2026-08-12 in two waves totalling about 28,200 lines: six dogfood
+records and six phase notes, then all eight task-breakdown plans, which were
+`docs/`'s single largest thing at 19,482 lines. What is left is what gets read:
+the designs in `docs/specs/`, the raw commands and output in
+`docs/measurements-*`, and what is still open in
+[`docs/OPEN-ITEMS.md`](docs/OPEN-ITEMS.md). Nothing was lost — each wave names
+the commit it still exists at, `git show 07dd86b:docs/phase5-notes.md` and
+`git show 3bf1584:docs/plans/…`, and `OPEN-ITEMS.md` lists every file.
+Documents that cite them by name were left as written, because a
 sentence that was true about the tree it was written against stays true.
 
 ## Build

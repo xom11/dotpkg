@@ -61,6 +61,17 @@ resolved to), `state.json` (what dotpkg installed, so prune can never reach a
 package it did not put there), scoop's own `apps/*/current/manifest.json` on
 disk, and `winget list`.
 
+**What dotpkg writes beside those files, which is one file and not three.**
+Every write is temp-then-rename, so a run that dies cannot leave a half-written
+file in place. Only `state.json` also keeps its displaced copy, as
+`state.json.bak` next to it in the platform state directory: it is the one file
+here that is deliberately **not** committed — the truth of one machine rather
+than shareable intent — so nothing else can recover it, and losing it loses the
+prune fence's memory of what dotpkg owns. `pkg.toml` and `pkg.lock` get no
+`.bak`, because they are committed and `git checkout` recovers strictly more
+than a copy of the last version would. Earlier releases wrote `pkg.toml.bak` and
+`pkg.lock.bak` too; if you have them lying around, they are safe to delete.
+
 `status` is the one command that never refuses over an *incoherent* lock — one
 that parses, but that `apply` would reject. It warns and prints the plan
 anyway, because that plan is the information you need in order to fix the lock.
@@ -231,7 +242,9 @@ goes to stderr.
 - `--clone-missing-buckets` — Clone every bucket `pkg.toml` declares that is
   not already on disk, before staging begins.
 - `--state <path>` — Where dotpkg records what it owns. Defaults to the
-  platform state directory. Must be an absolute path if given.
+  platform state directory. Must be an absolute path if given. A `.bak` of the
+  previous contents is kept beside it; see the note under `status` for why this
+  file gets one and the two committed files do not.
 - `--prepare` — Stage and fetch everything the plan needs, then stop before
   changing anything.
 - `--show-unmanaged` — List every installed-but-unmanaged package instead of

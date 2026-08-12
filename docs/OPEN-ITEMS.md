@@ -277,9 +277,19 @@ This is the section the README's "Verified on" table is the summary of.
 
 All three from `docs/measurements-2026-08-12-phase8-release-apply.md` §7.
 
-- **27. `update` and `apply` leave `.bak` files beside what they rewrite, and
-  nothing says so.** Measured: after one round, `pkg.lock.bak` held the previous
-  lock and `state.json.bak` the previous state.
+- ~~**27. `update` and `apply` leave `.bak` files beside what they rewrite, and
+  nothing says so.**~~ — **decided and closed 2026-08-12: one of the three
+  stays, two go, and the README now says which.** `state.json.bak` is kept;
+  `lock::save` and `config_edit::save` no longer write one. Both tests that
+  asserted a `.bak` were inverted rather than deleted, and both were confirmed
+  able to fail — restoring either copy turns exactly its own test red and
+  nothing else. The reasoning that survives is one line: **a `.bak` is for a
+  file nothing else can recover**, which here is `state.json` alone. The
+  measured original follows, kept because the wrong version of it is the
+  evidence for the rule.
+
+  Measured: after one round, `pkg.lock.bak` held the previous lock and
+  `state.json.bak` the previous state.
 
   ~~a user running these commands in their dotfiles repository **accumulates**
   them next to files they do commit~~ — **wrong, and corrected on 2026-08-12 by

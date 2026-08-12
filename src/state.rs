@@ -168,6 +168,18 @@ impl State {
         }
         // Keep the displaced file: if the rename below is the thing that goes
         // wrong, the previous ownership record is still readable by hand.
+        //
+        // **This is the only `.bak` this crate writes, and the asymmetry is
+        // deliberate as of 2026-08-12.** `lock::save` and `config_edit::save`
+        // each used to write one too, and both were removed: `pkg.lock` and
+        // `pkg.toml` are **committed**, so git already holds every previous
+        // version and the copy bought nothing while dirtying the user's
+        // `git status`. `state.json` is the file the design deliberately does
+        // NOT commit -- it is the truth of one machine, not shareable intent --
+        // so nothing else on the machine can recover it, and losing it means
+        // losing the prune fence's memory of what dotpkg owns. This copy lands
+        // in `%LOCALAPPDATA%` where no version control is watching, so it costs
+        // the user nothing to keep.
         if path.exists() {
             let bak = path.with_extension("json.bak");
             let _ = std::fs::copy(path, &bak);

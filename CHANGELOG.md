@@ -2,11 +2,25 @@
 
 ## Unreleased
 
-Eleven commits since `v0.1.0` (`7ab9413`). **Nothing a user of the binary would
-notice has changed** — no command, flag, exit code or output line is different,
-and the one refactor was measured to be behaviour-preserving rather than
-asserted to be. What changed is the evidence behind 0.1.0 and the shape of the
-code underneath it.
+Since `v0.1.0` (`7ab9413`). **One behaviour change, and it is a deletion:**
+`update` and `apply` no longer write `pkg.lock.bak` and `pkg.toml.bak`. Nothing
+else a user would notice is different — no command, flag, exit code or output
+line moved, and the one refactor was measured to be behaviour-preserving rather
+than asserted to be. Everything else that changed is the evidence behind 0.1.0
+and the shape of the code underneath it.
+
+### The one behaviour change
+
+- **`pkg.toml.bak` and `pkg.lock.bak` are no longer written.** Both files are
+  **committed**, so the user's own history already holds every version of them
+  and `git checkout` recovers strictly more than a copy of the last one ever
+  did; what the copies produced in practice was a permanently dirty
+  `git status` beside files people commit. **`state.json.bak` stays**, because
+  `state.json` is deliberately not committed — it is the truth of one machine —
+  so nothing else can recover it, and it lives in the platform state directory
+  where no version control is watching. Existing `.bak` files are safe to
+  delete. The rule this leaves is in the README: a `.bak` is for a file nothing
+  else can recover.
 
 ### The claims got stronger without the features moving
 

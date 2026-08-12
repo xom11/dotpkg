@@ -2349,12 +2349,20 @@ restricted-token case, which exists because winget succeeded there -- so it
 returns the unmutated answer and the mutant is genuinely equivalent in that
 session while dying in the elevated one.
 
-**New, and larger than the item it came out of: the suite cannot be run in full
-from an ordinary Windows shell.** `tests/update.rs` builds `update-<hash>.exe`,
-which UAC installer detection flags as requiring elevation by filename alone, so
-cargo cannot launch it (`os error 740`). Every Windows run in this project's
-history was from an elevated ssh session, so "the suite passes on Windows" has
-always carried a condition nobody wrote down. **20 is decided rather than measured further -- see below.**
+~~**New, and larger than the item it came out of: the suite cannot be run in
+full from an ordinary Windows shell.** `tests/update.rs` builds
+`update-<hash>.exe`, which UAC installer detection flags as requiring elevation
+by filename alone.~~ -- **the symptom is real and the explanation is measured
+false; both halves are withdrawn.** Cargo did fail to start that binary from an
+ordinary session with `os error 740`, once. The filename explanation was tested
+by copying the same binary to a name with no keyword and to a name with a
+*different* keyword: **all three launch**. There is no RUNASADMIN compatibility
+layer for it and no zone-identifier stream. And the file that failed -- unchanged
+since before the failure, by its own mtime -- launches now. **The cause is
+unknown and the symptom is not reproducible**, so no claim is made about whether
+the suite can be run unelevated; what is claimed is that it has never been
+*tried* except this once. See
+`docs/measurements-2026-08-12-phase6-citations.md`. **20 is decided rather than measured further -- see below.**
 **11 gains a correction that cuts the other way:** the 1.2-5.4 s success range
 this file records was itself measured on a busy machine and does not reproduce;
 on a machine proven idle before and after, 30 calls give **294-621 ms** in

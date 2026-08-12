@@ -12,11 +12,17 @@
         could not execute process ...\update-<hash>.exe (never executed)
         Caused by: The requested operation requires elevation. (os error 740)
 
-    WHAT IS ONLY REASONED, and what this probe settles. The explanation offered
-    was Windows' UAC installer detection, which flags an executable whose
-    FILENAME contains install, setup, update or patch. That is a well-known
-    behaviour but it was not measured here, and this project's own record is
-    full of explanations that were plausible and wrong.
+    WHAT IT SETTLED, on 2026-08-12: the explanation was WRONG. All three names
+    launched, exit 0, from a session proven non-elevated. UAC installer
+    detection -- which flags an executable whose FILENAME contains install,
+    setup, update or patch -- is a real behaviour, it fitted the observation
+    exactly, and it is not what happened here. Nor is a RUNASADMIN compatibility
+    layer (there is none for this binary) nor a zone identifier (0 alternate
+    streams). The file that failed launches now, unchanged since before it
+    failed. The cause is unknown.
+
+    The script is kept rather than deleted because the question can recur, and
+    because a refutation nobody can re-run is just another assertion.
 
     THE EXPERIMENT. Copy ONE binary to three names and try to launch each. Same
     bytes, same signature, same manifest state -- only the name differs, so the

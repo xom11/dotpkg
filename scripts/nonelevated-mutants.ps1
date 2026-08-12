@@ -23,22 +23,26 @@
     failed in an unmutated tree" and aborts at the baseline. Naming the test is
     what keeps the baseline honest here.
 
-    WHY --test cli IS ALSO NOT OPTIONAL, and this one was measured the hard way.
-    tests/update.rs compiles to update-<hash>.exe, and Windows' UAC installer
-    detection flags any executable whose filename contains "update" (or
-    "install", "setup", "patch") as requiring elevation. From an ordinary session
-    that binary cannot be launched at all: cargo reports
+    WHY --test cli IS HERE, and what is NOT known about why it is needed.
+    On its first run from an ordinary session the baseline failed because cargo
+    could not start one test binary at all:
 
         could not execute process ...\update-<hash>.exe (never executed)
         Caused by: The requested operation requires elevation. (os error 740)
 
-    and the baseline fails for a reason that has nothing to do with any test's
-    content. It is invisible from an elevated ssh session, which is how every
-    Windows run in this project's history has been done -- so "cargo test passes
-    on Windows" has only ever been measured with elevation. Restricting to the
-    one binary that holds the test under measurement side-steps it; making the
-    whole suite runnable unelevated is a separate decision, recorded as still
-    open.
+    That is measured. The explanation first offered for it -- Windows' UAC
+    installer detection keying on a filename containing "update" -- is
+    MEASURED FALSE: the same binary, copied to a name with no keyword and to a
+    name carrying a different keyword ("setup"), launches under all three names
+    from a non-elevated session (scripts/uac-name-probe.ps1). Nor is there a
+    RUNASADMIN compatibility layer for it, nor a zone-identifier stream.
+
+    And the symptom does not reproduce: that exact file, unchanged since before
+    the failure -- its mtime predates it -- now launches from the same kind of
+    session. So the cause is UNKNOWN, and this flag is a workaround for a
+    failure observed once, not a fix for a mechanism anybody has identified.
+    Scoping to the one binary that holds the test under measurement is enough
+    for this run either way.
 
     NOTE ON STYLE: no backtick appears anywhere in this file, including in
     comments. A backtick inside a comment is not a parse error, so a parse-check

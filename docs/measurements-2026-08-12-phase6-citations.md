@@ -489,21 +489,68 @@ and the `docs/` citation gate ran on **all three runners** with identical counts
 `python3` exists on the Windows runner -- it does, and this is the first run in
 which that step ever executed there.
 
+## 13. An explanation of mine, offered confidently and measured false
+
+The first non-elevated mutation run failed at the baseline because cargo could
+not start one test binary:
+
+```
+could not execute process ...\ph6-target\debug\deps\update-<hash>.exe (never executed)
+Caused by: The requested operation requires elevation. (os error 740)
+```
+
+**That much is measured.** What followed was not. I explained it as Windows' UAC
+installer detection, which flags an executable whose filename contains
+`install`, `setup`, `update` or `patch` -- a real, documented behaviour, which
+fits the observation exactly, and which I wrote into this document, into
+`docs/phase5-notes.md`, into a script header and into two commit messages before
+testing it.
+
+**The experiment that settles it, with the control built in.** One binary,
+copied to three names -- same bytes, same sha256, same (absent) manifest, so the
+name is the only thing an outcome difference can be about. Run from a session
+proven non-elevated (session 1, `IsInRole` False, Medium Mandatory Level):
+
+| name | contains a keyword | result |
+|---|---|---|
+| `update-<hash>.exe` (the original) | yes, `update` | **LAUNCHED**, exit 0 |
+| `ph6-neutral-probe.exe` | no | **LAUNCHED**, exit 0 |
+| `ph6-setup-probe.exe` | yes, a *different* one | **LAUNCHED**, exit 0 |
+
+**All three launch. The filename explanation is false**, and the third name is
+why the refutation covers the class rather than one file.
+
+**Two more candidate mechanisms, also checked and also negative:** there is no
+`RUNASADMIN` entry for the binary under `AppCompatFlags\Layers` in either hive
+(the only two entries on the machine are OneDrive's DPI flags), and the file
+carries **0** alternate data streams, so no zone identifier.
+
+**And the symptom does not reproduce at all.** The binary that failed has
+`LastWriteTime 2026-08-12T09:15:35`, which **predates the failure** and it has
+not been rebuilt since -- the sha256 the probe reports is the file that failed.
+Same file, same path, same kind of session: `os error 740` then, exit 0 now.
+
+**So what is actually known is narrow, and the record now says only that:** one
+launch of one test binary failed once with `ERROR_ELEVATION_REQUIRED`, three
+explanations have been refuted, and no explanation is offered. The `--test cli`
+scoping in `scripts/nonelevated-mutants.ps1` stays as a workaround for a failure
+observed once, labelled as such, and **no claim is made that the suite cannot be
+run unelevated** -- what is true is the much weaker statement that nobody has
+ever tried, because every Windows run in this project's history has been from an
+elevated ssh session.
+
+**Why this is in the record rather than quietly deleted.** The withdrawn
+sentence is a better artefact than the correct one would have been: it was
+plausible, it fit the evidence, it named a real Windows behaviour, and it was
+wrong -- which is precisely the shape of the defect class this phase exists to
+gate, committed by the person building the gate, three commits after building
+it. The cheapest possible check refuted it in one run.
+
 ## 12. Still outstanding
 
 1. ~~A non-elevated Windows session~~ -- **done, §8.** `elevated -> Some(true)`
    is CAUGHT, and with it items 15 and 19 are closed and the `sys.rs` gate holds
-   nothing. What replaces it is narrower and new: **the project's own test suite
-   cannot be run in full from an ordinary Windows shell.** `tests/update.rs`
-   compiles to `update-<hash>.exe`, and Windows' UAC installer detection flags
-   any executable whose name contains `update`, `install`, `setup` or `patch` as
-   requiring elevation; from a non-elevated session cargo reports
-   `The requested operation requires elevation. (os error 740)` and never runs
-   it. Every Windows run in this project's history has been from an elevated ssh
-   session, so "the suite passes on Windows" has always carried an unstated
-   condition. This round side-stepped it by scoping the mutation run to
-   `--test cli`; the two real fixes -- rename the test file, or give the test
-   binaries an `asInvoker` manifest -- are a decision nobody has made yet.
+   nothing. What replaces it is an **open question with a refuted answer**, §13.
 2. **Item 20's observation** -- unchanged by this round. 70 contended rounds
    remains the bound. §7 above removes one of the arguments that had been read
    as evidence against the retry's delay.

@@ -139,17 +139,43 @@ Nothing here is known to be wrong. Nothing here has been watched.
   ways: `cargo mutants -- --include-ignored` does not reach libtest (it needs the
   two-`--` form), and `cargo install cargo-mutants --locked` cannot build on a14
   at all — it pins `winapi` 0.3, which fails on `aarch64-pc-windows-msvc`.
-- **16 surviving mutants in `src/backend/winget.rs`**, all in Phase 4 code:
-  `floor_char_boundary` 7, `parse_list` 7, `parse_versions` 1, `RealWinget::run`
-  1. Confirmed by two runs of different scope agreeing on 16.
-- **2 surviving mutants in `src/backend/winget_exec.rs`**, inside
-  `RealWingetMutator::run`. Covering them means spawning a real `winget.exe` from
-  the suite, which this project does not do.
-- **2 survivors no phase recorded until a file-scoped run found them:** one in
-  `src/main.rs` (`replace > with <`, distinct from the accepted equivalent
-  mutant on the `outstanding_skips` check) and one in `src/backend/scoop.rs`
-  (`NotFound` match guard replaced with `true`, inside `<impl Backend for
-  Scoop>::scan`).
+- **The 20 surviving mutants were sorted into four kinds on 2026-08-12 and are
+  now 15**, plus one detected only by timeout. Full round in
+  `docs/measurements-2026-08-12-phase10-mutation-debt.md`. Counting them as one
+  number was hiding that only two of the four kinds are debt at all.
+
+  - **Accepted by design, 3 — not debt, and should stop being carried as it.**
+    `RealWinget::run` (1) and `RealWingetMutator::run` (2) are the only
+    functions that spawn `winget.exe`; every test reaches a fake through the
+    `WingetCmd` / `WingetMutator` seam, which is why 662 tests run on macOS.
+    Killing these needs a real winget spawned from the suite, which this
+    project forbids. They are the shadow the seam casts.
+  - **Characterised as equivalent, 3.** `floor_char_boundary`'s survivors after
+    the new tests: both `:43` mutants are unreachable-true because both call
+    sites clamp first (`end.min(line.len())`, and an early return when `start >=
+    line.len()`), and `:46 > → >=` is equivalent outright since
+    `is_char_boundary(0)` is always true. *Equivalent under current callers* is
+    weaker than *equivalent* and is stated that way on purpose: a future caller
+    passing an unclamped index would make one of them wrong.
+  - **Killed, 4.** Three in `floor_char_boundary` — its loop had never executed
+    once, because all 15 fixtures are from an en-US machine and are pure ASCII —
+    and one in `Scoop::scan`, which was the dangerous one: with its `NotFound`
+    guard replaced by `true`, every read failure reads as "no scoop packages
+    installed", and an empty scan is the one input that turns every owned
+    package into a prune candidate.
+  - **Genuinely open and unexamined, 9:** `parse_list` 7, `parse_versions` 1,
+    and one in `src/main.rs` (`replace > with <`, distinct from the accepted
+    equivalent mutant on the `outstanding_skips` check). The `parse_list` block
+    is the largest and is the next thing worth measuring.
+
+- **The idle gate's threshold was a14's, and had never been re-derived here.**
+  Default 10%; this macOS machine's measured floor is **17.10–19.47%**, so the
+  gate refused every run until it was calibrated (3× the maximum, the procedure
+  `scripts/idle-baseline.sh` itself prescribes). **And the agent running a
+  measurement is part of the load it measures** — three `claude` processes were
+  among the largest burners. On a single machine "idle" cannot include the
+  process asking the question; the a14 rounds never hit this because the load
+  and the controller were on different machines.
 - **The `opaque` arm of `apply_guard_overrides` has unit coverage only.**
   `tests/cli.rs` strips winget from `PATH`, so no test there can produce a
   sourceless row — and `opaque` is the **majority** case on real hardware, 90 of

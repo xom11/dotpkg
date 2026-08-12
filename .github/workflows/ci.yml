@@ -24,3 +24,11 @@ jobs:
       # shipping tarball carries; docs/ is only ever present in a full checkout,
       # which is what CI has. Neither half claims the other's scope.
       - run: python3 scripts/check-citations.py
+      # The backtick half. Three of the PowerShell scripts open by stating that
+      # no backtick appears in them "including in comments", and that "both
+      # gates exist and both must run" -- and only the parse-check existed, so
+      # one of those files carried a backtick in a comment for two phases. Not
+      # a test in the suite for the same reason as the line above: the Windows
+      # shipping tarball does not carry scripts/, and a suite gate that
+      # tolerates its directory being absent is a gate that scans nothing.
+      - run: python3 scripts/check-ps1-style.py

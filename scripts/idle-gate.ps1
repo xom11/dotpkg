@@ -65,7 +65,7 @@ $ErrorActionPreference = 'Stop'
 # this instant: a linker between two translation units is idle for a moment and
 # the machine is still in use.
 #
-# `node`, `python` and their kin were in this list and have been REMOVED, for a
+# node, python and their kin were in this list and have been REMOVED, for a
 # measured reason: on a developer machine the editor session itself runs node,
 # and the Unix half of this gate refused an otherwise-quiet machine over it. A
 # long-lived runtime that happens to be resident is not a build. Those are left

@@ -188,9 +188,24 @@ This is the section the README's "Verified on" table is the summary of.
   window, the most dangerous path this tool has — still has no evidence from a
   release binary**, and neither does any winget mutation. Both are now numbered
   as item 29 rather than folded into a closed item.
-- **29. The version-change path has never run from a release binary**, on either
-  backend. New 2026-08-12, split out of 23 so that closing 23 does not read as
-  covering it.
+- **29. The version-change path.** Split out of 23 on 2026-08-12 so that closing
+  23 would not read as covering it. **Half closed the same day, and the halves
+  are not interchangeable.**
+
+  **Closed for scoop, in CI.** The `scoop-integration` job now publishes a second
+  bucket commit at 1.0.1 — a different archive, hash and url, so scoop cannot
+  satisfy the install from cache and skip the download half — and applies it.
+  Read from the run's own output: `installed_before: 1.0.0`, the plan presenting
+  it as `^ scoop ci-payload 1.0.0 -> 1.0.1 (upgrade, 64bit)` rather than as an
+  install, `done scoop ci-payload verified on disk`, `installed_after: 1.0.1`,
+  and `shims_after: ci-payload, ci-payload.cmd` — so a shim survived the window
+  in which the package is absent. Ownership survived it too. This is the first
+  time anything has watched scoop's irreducible gap happen.
+
+  **Still open:** the **published binary** has never performed a version change
+  on real hardware — the a14 round did Install and Remove only — and **no winget
+  mutation has run anywhere** outside the Phase 4b rounds and their own trees.
+  CI proves the logic; it does not prove the artifact.
 - **One machine, one architecture, one winget version, one scoop layout, and one
   elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
   observed `apply` from an ordinary non-elevated session.

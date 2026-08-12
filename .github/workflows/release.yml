@@ -1,0 +1,106 @@
+name: Release
+
+# Two triggers on purpose. A tag publishes; `workflow_dispatch` builds the same
+# artifacts without publishing anything, so the binaries can be proved to run on
+# a real machine BEFORE a tag exists. A tag is hard to take back and a release
+# whose binary nobody has started is a claim, not a build.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # The suite runs on the host target only: a cross-compiled aarch64 binary
+      # cannot be executed by an x64 runner, so "cargo test --target aarch64"
+      # would build tests nothing can run. The x64 leg therefore carries the
+      # test gate for this workflow, and CI's own three-OS job carries it for
+      # every push.
+      - name: Test (host target only)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --all
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Verified by CONTENT, not by the build's own exit code: a build that
+      # skipped would also exit 0. The binary has to exist, have a size, and
+      # answer --version. The last one only runs where the runner can execute
+      # what was just built.
+      - name: Prove the artifact exists
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/dotpkg.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "no binary at $exe" }
+          $i = Get-Item -LiteralPath $exe
+          Write-Host ("binary_bytes " + $i.Length)
+          if ($i.Length -lt 100000) { throw "binary is implausibly small: $($i.Length)" }
+
+      - name: Run it, where the runner can
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $out = & "target/${{ matrix.target }}/release/dotpkg.exe" --version
+          Write-Host ("version_output " + ($out -join " "))
+          if (-not ($out -join " ").Contains("dotpkg")) { throw "--version printed nothing recognisable" }
+
+      - name: Stage the artifact under its full name
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $name = "dotpkg-${{ matrix.target }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/dotpkg.exe" "dist/$name"
+          $h = (Get-FileHash -LiteralPath "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "dist/$name.sha256" -Value "$h  $name"
+          Write-Host ("staged $name sha256 $h")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotpkg-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    # Only a tag publishes. A dispatch run stops after `build`, which is the
+    # whole point of having both triggers.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      - name: One checksum file for everything published
+        run: |
+          cd staged
+          cat *.sha256 > SHA256SUMS
+          rm -f *.sha256
+          echo "--- published artifacts ---"
+          ls -la
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: staged/*
+          body_path: CHANGELOG.md
+          fail_on_unmatched_files: true

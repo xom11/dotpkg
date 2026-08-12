@@ -3,6 +3,31 @@
 Declarative package management for Windows: winget and scoop from one dotfile,
 with a real lock file and prune.
 
+## Verified on
+
+This tool uninstalls things. What follows is the exact extent of the evidence
+behind 0.1.0, stated before the feature list rather than after it.
+
+| | |
+|---|---|
+| real Windows machines it has been run on | **one** |
+| that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
+| Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
+| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request |
+| suite size | **658** tests on macOS, **659** on Windows, compared name by name |
+
+**What that does and does not buy.** Every behaviour this README describes is
+pinned by tests that were each confirmed able to fail, and the winget and scoop
+paths are additionally measured against real output from a real machine — the
+documents under `docs/` name the machine and the commit each figure was taken
+on. What no amount of that covers is a second machine: a different winget
+version, a different scoop layout, or an x86_64 Windows install could behave in
+ways nothing here has observed.
+
+**Not a Unix tool.** The suite runs on macOS and Linux because that is where it
+is developed, and the code is portable enough to compile and be tested there.
+It manages winget and scoop; on a machine with neither, it has nothing to do.
+
 ## `status`
 
 `dotpkg status` prints the plan it would execute and changes nothing — no
@@ -393,3 +418,10 @@ cargo test --all
 ```
 
 Requires Rust 1.85 or newer.
+
+Prebuilt Windows binaries for `x86_64-pc-windows-msvc` and
+`aarch64-pc-windows-msvc` are attached to each
+[release](https://github.com/xom11/dotpkg/releases), with a `SHA256SUMS` file
+beside them. The aarch64 binary is cross-compiled by CI on an x64 runner, so
+the runner cannot start it — read the "Verified on" table above for what has
+actually been executed where.

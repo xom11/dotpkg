@@ -1,15 +1,17 @@
 # Measurements: what the winget fence can see, what it cannot, and the sentence that says so
 
 Round run 2026-08-12 on a14 (`zenbook-a14`) and on this macOS machine, starting
-from `main` at **`7da8502`** and landing on **`b445482`**.
+from `main` at **`7da8502`** and landing on the commit that carries this file.
 
 **Which tree each figure describes, stated up front because the previous round
 ended by having to add exactly this.** The machine-state probes (§1-§4) predate
 any code change and describe a14 as it was on `7da8502`. The live fence figures
 in §6 were first taken on `d0685c0`, corrected on `4054cda`, and **re-taken on
-`b445482`**, the tree this branch ends on, so no figure below is inherited from
-a tree that is not the shipping one. The mutation run and both suites are
-`b445482`.
+`b445482`** so that no figure is inherited from a tree that is not the shipped
+one. The mutation run is `b445482`. §8b's two findings and the Windows suite
+figures in §9 are `f5caee9`, the tree this branch ends on; the three commits
+between `b445482` and it add tests and documentation and change no production
+behaviour, which is why the §6 figures were not taken a fourth time.
 
 **Every probe on a14 is read-only**, or confined to this round's own `ph7-`
 prefix: `winget export`, `winget show`, `winget list`, `Get-Process`,
@@ -359,6 +361,83 @@ predicate, which is what let the second guard hide behind the first.
 **Second run, same scope, same tree: 23 mutants, 21 caught, 2 unviable, 0
 missed, 0 TIMEOUT**, exit 0. The gate holds nothing on this branch's code.
 
+## 8b. Two findings from looking at Phase 6 rather than at this phase
+
+The independent post-merge audit this round was supposed to open with is
+queued and has not run. These two came from working through the prompt's own
+list of suspect surfaces while waiting, and both are about the previous round.
+
+### 8b.1 A "still outstanding" item that had been closed 31 minutes after it was written
+
+`docs/measurements-2026-08-12-phase6-citations.md` §12 item 6 states, in the
+present tense, that the `docs/` gate reads `git ls-files` and therefore does not
+scan a file that has not been `git add`ed.
+
+**It does scan it.** `scripts/check-citations.py`'s `tracked_files` reads a
+second list, `git ls-files --others --exclude-standard`, and its own docstring
+explains why. Positive control rather than reading: an untracked document
+carrying one unresolvable citation was written into `docs/`, the gate was run,
+and it reported **37 files scanned** instead of 36 and **failed on that file by
+name**. The probe was then removed and the tree confirmed clean.
+
+**The timing is the finding.** The claim was written in `417c798` at 09:22. The
+fix landed in `7005168` at 09:53 -- 31 minutes later, in a commit titled *"Close
+the docs gate's own blind spot"* -- and `7005168` is **not** an ancestor of
+`417c798`. The still-open list was never updated, and the sentence then survived
+a whole-branch review by the person who wrote both. That is defect class 1, in
+the document whose subject is defect class 1.
+
+### 8b.2 `build.rs`'s fix has no automatic gate, and CI cannot be one
+
+The prompt lists `build.rs` as reviewed by nobody. Reading it turns up no defect;
+what it turns up is a question the record does not answer: **what re-checks the
+manifest?**
+
+The answer was: nothing. One manual by-content read of twelve binaries, once, on
+one machine. And **CI is structurally incapable of noticing**, which is
+checkable rather than arguable:
+
+| | |
+|---|---|
+| CI runs `cargo test --all` on `windows-latest` | yes, from the workflow file |
+| `e91f4b1` is an ancestor of `8f08752`, the commit that added `build.rs` | **yes** |
+| `tests/update.rs` existed at `e91f4b1` | **yes** |
+| `windows-latest` on `e91f4b1` | **green** |
+
+So `update-<hash>.exe` started fine on GitHub's runner with **no manifest at
+all**. The runner is not subject to the installer detection that blocks an
+ordinary a14 desktop session, so a regression in `build.rs` would leave every
+automatic gate green and be noticed only by someone running the suite by hand
+from a non-elevated window.
+
+**Closed with a test in the suite**, in `tests/update.rs`, because that file is
+the one whose compiled name trips the heuristic -- the binary that would fail to
+launch is the one asserting it carries the fix. It runs everywhere the suite
+runs, including on the runner that is blind to the symptom.
+
+### 8b.3 And that test could not fail
+
+Written, formatted, clippy-clean, green on macOS and on a14. Then built against
+a **deliberately neutered `build.rs`** in an isolated directory on a14, and it
+**passed**.
+
+The check is a byte search of the running executable for the level string an
+embedded manifest writes into its resources. The first version spelled that
+string literally in its own assert message, so the search always found the
+test's own copy. **A gate reporting success while the thing it guards was
+gone** -- defect class 2, written inside the round whose document quotes that
+class, in the test written to close a fourth-class hole.
+
+The literal now appears nowhere in that file; it is rebuilt at run time from a
+byte-shifted copy, and the reconstruction is itself pinned, because a typo in
+the shifted table would produce a test that always fails for the wrong reason --
+the back side of the same class. Re-run against the same neutered build: **FAILED
+at the intended assertion, naming the binary.** Restored, `git diff build.rs`
+empty, re-run: passes.
+
+**Nothing about that test looked wrong.** It was caught only because a gate is
+not accepted here until it has been watched failing.
+
 ## 9. Verification
 
 **The tree is `b445482`**, and every figure here was derived on it unless
@@ -367,10 +446,15 @@ attributed otherwise above.
 - **macOS**: `cargo test --all` **657 passed / 0 failed**, **15** `test result:`
   lines, `--list` agrees at **657**. `cargo fmt --check` clean,
   `cargo clippy --all-targets -D warnings` clean.
+- **The `cfg` difference set is now five, not four**, and this is called out
+  because "exactly four" is quoted in several documents and has been stable for
+  three phases. §8b.2's gate is `#[cfg(windows)]` and, unlike the two elevation
+  tests, is **not** `#[ignore]`d -- it runs. Two `#[cfg(unix)]` tests are absent
+  on Windows and **three** `#[cfg(windows)]` tests are absent on macOS.
 - **The `docs/` gate passes**: 35 files scanned, every citation resolving. The
   total is deliberately not quoted here, for §4's reason in the previous round's
   document -- this file adds citations of its own.
-- **Windows**, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
+- **Windows**, on `f5caee9`, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
   `SHIPPING-MANIFEST.txt` naming a sha256 for all **74** files:
   `manifest entries : 74     verified equal : 74`,
   `mismatched : 0    missing : 0    unlisted on disk : 0`.
@@ -379,16 +463,18 @@ attributed otherwise above.
   file was added -- `git ls-tree` counts **73** shipped files at `8f087524` and
   73 today, and `git diff --diff-filter=A` between them is empty. This round's
   manifest also hashes `SHIPPING-SHA.txt`; the previous one did not.
-- **Windows suite**: `cargo test --no-fail-fast` **exit 0, 655 passed / 0 failed
-  / 2 ignored**, **15** `test result:` lines.
+- **Windows suite** on the tree this branch ends on: `cargo test --no-fail-fast`
+  **exit 0, 656 passed / 0 failed / 2 ignored**, **15** `test result:` lines,
+  `--list` **658**.
 - **The rebuild was proved by content, not by its own report.** `--list` on the
   machine returns a test name that exists only in this tree
   (`a_winget_change_dotpkg_cannot_see_by_path_and_has_no_guard_entry_for_is_reported`),
   which a skipped rebuild could not print.
 - **Name by name, from `--list`, never by subtracting totals**: macOS **657**,
-  Windows **657**, common **655**. The difference set is exactly the **four**
-  known `cfg` exclusions -- the two `#[cfg(unix)]` tests absent on Windows and
-  the two `#[cfg(windows)] #[ignore]` tests absent on macOS.
+  Windows **658**, common **655**, difference set **5**. The two `#[cfg(unix)]`
+  tests absent on Windows, and three absent on macOS: the two
+  `#[cfg(windows)] #[ignore]` elevation tests and §8b.2's manifest gate, which
+  is not `#[ignore]`d.
 - **Every test was confirmed able to fail**, by neutering the production clause
   it guards, one at a time -- the guard-table check, the package-directory
   check, the shared segment rule, the `Install` exclusion, the backend guard and
@@ -441,15 +527,20 @@ attributed otherwise above.
    figures are from **one machine**; a second machine could move them either
    way, and the `Rustlang.Rustup` row suggests the fence would need a rule about
    how many commands are too many.
-4. **The warning has never been observed on a machine whose real `pkg.toml`
+4. **Nothing re-checks `build.rs` outside the suite, and the suite's check is
+   Windows-only.** §8b.2's gate runs wherever the suite runs, which now includes
+   CI, but CI's runner cannot reproduce the symptom it guards, so the gate
+   proves the manifest is *embedded* and never that the failure is *absent*.
+   The two are different claims and only the first is tested.
+5. **The warning has never been observed on a machine whose real `pkg.toml`
    declares a winget package**, because a14's declares none. The measurement
    above uses a synthetic config, which is the same standing this project gives
    any structurally-verified, live-unverified path.
-5. **Whether `installed.db`'s `commands` table is populated the same way on a
+6. **Whether `installed.db`'s `commands` table is populated the same way on a
    machine that installed those packages *through* winget is unmeasured.** On
    a14, 11 of the 16 phantom entries correlate to scoop installs, so the
    population mechanism observed here may be ARP correlation rather than winget
    installation.
-6. **Item 17 and item 20 are untouched by this round**, and item 9 is closed
+7. **Item 17 and item 20 are untouched by this round**, and item 9 is closed
    only in its second half -- there is still no scan-time source for a
    package's process names that this round is willing to ship.

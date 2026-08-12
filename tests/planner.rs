@@ -197,7 +197,7 @@ fn a_declared_package_is_not_upgraded_when_only_its_manifest_names_the_process()
     // `a_running_package_is_not_pruned_when_only_its_manifest_names_the_process`;
     // the finding that named this whole phase was exactly this case: "a
     // neovim upgrade planned cleanly while nvim.exe was running"
-    // (docs/phase2-notes.md).
+    // (`git show 07dd86b:docs/phase2-notes.md`).
     let mut inst = installed("neovim", "0.10.0");
     inst.bins = vec!["nvim".to_string()];
 

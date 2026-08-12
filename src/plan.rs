@@ -209,9 +209,10 @@ impl Plan {
 /// silent decision points a new backend could slide past. This is the same
 /// discipline `apply::is_outstanding`, `main::count_replaces_and_installs` and
 /// `execute::write_recovery` already apply to their own enums, and
-/// `docs/phase4-notes.md` names a human-decided capability as one of the two
-/// things still standing between this crate and the design's "a new backend
-/// slots in without touching the planner" promise.
+/// `docs/OPEN-ITEMS.md` items 13 and 24 name a human-decided capability as one
+/// of the things still standing between this crate and the design's "a new
+/// backend slots in without touching the planner" promise -- the other being
+/// that the write path lives outside `trait Backend` entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     Acts,

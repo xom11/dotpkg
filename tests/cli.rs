@@ -1707,8 +1707,9 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_i
 //
 // HISTORICAL, DO NOT RE-POINT: the survivors were reported against Phase 3's
 // tree (58c8e29), where the same four checks sat at `:438`, `:459`, `:470` and
-// `:496`. Those four are kept only so the report in
-// docs/phase3-notes.md's mutation section stays findable. They are NOT claims
+// `:496`. Those four are kept only so the Phase 3 mutation report stays
+// findable -- that record left the working tree on 2026-08-12 and reads with
+// `git show 07dd86b:docs/phase3-notes.md`. They are NOT claims
 // about any current tree, so a citation sweep must leave them alone --
 // "correcting" them to this tree's numbers would turn a true statement about
 // Phase 3 into a duplicate of the line above.
@@ -2128,7 +2129,7 @@ fn adopt_backend_winget_refuses_gracefully_when_the_package_is_not_installed() {
     // the named package is not in `scan.installed` -> an ordinary refusal,
     // not a crash. This is also the winget-side proof of item 4: `adopt`
     // must not drop a backend's `scan.warnings` on the floor the way it once
-    // did for scoop (`docs/phase3-notes.md`).
+    // did for scoop (`git show 07dd86b:docs/phase3-notes.md`).
     let f = Fixture::new(
         "[scoop]\nbuckets = [\"main\"]\npackages = []\n",
         r#"{"scoop":{}}"#,

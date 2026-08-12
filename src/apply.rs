@@ -1193,8 +1193,10 @@ pub fn sample_fence_with_roots(
 /// `BurntSushi.ripgrep.MSVC` they are `msvc` and `ripgrep msvc`, and the process
 /// is `rg`. A user who writes no `[winget.guard]` entry for one of the other 37
 /// therefore gets no protection, **and until this function nothing said so**:
-/// `docs/phase5-notes.md`'s still-open item 9 records exactly that, that dotpkg
-/// "cannot tell them which entry they are missing".
+/// `docs/OPEN-ITEMS.md`'s item 9 records exactly that, that dotpkg
+/// "cannot tell them which entry they are missing". Its first half -- that
+/// there is no scan-time source for a winget package's process names at all --
+/// is still open; this function closes only the second.
 ///
 /// **Why it is keyed on a pending change rather than on being installed.** A
 /// line per unguarded installed package would be **32** lines on the measured

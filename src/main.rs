@@ -315,8 +315,9 @@ fn unrouted_warning(ready: usize, routed: usize) -> Option<String> {
 ///
 /// Called before the plan is built, for the same reason `status`'s scoop
 /// warning always was, and now doubled for a second backend:
-/// `docs/phase3-notes.md` records `adopt` discarding `scan.warnings` and
-/// calling a package dotpkg simply could not read "not installed" -- every
+/// the Phase 3 notes record `adopt` discarding `scan.warnings` and
+/// calling a package dotpkg simply could not read "not installed"
+/// (`git show 07dd86b:docs/phase3-notes.md`) -- every
 /// command that scans must print what it could not read, or that mistake
 /// happens again, once per backend.
 fn print_scan_warnings_and_merge(

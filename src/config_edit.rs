@@ -255,8 +255,9 @@ fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &s
 /// **Known, accepted weakness**: a comment that MOVES to a different line,
 /// without being lost, is not caught -- a multiset remembers count, not
 /// position. This is the same class of gap a plain `.contains` assertion
-/// has (`docs/dogfood-phase4-2026-08-10.md`: "cannot tell 'still attached to
-/// the right line' apart from 'moved'"). Loss is the defect class actually
+/// has -- the Phase 4 dogfood put it as "cannot tell 'still attached to the
+/// right line' apart from 'moved'" (record removed from the tree 2026-08-12;
+/// `git show 07dd86b:docs/dogfood-phase4-2026-08-10.md`). Loss is the defect class actually
 /// measured (the dogfood bug); position is not checkable here without
 /// reintroducing the line-count invariant this function replaced, which is
 /// exactly what rejected legitimate edits. Deliberate, not an oversight.

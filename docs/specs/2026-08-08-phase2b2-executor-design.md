@@ -144,8 +144,12 @@ continues". This document picks, in "Halt or proceed" below.
 equal, and the displayed arrow is inverted: installed `1.0.0-rc1` against a
 lock of `1.0.0` renders as a downgrade.
 
-**`docs/phase2b-notes.md:249-255` defers `commit` validation to Phase 3 on a
-reasoning that protects the wrong thing.** Verified against a real git
+**The Phase 2b notes, lines 249-255, defer `commit` validation to Phase 3 on a
+reasoning that protects the wrong thing.** *(HISTORICAL, DO NOT RE-POINT: those
+line numbers are true about `07dd86b`, the last tree that carried the record;
+read it with `git show 07dd86b:docs/phase2b-notes.md`. The citation was
+un-numbered here rather than deleted because the sentence it supports is still
+the reason this section exists.)* Verified against a real git
 repository: `git cat-file -e` does reject `-oops` and `--upload-pack=touch`,
 exactly as the note says — and accepts `main`, `HEAD`, `@`, and
 `refs/heads/main`. The reachable hole is an ordinary branch name, not a dash.

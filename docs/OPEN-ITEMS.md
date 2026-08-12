@@ -10,21 +10,36 @@ numbering resolves to its answer rather than to a hole in the sequence. Items
 
 ## How to read a reference to a record that is no longer in the tree
 
-Twelve documents — six dogfood records and six phase notes, about 8,700 lines —
-were removed on 2026-08-12. **They are not gone; they are not in the working
-tree.** Every one of them exists at `07dd86b`, the commit immediately before the
-removal:
+Twenty documents, about **28,200 lines**, were removed on 2026-08-12 in two
+waves. **None of them is gone; none of them is in the working tree.** Each wave
+names the commit immediately before it, which is where the files still are:
 
 ```console
-git show 07dd86b:docs/phase5-notes.md
-git show 07dd86b:docs/dogfood-phase4-2026-08-10.md
+git show 07dd86b:docs/phase5-notes.md                        # wave 1
+git show 3bf1584:docs/plans/2026-08-09-phase4-backend-winget.md   # wave 2
 ```
 
-Removed: `dogfood-2026-08-08.md`, `dogfood-phase2a-2026-08-08.md`,
+**Wave 1, at `07dd86b`** — six dogfood records and six phase notes, ~8,700
+lines: `dogfood-2026-08-08.md`, `dogfood-phase2a-2026-08-08.md`,
 `dogfood-phase2b1-2026-08-08.md`, `dogfood-phase2b2-2026-08-09.md`,
 `dogfood-phase3-2026-08-09.md`, `dogfood-phase4-2026-08-10.md`,
 `phase2-notes.md`, `phase2b-notes.md`, `phase3-notes.md`, `phase4-notes.md`,
 `phase4b-notes.md`, `phase5-notes.md`.
+
+**Wave 2, at `3bf1584`** — all eight task-breakdown plans, **19,482 lines**, the
+single largest thing in `docs/` and 63% of it: everything under `docs/plans/`
+and `docs/superpowers/plans/`. They were the step lists the phases were built
+from, every phase they belong to is closed, and what they established that is
+still true is either in `docs/specs/` (the decisions), in `docs/measurements-*`
+(the numbers), or in this file (what is still open). A plan is the most
+perishable document a project produces: it is a description of work not yet
+done, and it stops being read the day the work lands.
+
+**What survives, and why those and not these.** `docs/specs/` holds the designs —
+why a lock file, why the two backends pin different things, what dotpkg refuses
+to do — and they are cited by the README and by the code. `docs/measurements-*`
+holds the raw commands and output that every claim rests on. Both are read; the
+plans were not.
 
 **What was deliberately not done:** the surviving `docs/specs/`, `docs/plans/`
 and `docs/measurements-*` documents still name those files in their prose, and

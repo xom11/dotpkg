@@ -160,6 +160,76 @@ jobs:
           Write-Host "state: $state"
           if (-not ($state -match 'ci-payload')) { throw 'dotpkg installed it without recording ownership' }
 
+      - name: publish 1.0.1 into the bucket, so a version change has somewhere to go
+        shell: pwsh
+        run: |
+          # A DIFFERENT payload with a DIFFERENT hash at a DIFFERENT url. If the
+          # archive were the same bytes, scoop could satisfy the install from
+          # its cache and the download half of the version change would never
+          # run.
+          $payload = Join-Path $env:RUNNER_TEMP 'payload101'
+          $serve   = Join-Path $env:RUNNER_TEMP 'serve'
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+          Set-Content -LiteralPath "$payload\ci-payload.cmd" -Value '@echo ci-payload 1.0.1'
+          Compress-Archive -Path "$payload\ci-payload.cmd" -DestinationPath "$serve\payload-101.zip" -Force
+          $hash = (Get-FileHash -LiteralPath "$serve\payload-101.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "payload_101_sha256: $hash"
+
+          $bucket = Join-Path $env:SCOOP 'buckets\ci'
+          $manifest = @{
+            version = '1.0.1'
+            url     = 'http://127.0.0.1:8765/payload-101.zip'
+            hash    = $hash
+            bin     = 'ci-payload.cmd'
+          } | ConvertTo-Json
+          Set-Content -LiteralPath "$bucket\bucket\ci-payload.json" -Value $manifest
+          git -C $bucket add -A
+          git -C $bucket commit -q -m 'ci-payload 1.0.1'
+          Write-Host ("bucket_head_after: " + (git -C $bucket rev-parse HEAD))
+
+      - name: a version change, which on scoop is uninstall + install
+        shell: pwsh
+        run: |
+          # THE POINT OF THIS STEP. A scoop version change cannot be done any
+          # other way: installing over an installed app is a measured no-op, so
+          # dotpkg uninstalls and then installs, and between the two the package
+          # is ABSENT. The design calls that the irreducible gap, and until this
+          # step nothing had ever watched it happen -- not the release binary on
+          # real hardware, not this job, not any test.
+          $exe = "$env:GITHUB_WORKSPACE\target\release\dotpkg.exe"
+
+          $before = (Get-Content -LiteralPath "$env:SCOOP\apps\ci-payload\current\manifest.json" -Raw | ConvertFrom-Json).version
+          Write-Host "installed_before: $before"
+          if ($before -ne '1.0.0') { throw "the subject must start at 1.0.0, found $before" }
+
+          & $exe update --config "$env:WORK\pkg.toml" --lock "$env:WORK\pkg.lock" --offline
+          $lock = Get-Content -LiteralPath "$env:WORK\pkg.lock" -Raw
+          Write-Host "lock after update:`n$lock"
+          if (-not ($lock -match '1\.0\.1')) { throw 'update did not move the pin to 1.0.1' }
+
+          $out = & $exe apply --config "$env:WORK\pkg.toml" --lock "$env:WORK\pkg.lock" --state "$env:WORK\state.json" --yes 2>&1 | Out-String
+          Write-Host $out
+          # The plan must SAY it is a version change, naming both versions --
+          # the line a user reads before consenting to the window.
+          if (-not ($out -match '1\.0\.0\s*->\s*1\.0\.1')) {
+            throw 'the plan did not present this as a version change from 1.0.0 to 1.0.1'
+          }
+
+          # The disk is the verdict, as everywhere else in this job.
+          $after = (Get-Content -LiteralPath "$env:SCOOP\apps\ci-payload\current\manifest.json" -Raw | ConvertFrom-Json).version
+          Write-Host "installed_after: $after"
+          if ($after -ne '1.0.1') { throw "the version change did not land: still $after" }
+          # Matched by prefix rather than by an exact filename: scoop decides
+          # what a .cmd entry shims to, and guessing that here would make this
+          # assertion fail for a reason that has nothing to do with dotpkg.
+          $shims = @(Get-ChildItem -LiteralPath "$env:SCOOP\shims" -Filter 'ci-payload*' -ErrorAction SilentlyContinue)
+          Write-Host ("shims_after: " + ($shims.Name -join ', '))
+          if ($shims.Count -eq 0) { throw 'no shim survived the uninstall-then-install window' }
+          # Ownership is intent, not an artefact of the install: a version
+          # change of a package dotpkg already owns must leave it owned.
+          $state = Get-Content -LiteralPath "$env:WORK\state.json" -Raw
+          if (-not ($state -match 'ci-payload')) { throw 'the replace dropped ownership' }
+
       - name: the prune guard must be in the way before the prune is believed
         shell: pwsh
         run: |

@@ -269,21 +269,38 @@ loudly if the session it is run from is elevated.
 - **macOS**: `cargo test --all` **646 passed / 0 failed**, **15** `test result:`
   lines. `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
   clean on the host and on **`aarch64-pc-windows-msvc`**.
-- **Windows**, on `b795d9e`, shipped as a tarball carrying `SHIPPING-SHA.txt`
-  and a `SHIPPING-MANIFEST.txt` naming a sha256 for all **73** files:
+- **Windows**, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
+  `SHIPPING-MANIFEST.txt` naming a sha256 for all **73** files:
   `manifest entries : 73     verified equal : 73`, `mismatched : 0    missing :
   0    unlisted on disk : 0`. That last counter is the one that rules out
   extracting over an older tree, and it subsumes the separate fixture check --
   `tests/fixtures/winget/list-full.txt` is one of the 73 verified by sha256.
-- **Windows suite**: `cargo test --no-fail-fast` **exit 0**, **644 passed / 0
-  failed / 1 ignored**, **15** `test result:` lines.
+
+  **It ran twice, because the tree moved after the first run.** On `b795d9e`:
+  exit 0, 644 passed / 0 failed / 1 ignored, 15 result lines, and a name
+  cross-reference of macOS 646 / Windows 645 / common 644 with the long-standing
+  three `cfg` exclusions. That tree was then superseded by the commit
+  withdrawing the duration claim, which touches `src/backend/winget.rs` and
+  `tests/cli.rs` (`git diff --numstat`: 28/15 and 53/0), so it was shipped and
+  run again.
+- **Windows suite on the tree this round ends on** (`060a124`):
+  `cargo test --no-fail-fast` **exit 0, 644 passed / 0 failed / 2 ignored**,
+  **15** `test result:` lines.
 - **Name by name, from `--list`, never from run output, and never by
-  subtracting totals**: macOS **646**, Windows **645**, common **644**. The
-  difference set is byte-identical to every previous run: the two `#[cfg(unix)]`
-  tests absent on Windows
+  subtracting totals**: macOS **646**, Windows **646**, common **644**. The
+  difference set is now **four** `cfg` exclusions rather than three, and the
+  fourth is this round's own: the two `#[cfg(unix)]` tests absent on Windows
   (`a_failed_last_write_leaves_a_prefix_that_plan_does_nothing_about`,
-  `a_root_reached_through_a_symlink_still_matches_running_processes`) and the one
-  `#[cfg(windows)] #[ignore]` test absent on macOS.
+  `a_root_reached_through_a_symlink_still_matches_running_processes`) and the
+  **two** `#[cfg(windows)] #[ignore]` tests absent on macOS -- the existing
+  elevated one and the non-elevated mirror added here.
+- **The rebuild was checked by content, not by its own report.** `git archive`
+  stamps every file with the commit time, which can be older than the previous
+  build's artifacts, so a 4-second "build_exit=0" is exactly what a skipped
+  rebuild would also print. What settles it is that `--list` on the machine now
+  returns **646** names including
+  `on_an_ordinary_windows_session_elevated_answers_some_false`, which did not
+  exist in the previous tree.
 - **Mutation runs on both platforms**, `-j 2`, 0 TIMEOUT, machine state recorded
   beside each. The macOS machine was **not** idle for its run (load 2.34 rising
   to 10.01, `syspolicyd` at 100% of one core from this round's own builds) and

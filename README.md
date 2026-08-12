@@ -14,8 +14,8 @@ behind 0.1.0, stated before the feature list rather than after it.
 | that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
 | Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
 | what the **published binary** has done on real hardware | installed one package and pruned it again, both verified on disk — **not** a version change, and no winget mutation |
-| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request |
-| suite size | **658** tests on macOS, **659** on Windows, compared name by name |
+| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request, plus a Windows job that drives **real scoop** in a throwaway root |
+| suite size | **659** test names on macOS, **660** on Windows — 658 run there and 2 `#[ignore]`d. Both figures read from a run's own output on 2026-08-12, not carried forward |
 
 **What that does and does not buy.** Every behaviour this README describes is
 pinned by tests that were each confirmed able to fail, and the winget and scoop

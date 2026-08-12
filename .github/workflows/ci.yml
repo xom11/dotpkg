@@ -166,6 +166,17 @@ jobs:
           # The counterweight. Without it, the removal below proves only that
           # apply removes things, not that anything ever stood between a user
           # and an empty pkg.toml.
+          #
+          # This step is the one place in the job where a NON-ZERO exit is the
+          # pass condition, so the usual plumbing has to be turned off in two
+          # places: PowerShell 7.3+ turns a failing native command into a
+          # terminating error under `ErrorActionPreference = 'stop'` (which is
+          # what Actions sets), and the pwsh wrapper carries `$LASTEXITCODE`
+          # out as the step's own exit code. The first run of this job passed
+          # every assertion here -- `refusal_exit: 2`, package still installed
+          # -- and failed anyway on that second mechanism.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $exe = "$env:GITHUB_WORKSPACE\target\release\dotpkg.exe"
           Set-Content -LiteralPath "$env:WORK\pkg.toml" -Value "[scoop]`nbuckets  = [`"ci`"]`npackages = []`n"
           & $exe apply --config "$env:WORK\pkg.toml" --lock "$env:WORK\pkg.lock" --state "$env:WORK\state.json" --yes
@@ -173,6 +184,9 @@ jobs:
           Write-Host "refusal_exit: $code"
           if ($code -ne 2) { throw "an empty pkg.toml with an owned package must refuse at exit 2, got $code" }
           if (-not (Test-Path -LiteralPath "$env:SCOOP\apps\ci-payload")) { throw 'the refusal removed the package anyway' }
+          # Explicit, so the refusal this step exists to observe cannot be
+          # mistaken for the step failing.
+          exit 0
 
       - name: prune for real, and confirm ownership is released
         shell: pwsh

@@ -660,25 +660,102 @@ pub fn run_winget_step(m: &dyn WingetMutator, state: &mut State, step: &WingetSt
     }
 }
 
+/// The write half of a backend: everything `execute` needs in order to perform
+/// one already-resolved step and prove it happened.
+///
+/// `backend::Backend` is the read half -- `scan` and the two `resolve`s -- and
+/// it carried the whole of the design's promise that "the backend trait exists
+/// from v1 so choco slots in without touching the planner". **That promise held
+/// for reading and not for writing.** The write path was two unrelated
+/// per-backend seams (`Mutator` for scoop, `WingetMutator` for winget) threaded
+/// through `execute` and `run_step` as a hand-written pair of parameters, so a
+/// third backend meant a third parameter at every call site rather than a third
+/// implementation of anything. This is the contract that was missing.
+///
+/// **It is deliberately at the step level, not the argv level.** The two
+/// process seams underneath keep their own shapes, because those shapes are
+/// honestly different -- scoop installs a staged manifest path with an
+/// architecture, winget sets a version by id -- and flattening them into one
+/// signature would either lose that difference or lie about it. What the
+/// backends genuinely have in common is not an argv; it is *run one step, and
+/// answer with a `StepOutcome` that never mistakes "the command exited 0" for
+/// "it happened"*.
+///
+/// `Step` is an associated type so one backend's executor cannot be handed
+/// another backend's step: `ScoopSide::run` takes a `ScoopStep` and there is no
+/// signature in which a `WingetStep` fits. Same make-the-mistake-unwritable
+/// move `Step`'s own split already makes, one layer up.
+pub trait Mutates {
+    type Step;
+    fn run(&self, state: &mut State, step: &Self::Step) -> StepOutcome;
+}
+
+/// scoop's write half: the seam, plus the root every scoop verification reads.
+pub struct ScoopSide<'a> {
+    pub root: &'a Path,
+    pub mutator: &'a dyn Mutator,
+}
+
+impl Mutates for ScoopSide<'_> {
+    type Step = ScoopStep;
+
+    fn run(&self, state: &mut State, step: &ScoopStep) -> StepOutcome {
+        run_scoop_step(self.root, self.mutator, state, step)
+    }
+}
+
+/// winget's write half. **No root, and that asymmetry is the point:** a winget
+/// step is verified by re-asking winget, which never reads the scoop root at
+/// all -- the same asymmetry `root_looks_like_scoop`'s own doc comment records,
+/// and the reason a winget-only run is exempt from that check. Carrying a root
+/// here would make the two sides look interchangeable when they are not.
+pub struct WingetSide<'a> {
+    pub mutator: &'a dyn WingetMutator,
+}
+
+impl Mutates for WingetSide<'_> {
+    type Step = WingetStep;
+
+    fn run(&self, state: &mut State, step: &WingetStep) -> StepOutcome {
+        run_winget_step(self.mutator, state, step)
+    }
+}
+
+/// Every backend's write half, in one value.
+///
+/// This exists so that adding a backend adds a **field**, not a parameter to
+/// `execute` and `run_step` and therefore to all 27 of their call sites. The
+/// dispatch in `run_step` stays a wildcard-free match on purpose: that arm is a
+/// decision point a new backend must be made to face, exactly like
+/// `plan::Capability` and `apply::is_outstanding`, and a compile error is the
+/// only reliable way to ask the question.
+pub struct Backends<'a> {
+    pub scoop: ScoopSide<'a>,
+    pub winget: WingetSide<'a>,
+}
+
+impl<'a> Backends<'a> {
+    pub fn new(root: &'a Path, scoop: &'a dyn Mutator, winget: &'a dyn WingetMutator) -> Self {
+        Backends {
+            scoop: ScoopSide {
+                root,
+                mutator: scoop,
+            },
+            winget: WingetSide { mutator: winget },
+        }
+    }
+}
+
 /// Perform one step -- scoop or winget -- and prove it happened.
 ///
 /// Dispatches on backend and nothing else: a winget `Step` cannot reach
-/// `run_scoop_step`, and a scoop `Step` cannot reach the winget arm, because
-/// the match is over `Step` itself, not over some flag carried alongside it.
-pub fn run_step(
-    root: &Path,
-    m: &dyn Mutator,
-    wm: &dyn WingetMutator,
-    state: &mut State,
-    step: &Step,
-) -> StepOutcome {
+/// scoop's executor, and a scoop `Step` cannot reach the winget arm, because
+/// the match is over `Step` itself, not over some flag carried alongside it,
+/// and each side's `Mutates::Step` refuses the other's type outright.
+pub fn run_step(b: &Backends, state: &mut State, step: &Step) -> StepOutcome {
     match step {
-        Step::Scoop(s) => run_scoop_step(root, m, state, s),
-        // No `root`: a winget step is verified by re-asking winget, which
-        // never reads the scoop root at all -- the same asymmetry
-        // `root_looks_like_scoop`'s own doc comment records, and the reason a
-        // winget-only run is exempt from that check.
-        Step::Winget(w) => run_winget_step(wm, state, w),
+        Step::Scoop(s) => b.scoop.run(state, s),
+        Step::Winget(w) => b.winget.run(state, w),
     }
 }
 
@@ -996,10 +1073,8 @@ pub fn root_looks_like_scoop(root: &Path) -> Result<(), String> {
 /// packages can take minutes, and a user who opens their editor partway
 /// through must not have it uninstalled out from under them.
 pub fn execute(
-    root: &Path,
+    b: &Backends,
     steps: Vec<Step>,
-    m: &dyn Mutator,
-    wm: &dyn WingetMutator,
     state: &mut State,
     running: &dyn Fn() -> Running,
     opts: &ExecOptions,
@@ -1013,7 +1088,7 @@ pub fn execute(
     // is verified by re-asking winget, which never reads this root at all --
     // see `root_looks_like_scoop`'s own doc comment.
     if steps.iter().any(|s| matches!(s, Step::Scoop(_))) {
-        root_looks_like_scoop(root)?;
+        root_looks_like_scoop(b.scoop.root)?;
     }
 
     let mut ex = Execution::default();
@@ -1040,7 +1115,7 @@ pub fn execute(
             });
             continue;
         }
-        let r = match run_step(root, m, wm, state, step) {
+        let r = match run_step(b, state, step) {
             StepOutcome::Done => ItemResult::Done,
             StepOutcome::Failed { why, touched } => ItemResult::Failed { why, touched },
         };

@@ -16,8 +16,9 @@
 //! exists. A content check cannot replace it either: anchoring each citation to
 //! what it pointed at in the commit that wrote it was measured across the whole
 //! repository and **221 of 421 citations fire**, most of them legitimately --
-//! `docs/plans/` cites code that had not been written yet, and `docs/phase3-notes.md`
-//! is a closed record. A gate needing a 221-entry allowlist is a gate that dies.
+//! `docs/plans/` cites code that had not been written yet, and every
+//! `docs/measurements-*` document is a closed record of the tree it was taken
+//! on. A gate needing a 221-entry allowlist is a gate that dies.
 //!
 //! # The rule this enforces instead
 //!
@@ -25,7 +26,7 @@
 //! drift when a line is inserted above it, so there is no number left to go
 //! stale -- and the gate is then total rather than heuristic: it does not have
 //! to judge whether a citation is still right, because the shape that can go
-//! wrong is simply absent. `docs/phase5-notes.md` had already found this by
+//! wrong is simply absent. The Phase 5 notes had already found this by
 //! hand ("named rather than cited by line on purpose ... a test name does not
 //! drift"); it was a convention nobody enforced, and 32 line citations survived
 //! it. A convention that is only ever asserted in prose is not a gate.
@@ -51,9 +52,14 @@ const CITED_EXTENSIONS: &[&str] = &["rs", "md", "toml", "txt", "json", "lock", "
 
 /// A citation that is true about a NAMED PAST TREE and must not be re-pointed
 /// to this one. `tests/cli.rs` carries the only instance today: mutation
-/// survivors reported against Phase 3's `58c8e29`, kept so the report in
-/// `docs/phase3-notes.md` stays findable. "Correcting" those to this tree's
-/// numbers would turn a true statement about Phase 3 into a false one.
+/// survivors reported against Phase 3's `58c8e29`, kept so that report stays
+/// findable. "Correcting" those to this tree's numbers would turn a true
+/// statement about Phase 3 into a false one.
+///
+/// The report itself lives in a document removed from the working tree on
+/// 2026-08-12 (`git show 07dd86b:docs/phase3-notes.md`); removing a record does
+/// not make a citation into it re-pointable, because the tree it is true about
+/// has not changed. `docs/OPEN-ITEMS.md` carries the full recovery list.
 ///
 /// The marker must name the tree it is true about; a bare "historical" with no
 /// sha is the same unfalsifiable sentence in a different costume.

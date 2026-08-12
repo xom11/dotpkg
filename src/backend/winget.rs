@@ -1923,9 +1923,10 @@ mod tests {
         // That margin was *reasoned* when this sentence was first written and
         // was *measured* immediately afterwards, by the scoped re-review of the
         // fix wave that added this test: on `2a35df2`, 20 consecutive runs
-        // under 20 busy loops on 10 CPUs, 0 flakes. See
-        // `docs/phase5-notes.md`'s "The suite's one wall-clock assertion" for
-        // the numbers. Structurally, only the `tail` assertion
+        // under 20 busy loops on 10 CPUs, 0 flakes. The numbers are in "The
+        // suite's one wall-clock assertion" in the Phase 5 notes, a record
+        // removed from the tree on 2026-08-12 and readable with
+        // `git show 07dd86b:docs/phase5-notes.md`. Structurally, only the `tail` assertion
         // is timing-sensitive at all -- `total >= DELAY` cannot fail, because
         // `sleep` never returns early. If this test ever flakes anyway, the fix
         // is a larger `DELAY`, not a wider threshold, because the threshold is

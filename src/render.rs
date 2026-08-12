@@ -2453,7 +2453,8 @@ mod tests {
 
     #[test]
     fn the_not_rewritten_line_does_not_claim_convergence_when_resolution_failed() {
-        // docs/phase3-notes.md item 9, measured on the dogfood machine: no
+        // Phase 3 notes item 9 (`git show 07dd86b:docs/phase3-notes.md`),
+        // measured on the dogfood machine: no
         // pkg.lock at all, one declared package, and its only resolution
         // failed. `wrote_anything()` is false for the same reason as the
         // genuinely-converged case above -- `Change::Kept` does not count as

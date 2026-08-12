@@ -2,8 +2,9 @@ mod common;
 
 use common::fake_winget::FakeWinget;
 use dotpkg::backend::winget::{parse_list, rows_to_scan, Winget, WingetRow, NO_APPLICATIONS_FOUND};
-use dotpkg::backend::Backend;
+use dotpkg::backend::{apply_guard_overrides, Backend, ScanOutcome};
 use dotpkg::model::Name;
+use std::collections::BTreeMap;
 
 fn fixture(name: &str) -> String {
     // Rust does no newline translation, so this keeps the CRLF the fixture was
@@ -410,5 +411,87 @@ fn the_backend_reports_the_name_the_lock_and_state_are_keyed_by() {
     assert_eq!(
         Backend::name(&Winget::new(FakeWinget::returning(0, String::new()))),
         dotpkg::model::WINGET
+    );
+}
+
+#[test]
+fn a_sourceless_row_from_a_real_capture_reaches_the_guard_warning_as_opaque() {
+    // **The two halves of this were each pinned and never joined.**
+    // `the_whole_captured_machine_splits_into_exactly_these_counts` drives
+    // `rows_to_scan` DIRECTLY, and `backend::apply_guard_overrides`' own unit
+    // test HAND-BUILDS the `Scan` it warns about. Neither one goes through
+    // `Backend::scan`, which is the function production actually calls, so
+    // nothing asserted that the scan a real machine produces still carries the
+    // classification the warning depends on.
+    //
+    // **The gap that leaves is measured, not argued.** Clearing `scan.opaque`
+    // inside `Winget::scan`, between `rows_to_scan` and its return, turns THIS
+    // TEST ALONE red -- 658 passed, 1 failed, and the 1 is this one. Every
+    // guard warning on every real machine would have gone silent with the whole
+    // suite green.
+    //
+    // Deleting the `opaque.push` inside `rows_to_scan` is a different break and
+    // is caught by the counting test as well as this one, so that is not the
+    // class this test is here for; stated because the first control run showed
+    // it and the claim had to be narrowed.
+    //
+    // **`tests/cli.rs` cannot cover any of it**, which is why the gap survived:
+    // its `Fixture::run` hands the spawned binary a PATH with winget removed, so
+    // no test there can produce a sourceless row at all. This is as close to the
+    // production chain as the suite may get -- no test in this crate spawns
+    // `winget.exe`, the same standing rule that forbids a fake scoop binary.
+    //
+    // **Measured, and the ordinary shape rather than a corner:** 84 of the 141
+    // rows in this capture have no Source, and on the machine it came from that
+    // was 84 of 126 distinct ids.
+    const OPAQUE_ID: &str = r"ARP\User\Arm64\Look";
+
+    let fake = FakeWinget::returning(0, fixture("list-full.txt"));
+    let mut outcome = ScanOutcome::Scanned(Backend::scan(&Winget::new(fake)).unwrap());
+
+    // The control that makes the assertion below mean anything: this id has to
+    // have been CLASSIFIED as opaque, not merely be missing from `installed`.
+    // An id that reached neither list would draw the same warning for a
+    // different reason, and the test would pass while proving nothing.
+    let ScanOutcome::Scanned(scan) = &outcome else {
+        panic!("a scan that parsed must not be Unscannable")
+    };
+    assert!(
+        scan.opaque.contains(&Name::new(OPAQUE_ID)),
+        "the real capture must classify this sourceless row as opaque, or the \
+         warning below is being reached by the wrong route"
+    );
+    assert!(
+        !scan
+            .installed
+            .iter()
+            .any(|i| i.name == Name::new(OPAQUE_ID)),
+        "a sourceless row must never become an Installed entry"
+    );
+
+    let mut guard = BTreeMap::new();
+    guard.insert(Name::new(OPAQUE_ID), vec!["look".to_string()]);
+
+    // Declared as well, on purpose: unlike the stale-entry case, this warning
+    // must NOT be silenced by a declaration. "Not installed yet" cannot explain
+    // an id winget has just reported.
+    let warnings = apply_guard_overrides(&mut outcome, &guard, &[Name::new(OPAQUE_ID)]);
+
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one guard key protects nothing here: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("no source"),
+        "name the real cause: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains(OPAQUE_ID),
+        "name the key the user has to fix: {warnings:?}"
+    );
+    assert!(
+        !warnings[0].contains("nothing installed"),
+        "must not blame an absence that is not the problem: {warnings:?}"
     );
 }

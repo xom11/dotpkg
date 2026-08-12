@@ -13,8 +13,9 @@ behind 0.1.0, stated before the feature list rather than after it.
 | real Windows machines it has been run on | **one** |
 | that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
 | Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
-| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request |
-| suite size | **658** tests on macOS, **659** on Windows, compared name by name |
+| what the **published binary** has done on real hardware | installed one package and pruned it again, both verified on disk — **not** a version change, and no winget mutation |
+| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request, plus a Windows job that drives **real scoop** in a throwaway root |
+| suite size | **659** test names on macOS, **660** on Windows — 658 run there and 2 `#[ignore]`d. Both figures read from a run's own output on 2026-08-12, not carried forward |
 
 **What that does and does not buy.** Every behaviour this README describes is
 pinned by tests that were each confirmed able to fail, and the winget and scoop
@@ -376,12 +377,14 @@ fails, say) is reported as what really changed on disk versus what did not
   rejected as the fix, not merely deferred: those VCRedist rows do carry
   `Source: winget`, so they are reported rather than lost, and on a machine
   declaring no winget packages such a rule would have suppressed none of the 36
-  unmanaged lines. See
-  [carried forward out of Phase 5](docs/phase5-notes.md).
+  unmanaged lines. See [open item 2](docs/OPEN-ITEMS.md).
 - **Chocolatey.** Nothing beyond the two backends.
 
 ## Documentation
 
+- [**Open items**](docs/OPEN-ITEMS.md) — everything still unmeasured, still
+  unobserved, or decided-rather-than-deferred, in one list. Start here; it is
+  the only document in `docs/` that is meant to change.
 - [Design](docs/specs/2026-08-08-design.md) — why a lock file, why scoop and
   winget pin to different things, and what dotpkg refuses to do.
 - [Phase 2b-2 design](docs/specs/2026-08-08-phase2b2-executor-design.md) — the
@@ -400,15 +403,21 @@ fails, say) is reported as what really changed on disk versus what did not
   included.
 - [Phase 1 plan](docs/plans/2026-08-08-phase1-status-scoop.md) — the task
   breakdown the first phase was built from.
-- [Dogfood notes](docs/dogfood-2026-08-08.md) — the first run against a real
-  machine.
-- [Carried forward out of Phase 4](docs/phase4-notes.md),
-  [out of Phase 4b](docs/phase4b-notes.md) and
-  [out of Phase 5](docs/phase5-notes.md) — what each phase measured, what it
-  only reasoned about, and what it left open.
 - [Phase 5 measurements](docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md)
   — the running-process fence, the `Unmanaged` flood, and whether winget has a
   transient failure at all.
+- [Release-binary `apply` measurements](docs/measurements-2026-08-12-phase8-release-apply.md)
+  — the first time the artifact a user downloads installed and removed a real
+  package, the counterweight that proves the prune guard was in the way, and the
+  three things the round found that nobody was looking for.
+
+**The six dogfood records and six phase notes are no longer in the tree.** They
+were removed on 2026-08-12, about 8,700 lines of narrative whose live content is
+now [`docs/OPEN-ITEMS.md`](docs/OPEN-ITEMS.md) and whose evidence was already in
+the `docs/measurements-*` documents above. Nothing was lost: each one reads with
+`git show 07dd86b:docs/phase5-notes.md` and so on, and `OPEN-ITEMS.md` lists all
+twelve. Documents that cite them by name were left as written, because a
+sentence that was true about the tree it was written against stays true.
 
 ## Build
 

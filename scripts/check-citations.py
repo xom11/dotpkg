@@ -16,9 +16,10 @@ It does NOT decide whether a citation still points at what its sentence claims.
 That was measured before it was rejected: anchoring every citation to the content
 it pointed at in the commit that wrote it fires on **221 of 421** citations
 repo-wide, and almost all of those are legitimate -- `docs/plans/` and
-`docs/specs/` cite code that did not exist when the plan was written, and
-`docs/phase3-notes.md` is a closed record whose citations were true about Phase
-3's tree. A gate needing a 221-entry allowlist is a gate that gets switched off.
+`docs/specs/` cite code that did not exist when the plan was written, and every
+`docs/measurements-*` document is a closed record whose citations were true
+about the tree it was taken on. A gate needing a 221-entry allowlist is a gate
+that gets switched off.
 
 The class is closed at the source instead, in the one place it can be: `src/`
 and `tests/` may no longer contain a line citation at all (`tests/citations.rs`

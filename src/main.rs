@@ -315,8 +315,9 @@ fn unrouted_warning(ready: usize, routed: usize) -> Option<String> {
 ///
 /// Called before the plan is built, for the same reason `status`'s scoop
 /// warning always was, and now doubled for a second backend:
-/// `docs/phase3-notes.md` records `adopt` discarding `scan.warnings` and
-/// calling a package dotpkg simply could not read "not installed" -- every
+/// the Phase 3 notes record `adopt` discarding `scan.warnings` and
+/// calling a package dotpkg simply could not read "not installed"
+/// (`git show 07dd86b:docs/phase3-notes.md`) -- every
 /// command that scans must print what it could not read, or that mistake
 /// happens again, once per backend.
 fn print_scan_warnings_and_merge(
@@ -784,23 +785,17 @@ fn main() -> Result<()> {
             // `d.scoop` for the scoop half of this call. Every test uses
             // `FakeWingetMutator` instead.
             let wm = RealWingetMutator;
-            let mut ex = match dotpkg::execute::execute(
-                d.scoop.root(),
-                steps,
-                &d.scoop,
-                &wm,
-                &mut d.state,
-                &sample,
-                &opts,
-            ) {
-                Ok(ex) => ex,
-                // `execute` returning `Err` means the root is not a scoop
-                // install and NOTHING was attempted -- not one package.
-                Err(why) => {
-                    eprintln!("{why}");
-                    std::process::exit(2);
-                }
-            };
+            let backends = dotpkg::execute::Backends::new(d.scoop.root(), &d.scoop, &wm);
+            let mut ex =
+                match dotpkg::execute::execute(&backends, steps, &mut d.state, &sample, &opts) {
+                    Ok(ex) => ex,
+                    // `execute` returning `Err` means the root is not a scoop
+                    // install and NOTHING was attempted -- not one package.
+                    Err(why) => {
+                        eprintln!("{why}");
+                        std::process::exit(2);
+                    }
+                };
 
             // The `eprintln!` above satisfies "printed as held" at the time
             // it happens, but the closing table is what a user actually

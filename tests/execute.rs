@@ -157,9 +157,7 @@ fn an_install_scoop_silently_did_not_perform_is_reported_and_not_claimed() {
     let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
@@ -202,9 +200,7 @@ fn a_successful_install_is_claimed_exactly_once() {
     let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
@@ -235,9 +231,7 @@ fn a_half_install_earns_no_retry() {
     let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
@@ -261,9 +255,7 @@ fn a_replace_whose_uninstall_did_nothing_never_reaches_the_install() {
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
@@ -303,9 +295,7 @@ fn a_successful_replace_of_an_adopted_package_keeps_it_adopted() {
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
@@ -332,9 +322,7 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
 
     let liar = Fake::silent_uninstall(&t);
     let out = run_step(
-        t.root(),
-        &liar,
-        &wm,
+        &Backends::new(t.root(), &liar, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Remove {
             app: Name::new("aichat"),
@@ -349,9 +337,7 @@ fn a_prune_releases_ownership_only_after_the_disk_agrees() {
 
     let honest = Fake::honest(&t);
     let out = run_step(
-        t.root(),
-        &honest,
-        &wm,
+        &Backends::new(t.root(), &honest, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Remove {
             app: Name::new("aichat"),
@@ -457,7 +443,7 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![
             Step::Scoop(ScoopStep::Install {
                 app: Name::new("fzf"),
@@ -470,8 +456,6 @@ fn one_packages_failure_does_not_stop_its_neighbours() {
                 arch: None,
             }),
         ],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -543,7 +527,7 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![
             Step::Scoop(ScoopStep::Install {
                 app: Name::new("alpha-broken"),
@@ -556,8 +540,6 @@ fn a_failure_does_not_stop_a_neighbour_that_sorts_after_it() {
                 arch: None,
             }),
         ],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -610,7 +592,7 @@ fn a_package_that_started_running_between_the_plan_and_the_mutation_is_skipped()
     };
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![
             Step::Scoop(ScoopStep::Install {
                 app: Name::new("aichat"),
@@ -621,8 +603,6 @@ fn a_package_that_started_running_between_the_plan_and_the_mutation_is_skipped()
                 app: Name::new("nvim-ish"),
             }),
         ],
-        &fake,
-        &wm,
         &mut state,
         &running,
         &ExecOptions::default(),
@@ -840,14 +820,12 @@ fn a_replace_whose_uninstall_really_succeeds_and_whose_install_lies_leaves_the_p
     state.set(SCOOP, &Name::new("fzf"), Ownership::Adopted);
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Replace {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -947,14 +925,12 @@ fn a_fresh_install_that_leaves_half_install_residue_is_touched() {
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1033,14 +1009,12 @@ fn a_fresh_install_of_a_different_manifest_than_staged_is_touched_and_not_owned(
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1084,9 +1058,7 @@ fn a_remove_whose_post_uninstall_verdict_is_unreadable_is_touched() {
     state.set(SCOOP, &Name::new("fzf"), Ownership::Installed);
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Remove {
             app: Name::new("fzf"),
@@ -1166,9 +1138,7 @@ fn a_retry_that_leaves_half_install_residue_is_touched() {
     let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
@@ -1245,9 +1215,7 @@ fn the_resolved_architecture_reaches_mutator_install() {
     let wm = FakeWingetMutator::unreachable();
 
     let out = run_step(
-        t.root(),
-        &fake,
-        &wm,
+        &Backends::new(t.root(), &fake, &wm),
         &mut state,
         &Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
@@ -1351,14 +1319,12 @@ fn the_recovery_file_exists_on_disk_before_executes_first_mutation() {
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions {
@@ -1389,14 +1355,12 @@ fn execute_refuses_a_root_that_does_not_look_like_scoop_before_calling_the_mutat
     // "the mutator was never called" nor "nothing was claimed" was ever
     // checked -- which is precisely what this test is for.
     let r = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1434,14 +1398,12 @@ fn a_recovery_file_that_cannot_be_written_is_recorded_but_does_not_stop_the_run(
     let wm = FakeWingetMutator::unreachable();
 
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         vec![Step::Scoop(ScoopStep::Install {
             app: Name::new("fzf"),
             staged,
             arch: None,
         })],
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions {
@@ -1643,10 +1605,8 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
         )
     };
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         steps,
-        &fake,
-        &wm,
         &mut state,
         &sample,
         &ExecOptions::default(),
@@ -1702,10 +1662,8 @@ fn the_re_sampler_holds_a_winget_step_caught_only_by_its_package_directory() {
         )
     };
     let ex = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         steps,
-        &fake,
-        &wm,
         &mut state,
         &sample,
         &ExecOptions::default(),
@@ -1748,10 +1706,8 @@ fn a_winget_only_run_does_not_need_a_scoop_root() {
     })];
 
     let r = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         steps,
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),
@@ -1780,10 +1736,8 @@ fn a_run_with_even_one_scoop_step_still_needs_a_scoop_root() {
     ];
 
     let r = execute(
-        t.root(),
+        &Backends::new(t.root(), &fake, &wm),
         steps,
-        &fake,
-        &wm,
         &mut state,
         &|| Running::default(),
         &ExecOptions::default(),

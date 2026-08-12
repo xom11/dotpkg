@@ -590,6 +590,51 @@ error-scan matched the substring `cannot` inside the test name
 `error:` line. The verdict does not depend on it -- 24 printed test names is the
 verdict.
 
+### 13b. The fix: a manifest, not a rename
+
+Installer detection applies only to executables that do **not** declare an
+execution level, so declaring one suppresses it. `build.rs` writes an
+`asInvoker` manifest and passes `/MANIFEST:EMBED /MANIFESTINPUT:` through
+`cargo::rustc-link-arg-tests`, which applies to **test targets only**.
+
+**Why not rename `tests/update.rs`:** renaming closes one instance and a future
+`tests/setup.rs` reopens it -- the probe's third name is exactly what shows
+that. It would also falsify about ten references to `tests/update.rs` in
+`docs/`, which are true about the trees they were written against, in a phase
+that spent itself making the record resolvable.
+
+**Verified by content, on a14, because a linker flag that was accepted is not a
+manifest that is present.** An embedded manifest puts the literal string
+`asInvoker` into the binary's resources, so the bytes were read:
+
+| binary | `asInvoker` embedded |
+|---|---|
+| all **12** integration test binaries, rebuilt (`update-*`, `cli-*`, `prepare-*`, …) | **yes** |
+| `dotpkg.exe`, the shipped binary | **no** |
+| `dotpkg-<hash>.exe`, the library's unit-test binary | **no** |
+
+The last two rows are the control: `rustc-link-arg-tests` is scoped to test
+targets, and what ships is untouched. The `update-*` binary also has a **new
+hash** (`update-8835a028…` against the old `update-ee36f1b0…`), because adding a
+build script changes the metadata -- so this is a genuinely new artefact and not
+a stale one being re-read.
+
+**Suite on that tree:** exit 0, **644 passed / 0 failed / 2 ignored**, 15
+`test result:` lines, names **646 / 646 / 644** with the same four `cfg`
+exclusions.
+
+**What is still not measured:** whether the suite now runs from an ordinary
+Windows session. That needs one non-elevated run, and until it happens the fix
+is structurally verified and behaviourally unverified -- which is the same
+distinction still-open items 20 and 21 were written to keep honest, so it is
+named here rather than assumed away.
+
+**A packaging defect this turned up, worth one line:** the shipping tarball's
+file list was `Cargo.toml Cargo.lock src tests`, so `build.rs` was **not
+shipped** -- and a missing build script is not an error, it just silently builds
+without the fix. The manifest count caught it: 73 files when a file had just
+been added. The list now names `build.rs`.
+
 **Why all of this is in the record rather than tidied away.** The first
 explanation was plausible, fitted the evidence, named a real Windows behaviour,
 and went into two documents and two commit messages before it was tested. The

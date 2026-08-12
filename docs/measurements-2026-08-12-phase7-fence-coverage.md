@@ -6,12 +6,11 @@ from `main` at **`7da8502`** and landing on the commit that carries this file.
 **Which tree each figure describes, stated up front because the previous round
 ended by having to add exactly this.** The machine-state probes (§1-§4) predate
 any code change and describe a14 as it was on `7da8502`. The live fence figures
-in §6 were first taken on `d0685c0`, corrected on `4054cda`, and **re-taken on
-`b445482`** so that no figure is inherited from a tree that is not the shipped
-one. The mutation run is `b445482`. §8b's two findings and the Windows suite
-figures in §9 are `f5caee9`, the tree this branch ends on; the three commits
-between `b445482` and it add tests and documentation and change no production
-behaviour, which is why the §6 figures were not taken a fourth time.
+in §6 were first taken on `d0685c0`, corrected on `4054cda`, re-taken on
+`b445482`, and **taken once more on `82b7bc0`** -- the tree this branch ends on
+and the one every figure in §8c and §9 describes. They did not move: 27 and 25
+both times, which is the answer the review fixes predicted, since quoting a key
+in a message changes the text and not which packages the fence cannot see.
 
 **Every probe on a14 is read-only**, or confined to this round's own `ph7-`
 prefix: `winget export`, `winget show`, `winget list`, `Get-Process`,
@@ -359,7 +358,19 @@ that, so both give the same verdict. And one fixture per arm rather than one per
 predicate, which is what let the second guard hide behind the first.
 
 **Second run, same scope, same tree: 23 mutants, 21 caught, 2 unviable, 0
-missed, 0 TIMEOUT**, exit 0. The gate holds nothing on this branch's code.
+missed, 0 TIMEOUT**, exit 0.
+
+**And a third run, which had to move machines and is the one that counts.**
+After §8c's fixes the macOS gate refused this machine twelve consecutive times
+-- `mediaanalysisd` sat at ~197 % of one core, which is not this session's work
+to wait out -- so the run went to a14, where the gate passed at **4.34 %**,
+inside the 2.85-5.14 % baseline the record measures for that machine. There:
+**23 mutants, 23 caught, 0 missed, 0 unviable, 0 TIMEOUT**, exit 0.
+
+**The unviable count going 5 to 0 is the measured confirmation of §8c.3**, not
+a coincidence of platform: the run before the import fix reported 18 caught and
+5 unviable, and the run after reports 23 caught. Five mutants that had been
+silently exempt are now tested, and all five die.
 
 ## 8b. Two findings from looking at Phase 6 rather than at this phase
 
@@ -475,13 +486,112 @@ empirical result about three particular runs. Two of the three gaps are
 because an audit that only ever reports problems tells a reader nothing about
 what was looked at.
 
+### 8b.5 A rule stated in a file, broken in the same file, gated by nothing
+
+Three of the four PowerShell scripts open with the same sentence:
+
+> *no backtick appears anywhere in this file, including in comments. A backtick
+> inside a comment is not a parse error, so a parse-check passes a file a
+> backtick-check would fail; **both gates exist and both must run**.*
+
+**Both gates did not exist.** The parse-check did. Nothing anywhere in the
+repository ever looked for a backtick -- not the suite, not CI, not a script.
+
+**And the sentence was false about the file that states it most fully.**
+`scripts/idle-gate.ps1` carried a backtick in a comment, which is precisely the
+case its own header describes, and it survived the round that wrote that header
+and the whole-branch review after it.
+
+Found by accident, which is worth recording rather than dressing up: this round
+copies that script to a14 under its own prefix, and the round's ad-hoc
+parse-and-backtick checker globbed it along with its own files.
+
+**Closed with a real gate**, CI-side rather than in the suite, for the reason
+`scripts/check-citations.py` gives about `docs/`: the Windows shipping tarball
+carries `Cargo.toml`, `Cargo.lock`, `build.rs`, `src/` and `tests/` and **not**
+`scripts/`, so a suite test reading `scripts/` would either fail on every
+Windows run or tolerate the directory being absent -- and tolerating that is how
+a gate starts scanning nothing. Confirmed able to fail three ways: red on the
+real pre-existing violation before it was fixed, red again on a backtick
+injected into a different script, and it refuses a run that finds zero files.
+
+## 8c. What the post-merge review found in this branch, and what was done
+
+The cloud review of the Phase 7 branch returned two findings. Both are real;
+one had been found independently by this branch's own whole-branch review
+minutes earlier, which is corroboration rather than duplication.
+
+### 8c.1 The advice the warning printed did not parse
+
+**Severity as reported: nit. Consequence: the feature's entire output was
+unusable.** The warning said `add Google.Chrome = ["chrome"] under
+[winget.guard]`. Every real winget id contains a dot, and an unquoted dotted key
+in TOML is a *table path*, so dotpkg's own parser rejects it with `invalid type:
+map, expected a sequence`. The diagnosis was right and the paste failed on
+essentially every id the warning could ever name.
+
+**Why the three existing tests did not catch it:** all three asserted
+*substrings* of the message. A substring assertion cannot tell valid TOML from
+invalid TOML. The fix is pinned by a test that lifts the suggested line out of
+the sentence and feeds it to `config::parse`, then asserts the guard entry lands
+under the package the warning named -- the round trip is the check, not the
+spelling.
+
+**Confirmed on the machine rather than only in the suite.** Re-run on a14
+against the same 41-id config, all **27** emitted suggestions carry a quoted
+key and **0** carry a bare one. One of them, verbatim, and it happens to be the
+case that justifies the whole feature:
+
+> `pkg.toml [winget.guard] AutoHotkey.AutoHotkey: winget created no package
+> directory for this id, so dotpkg cannot recognise its processes by path, and
+> the only names it will match are guesses ("autohotkey"). If it runs under any
+> other name, add "AutoHotkey.AutoHotkey" = ["<process name>"] under
+> [winget.guard] -- otherwise dotpkg may upgrade it while it is running`
+
+The guess it names is `autohotkey`. The record measured the real process as
+**`autohotkey64`**. So on this package the warning is not hypothetical: the
+fence is dark, the guess is wrong, and the sentence is the only thing that says
+so.
+
+### 8c.2 The root read was O(actions), and acting on it uncovered something worse
+
+The directory scan ran once per pending change -- up to 60 `read_dir` calls on
+the measured plan where 2 suffice. Hoisted, with the matching rule left in the
+one shared function so the hoist could not put a second copy of it at the call
+site, and the directory test confirmed to still bite through the new path.
+
+**The review's reasoning for this one contains a factual slip**, recorded
+because accepting a finding's conclusion is not the same as accepting its
+argument: it says `has_package_dir` has an *"other caller `running_ids`"*.
+It does not. `running_ids` shares only `segment_names_id`; `has_package_dir` had
+exactly one caller. The observation stands; the justification for the shape it
+proposed did not.
+
+### 8c.3 And the mutation run's "0 missed" was partly an artifact
+
+Acting on 8c.2 added a function, so the mutation run was repeated -- and reading
+its **breakdown** rather than its summary line showed the three mutants for the
+new function coming back **UNVIABLE, not caught**. cargo-mutants writes
+`BTreeSet::new()` unqualified; the file spelled the type as
+`std::collections::BTreeSet` with no import, so the replacements did not
+compile.
+
+**An unviable mutant is evidence about the build, not about the tests.** A
+function written that way is silently exempt from mutation testing while the
+summary still reports `0 missed`.
+
+**And `running_ids` had the same signature shape**, so the same exemption
+applied to the function the entire winget path signal rests on -- the one three
+phases of documents describe as measured. One import, and both now use the short
+name, so the generated replacements build and the runner can do its job.
+
 ## 9. Verification
 
 **The tree is `b445482`**, and every figure here was derived on it unless
 attributed otherwise above.
 
-- **macOS**: `cargo test --all` **657 passed / 0 failed**, **15** `test result:`
-  lines, `--list` agrees at **657**. `cargo fmt --check` clean,
+- **macOS**: `cargo test --all` **658 passed / 0 failed**, **15** `test result:`
+  lines, `--list` agrees at **658**. `cargo fmt --check` clean,
   `cargo clippy --all-targets -D warnings` clean.
 - **The `cfg` difference set is now five, not four**, and this is called out
   because "exactly four" is quoted in several documents and has been stable for
@@ -491,7 +601,7 @@ attributed otherwise above.
 - **The `docs/` gate passes**: 35 files scanned, every citation resolving. The
   total is deliberately not quoted here, for §4's reason in the previous round's
   document -- this file adds citations of its own.
-- **Windows**, on `f5caee9`, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
+- **Windows**, on `82b7bc0`, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
   `SHIPPING-MANIFEST.txt` naming a sha256 for all **74** files:
   `manifest entries : 74     verified equal : 74`,
   `mismatched : 0    missing : 0    unlisted on disk : 0`.
@@ -500,15 +610,15 @@ attributed otherwise above.
   file was added -- `git ls-tree` counts **73** shipped files at `8f087524` and
   73 today, and `git diff --diff-filter=A` between them is empty. This round's
   manifest also hashes `SHIPPING-SHA.txt`; the previous one did not.
-- **Windows suite** on the tree this branch ends on: `cargo test --no-fail-fast`
-  **exit 0, 656 passed / 0 failed / 2 ignored**, **15** `test result:` lines,
-  `--list` **658**.
+- **Windows suite** on `82b7bc0`: `cargo test --no-fail-fast`
+  **exit 0, 657 passed / 0 failed / 2 ignored**, **15** `test result:` lines,
+  `--list` **659**.
 - **The rebuild was proved by content, not by its own report.** `--list` on the
   machine returns a test name that exists only in this tree
   (`a_winget_change_dotpkg_cannot_see_by_path_and_has_no_guard_entry_for_is_reported`),
   which a skipped rebuild could not print.
-- **Name by name, from `--list`, never by subtracting totals**: macOS **657**,
-  Windows **658**, common **655**, difference set **5**. The two `#[cfg(unix)]`
+- **Name by name, from `--list`, never by subtracting totals**: macOS **658**,
+  Windows **659**, common **656**, difference set **5**. The two `#[cfg(unix)]`
   tests absent on Windows, and three absent on macOS: the two
   `#[cfg(windows)] #[ignore]` elevation tests and §8b.2's manifest gate, which
   is not `#[ignore]`d.

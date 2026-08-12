@@ -13,6 +13,7 @@ behind 0.1.0, stated before the feature list rather than after it.
 | real Windows machines it has been run on | **one** |
 | that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
 | Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
+| what the **published binary** has done on real hardware | installed one package and pruned it again, both verified on disk — **not** a version change, and no winget mutation |
 | automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request |
 | suite size | **658** tests on macOS, **659** on Windows, compared name by name |
 
@@ -405,6 +406,10 @@ fails, say) is reported as what really changed on disk versus what did not
 - [Phase 5 measurements](docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md)
   — the running-process fence, the `Unmanaged` flood, and whether winget has a
   transient failure at all.
+- [Release-binary `apply` measurements](docs/measurements-2026-08-12-phase8-release-apply.md)
+  — the first time the artifact a user downloads installed and removed a real
+  package, the counterweight that proves the prune guard was in the way, and the
+  three things the round found that nobody was looking for.
 
 **The six dogfood records and six phase notes are no longer in the tree.** They
 were removed on 2026-08-12, about 8,700 lines of narrative whose live content is

@@ -158,11 +158,27 @@ This is the section the README's "Verified on" table is the summary of.
 - **22. No x86_64 Windows machine has ever run dotpkg.** The published x64 binary
   has never been started on real hardware; a *different* build of it answered
   `--version` on a CI runner, and that is the whole of it.
-- **23. `apply` has never been exercised from a release binary.** Only `status`.
-  Every mutating path's evidence comes from the phase rounds and their own trees,
-  not from the artifact a user downloads.
-- **One machine, one architecture, one winget version, one scoop layout.**
-  `zenbook-a14`, aarch64, winget v1.29.280.
+- ~~**23. `apply` has never been exercised from a release binary.**~~ —
+  **closed 2026-08-12** (`docs/measurements-2026-08-12-phase8-release-apply.md`).
+  The published artifact, sha256 `9daeae0c…` and no rebuild of it, installed and
+  then pruned a real package on a14 and verified both on disk: `jq` absent
+  before, present at the pinned 1.8.2 after, `jq --version` answering
+  `jq-1.8.2`, ownership written and then released to `{ "scoop": {} }`, and the
+  other 31 packages untouched. The mass-prune guard was proved to be in the way
+  by a counterweight run first — same command with the flags withheld refused at
+  exit 2 and left the package installed.
+
+  **What that does not buy, and the difference matters:** only `Install` and
+  `Remove` were exercised. **A scoop `Replace` — the uninstall-then-install
+  window, the most dangerous path this tool has — still has no evidence from a
+  release binary**, and neither does any winget mutation. Both are now numbered
+  as item 29 rather than folded into a closed item.
+- **29. The version-change path has never run from a release binary**, on either
+  backend. New 2026-08-12, split out of 23 so that closing 23 does not read as
+  covering it.
+- **One machine, one architecture, one winget version, one scoop layout, and one
+  elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
+  observed `apply` from an ordinary non-elevated session.
 
 ## E. Structural debt found by the 2026-08-12 design review
 
@@ -205,6 +221,34 @@ This is the section the README's "Verified on" table is the summary of.
   *"through the existing scoop bucket"*. The release is GitHub binaries plus
   `SHA256SUMS`; there is no scoop manifest, so the tool is not distributed by the
   mechanism it advocates.
+
+## F. Found on real hardware 2026-08-12, not looked for
+
+All three from `docs/measurements-2026-08-12-phase8-release-apply.md` §7.
+
+- **27. `update` and `apply` leave `.bak` files beside what they rewrite, and
+  nothing says so.** Measured: after one round, `pkg.lock.bak` held the previous
+  lock and `state.json.bak` the previous state. Keeping the prior content is the
+  durable-save path working as intended; **leaving the files** is undocumented
+  and uncleaned, so a user running these commands in their dotfiles repository
+  accumulates them next to files they do commit. Decide whether they are a
+  feature (then document and name them) or debris (then remove them), rather
+  than leaving the answer to whoever notices first.
+- **28. Three installed scoop packages cannot be read at all on a14** —
+  `actionlint`, `antigravity`, `zellij`, each `cannot read manifest.json: The
+  path cannot be traversed because it contains an untrusted mount point. (os
+  error 448)`. dotpkg behaves correctly and visibly: it names the package it
+  could not read rather than counting it absent. What is open is that **nothing
+  in `docs/` records os error 448 before this round**, the condition is silent to
+  scoop itself, and its cause is unmeasured. It is also the whole explanation of
+  a number that would otherwise look wrong: 31 app directories, 24 reported
+  unmanaged (31 − 3 unreadable − `scoop` − 3 helpers).
+- **A reading correction worth keeping, since it was nearly carried into a
+  conclusion.** `& winget --version` fails with `Access is denied` from the ssh
+  session, because the alias is a 0-byte execution stub — but dotpkg's own scan
+  read **36** source-backed ids in that same session. The limitation is
+  PowerShell's `&`, **not** winget being unavailable, and the first probe of the
+  round read it the other way round.
 
 ## Closed, with what closed it
 

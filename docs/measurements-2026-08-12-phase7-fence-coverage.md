@@ -645,12 +645,16 @@ attributed otherwise above.
 
 ## 10. Method failures of my own, this round
 
-1. **I wrote "no backtick appears anywhere in this file" into two PowerShell
-   scripts and then put a backtick in each.** Once in a `.Append()` call, once
-   inside a comment -- the exact shape the record warns about, in the exact
-   round that quotes the warning. Both were caught by the separate
-   backtick-check, which is why it exists as a second check beside the parse
-   check.
+1. **I wrote "no backtick appears anywhere in this file" into PowerShell
+   scripts and then put a backtick in them.** Twice during this round -- once
+   in a `.Append()` call, once inside a comment -- and **a third time while
+   verifying the release**, which is corrected here rather than left standing:
+   see `docs/measurements-2026-08-12-release-0.1.0.md` §5. Every one was in the
+   exact round that quotes the warning about it. All three were caught by the
+   separate backtick-check, which is why it exists as a second check beside the
+   parse check -- and all three were in scratchpad scripts, which no gate
+   reaches, so what stopped them from mattering was a habit rather than a
+   gate.
 2. **`grep -c` exits 1 when the count is zero**, so `grep -c … && scp …` silently
    skipped the upload and the script never reached the machine. Found because
    the remote checker listed one file fewer than expected -- output, not exit

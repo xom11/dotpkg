@@ -381,9 +381,30 @@ fn blobs_errors_rather_than_silently_calling_every_commit_missing() {
         "bucket/tool.json",
     )
     .unwrap_err();
+    // Either message is a pass, and pinning one of them made this test
+    // INTERMITTENT -- measured, not supposed: it failed once on
+    // `ubuntu-latest` with `cannot feed git cat-file in …: Broken pipe (os
+    // error 32)` while passing on the commit before and the commit after,
+    // with only documentation between them.
+    //
+    // `blobs` can report this failure by two routes and which one wins is a
+    // race. `git cat-file --batch` in a directory that is not a repository
+    // exits immediately, so either the writer thread finishes feeding stdin
+    // first and the exit-status check reports `git cat-file failed`, or git
+    // is already gone and the write gets EPIPE, reported as `cannot feed`.
+    // On a loaded CI runner the child wins more often.
+    //
+    // What this test is FOR is the line above: `unwrap_err()`. The defect it
+    // guards against is `blobs` returning `Ok(vec![None; n])` -- "every commit
+    // is missing" -- for a git failure it never looked at. Both messages are
+    // that failure being reported. Asserting one of them was asserting
+    // something narrower than the test means, which is how a test starts
+    // failing for a reason unrelated to what it claims.
+    let text = format!("{err:#}");
     assert!(
-        format!("{err:#}").contains("git cat-file failed"),
-        "the failure must be reported, not swallowed as every commit missing: {err:#}"
+        text.contains("cat-file") && text.contains("not-a-repo"),
+        "the failure must be reported, and must name what failed and where, \
+         not be swallowed as every commit missing: {text}"
     );
 }
 

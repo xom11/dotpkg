@@ -483,6 +483,31 @@ machine this project verifies on could never reproduce what CI was reporting.
 can paste into `git -C`. The expectation was, and it now asks the object under
 test which root it resolved, through the public `Scoop::root()`.
 
+**And it paid for itself twice more, once it was being watched.** A later push
+went red on `ubuntu-latest` only, on a commit that changed nothing but
+documentation and scripts:
+`blobs_errors_rather_than_silently_calling_every_commit_missing` failed with
+`cannot feed git cat-file in …: Broken pipe (os error 32)`, having passed on the
+commit before and the commit after.
+
+**It is an over-specified assertion, not a flake to be re-run away.** `blobs`
+reports a git failure by two routes, and which one wins is a race: `git cat-file
+--batch` in a directory that is not a repository exits immediately, so either
+the writer thread finishes feeding stdin and the exit-status check reports
+`git cat-file failed`, or git is already gone and the write gets EPIPE, reported
+as `cannot feed`. **Both are the failure being reported**, which is the whole
+claim the test makes -- the defect it guards is `blobs` returning
+`Ok(vec![None; n])`, "every commit is missing", for a git failure it never looked
+at, and `unwrap_err()` is what catches that. Pinning one of the two messages
+asserted something narrower than the test means, and that is precisely how a
+test starts **failing for a reason unrelated to what it claims** -- this
+project's defect class 2, back side.
+
+The assertion now accepts either route and still requires the message to name
+`cat-file` and the directory. **Confirmed still able to fail**: with both
+production error paths neutered -- the `ensure!` made vacuous and the writer's
+context dropped -- the test goes red, and green again when they are restored.
+
 **Observed green afterwards, rather than assumed:** all three jobs succeeded,
 and the `docs/` citation gate ran on **all three runners** with identical counts
 (35 files, 436 citations), which also settles the open question of whether

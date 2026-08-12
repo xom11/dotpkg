@@ -166,15 +166,36 @@ This is the section the README's "Verified on" table is the summary of.
 
 ## E. Structural debt found by the 2026-08-12 design review
 
-- **24. `trait Backend` does not cover the write path.** The design of
-  2026-08-08 specified `scan / resolve / install / uninstall / helpers` in one
-  trait, and stated the consequence it was buying: *"the backend trait exists
-  from v1 so choco slots in without touching the planner."* The shipped trait is
-  read-only (`name / scan / resolve_latest / resolve_installed`); `install` and
-  `uninstall` live in `execute.rs` and `winget_exec.rs` behind per-backend seams.
-  So the promise holds for the read half and not the write half, and a third
-  backend has more surface to implement than the design's four methods. This is
-  item 13's "half true" made specific.
+- ~~**24. `trait Backend` does not cover the write path.**~~ — **the accidental
+  half is closed 2026-08-12; the deliberate half is not, and the distinction is
+  the finding.** The design specified `scan / resolve / install / uninstall /
+  helpers` in one trait, to buy *"the backend trait exists from v1 so choco
+  slots in without touching the planner."* The shipped `Backend` is read-only,
+  and the write path was **two unrelated per-backend seams** (`execute::Mutator`
+  for scoop, `winget_exec::WingetMutator` for winget) threaded through `execute`
+  and `run_step` as a hand-written pair of parameters — so a third backend meant
+  a third parameter at 27 call sites rather than a third implementation of
+  anything.
+
+  **What closed:** `execute::Mutates` now names the write contract at the *step*
+  level, with `Step` as an associated type so one backend's executor cannot be
+  handed another's step. `ScoopSide` and `WingetSide` implement it, and
+  `execute::Backends` carries them in one value, so a backend is now a field
+  rather than a parameter everywhere. Behaviour is unchanged, measured name by
+  name: 658 tests before and after, **identical name sets, 0 lost, 0 added**,
+  and the new indirection was confirmed live by a negative control (routing the
+  scoop side at a bogus root turns the suite red).
+
+  **What is deliberately still open, and must not be counted as debt:** a third
+  backend still owns a `Step` variant, an arm in `run_step`'s wildcard-free
+  match, its own process seam, and a `plan::Capability` decision. Those are
+  decision points a new backend should be *made* to face — a compile error is
+  the only reliable way to ask the question — and merging the two process seams
+  into one argv-shaped trait would flatten a real difference (scoop installs a
+  staged manifest path with an architecture; winget sets a version by id) or lie
+  about it. The design's promise is now true for reading, true for the plumbing
+  of writing, and honestly false for the four decisions, which is as close to
+  true as it should get.
 - **25. The design's third test layer has never existed.** It specified *"Real
   scoop in a throwaway `$env:SCOOP` on a Windows runner, gated"*. `tests/cli.rs`
   is hermetic — `SCOOP` and `LOCALAPPDATA` point at temporary directories and

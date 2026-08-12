@@ -2326,10 +2326,12 @@ fn an_elevated_run_refuses_a_user_scope_winget_removal_before_anything_happens()
         Ok(()) => {
             let wm = FakeWingetMutator::unreachable();
             let _ = dotpkg::execute::execute(
-                Path::new("/dotpkg-test/no-scoop-root"),
+                &dotpkg::execute::Backends::new(
+                    Path::new("/dotpkg-test/no-scoop-root"),
+                    &NoScoopMutator,
+                    &wm,
+                ),
                 steps,
-                &NoScoopMutator,
-                &wm,
                 &mut State::default(),
                 &Running::default,
                 &ExecOptions::default(),

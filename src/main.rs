@@ -785,23 +785,17 @@ fn main() -> Result<()> {
             // `d.scoop` for the scoop half of this call. Every test uses
             // `FakeWingetMutator` instead.
             let wm = RealWingetMutator;
-            let mut ex = match dotpkg::execute::execute(
-                d.scoop.root(),
-                steps,
-                &d.scoop,
-                &wm,
-                &mut d.state,
-                &sample,
-                &opts,
-            ) {
-                Ok(ex) => ex,
-                // `execute` returning `Err` means the root is not a scoop
-                // install and NOTHING was attempted -- not one package.
-                Err(why) => {
-                    eprintln!("{why}");
-                    std::process::exit(2);
-                }
-            };
+            let backends = dotpkg::execute::Backends::new(d.scoop.root(), &d.scoop, &wm);
+            let mut ex =
+                match dotpkg::execute::execute(&backends, steps, &mut d.state, &sample, &opts) {
+                    Ok(ex) => ex,
+                    // `execute` returning `Err` means the root is not a scoop
+                    // install and NOTHING was attempted -- not one package.
+                    Err(why) => {
+                        eprintln!("{why}");
+                        std::process::exit(2);
+                    }
+                };
 
             // The `eprintln!` above satisfies "printed as held" at the time
             // it happens, but the closing table is what a user actually

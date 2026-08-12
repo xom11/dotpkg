@@ -425,3 +425,8 @@ Prebuilt Windows binaries for `x86_64-pc-windows-msvc` and
 beside them. The aarch64 binary is cross-compiled by CI on an x64 runner, so
 the runner cannot start it — read the "Verified on" table above for what has
 actually been executed where.
+
+**There is deliberately no flake.** One was added and removed the same day: it
+gave `pkgs.dotpkg` and `nix run` on machines that have neither winget nor scoop,
+which is a package with nothing to manage. What consumes this on a Nix-managed
+fleet is the Windows half of that fleet's config, not a nixpkgs overlay.

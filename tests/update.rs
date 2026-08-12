@@ -929,3 +929,55 @@ fn a_fetch_moves_the_pin_forward() {
         "update must fetch, never pull: the working branch stays where scoop put it"
     );
 }
+
+/// `build.rs`'s manifest is present in the binary this test is running in.
+///
+/// # Why this test is in this file specifically
+///
+/// This file compiles to `update-<hash>.exe`, and that filename is the whole
+/// reason `build.rs` exists: Windows' UAC installer detection inspects an
+/// executable's name for `install`, `setup`, `update` or `patch` and, for a
+/// binary that declares no execution level, refuses to start it from an
+/// ordinary session. So the binary that would fail to launch is the one
+/// asserting it carries the fix.
+///
+/// # Why it is a test rather than a note saying it was checked once
+///
+/// It was checked once -- by hand, on one machine, by reading the bytes of
+/// twelve test binaries -- and **nothing re-checks it**. The automatic Windows
+/// gate cannot: `windows-latest` was green on `e91f4b1`, which is an ancestor
+/// of the commit that added `build.rs`, with this file already compiling to
+/// `update-<hash>.exe`. The runner started that binary happily without any
+/// manifest, so CI has never been able to observe the failure this suppresses,
+/// and a regression in `build.rs` would leave every automatic gate green.
+///
+/// That is this project's fourth defect class one level up: a fix whose only
+/// verification is a person remembering to look. This makes it a gate that
+/// runs everywhere the suite runs, including on the runner that is blind to
+/// the symptom.
+///
+/// # What it checks
+///
+/// An embedded manifest puts the literal UTF-8 bytes `asInvoker` into the
+/// binary's resources, so the check is a byte search of the running
+/// executable, which is exactly what the manual check did.
+#[cfg(windows)]
+#[test]
+fn this_test_binary_carries_the_as_invoker_manifest_build_rs_embeds() {
+    let exe = std::env::current_exe().expect("libtest always knows its own path");
+    let bytes =
+        std::fs::read(&exe).unwrap_or_else(|e| panic!("could not read {}: {e}", exe.display()));
+
+    let needle = b"asInvoker";
+    let found = bytes.windows(needle.len()).any(|w| w == needle);
+
+    assert!(
+        found,
+        "{} carries no embedded asInvoker manifest, so Windows' UAC installer \
+         detection will refuse to start it from an ordinary session -- which is \
+         the failure build.rs exists to suppress, and which no CI runner has \
+         ever been able to reproduce. Check that build.rs still emits \
+         cargo::rustc-link-arg-tests=/MANIFEST:EMBED and /MANIFESTINPUT:.",
+        exe.display()
+    );
+}

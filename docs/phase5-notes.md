@@ -2352,17 +2352,21 @@ session while dying in the elevated one.
 ~~**New, and larger than the item it came out of: the suite cannot be run in
 full from an ordinary Windows shell.** `tests/update.rs` builds
 `update-<hash>.exe`, which UAC installer detection flags as requiring elevation
-by filename alone.~~ -- **the symptom is real and reproducible; the explanation
-is unproven and was briefly and wrongly declared refuted.** `cargo test
---no-fail-fast` from an ordinary session fails on that binary with `os error
-740`, twice now. The filename explanation has **not** been tested: the probe
-that appeared to refute it decided "launched" from `$LASTEXITCODE`, which
-PowerShell leaves stale when it cannot start a native command, and never checked
-that the binary printed anything. Two other candidates are genuinely negative
-because they were registry and file reads rather than launches: no `RUNASADMIN`
-compatibility layer, no zone-identifier stream. **The cause is unknown**, and no
-claim is made about whether the suite can be run unelevated. See
-`docs/measurements-2026-08-12-phase6-citations.md`. **20 is decided rather than measured further -- see below.**
+by filename alone.~~ -- **confirmed, then fixed, and the detour is kept because
+the detour is the lesson.** The explanation above was right and was asserted
+before being tested; a probe that read `$LASTEXITCODE` instead of the output
+then appeared to refute it (PowerShell leaves that variable stale when it cannot
+*start* a native command), and it was withdrawn on that evidence. Re-run with
+every launch verified by output, one binary under three names gives **0** test
+names for `update`, **24** for a neutral name, **0** for a *different* keyword
+(`setup`) -- so the cause is the filename and it is a class.
+**Fixed** by `build.rs` embedding an `asInvoker` manifest into test targets
+only, which suppresses the heuristic outright; renaming would have closed one
+instance and falsified about ten references to `tests/update.rs` in `docs/`.
+**Measured after the fix, from an ordinary desktop session: the suite runs in
+full, all passing, two ignored** -- the first time in this project's history
+that "the suite passes on Windows" has been measured without elevation. See
+`docs/measurements-2026-08-12-phase6-citations.md` §13. **20 is decided rather than measured further -- see below.**
 **11 gains a correction that cuts the other way:** the 1.2-5.4 s success range
 this file records was itself measured on a busy machine and does not reproduce;
 on a machine proven idle before and after, 30 calls give **294-621 ms** in

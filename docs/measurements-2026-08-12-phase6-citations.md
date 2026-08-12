@@ -623,11 +623,18 @@ a stale one being re-read.
 `test result:` lines, names **646 / 646 / 644** with the same four `cfg`
 exclusions.
 
-**What is still not measured:** whether the suite now runs from an ordinary
-Windows session. That needs one non-elevated run, and until it happens the fix
-is structurally verified and behaviourally unverified -- which is the same
-distinction still-open items 20 and 21 were written to keep honest, so it is
-named here rather than assumed away.
+**And then measured, from an ordinary session: the suite runs in full.**
+`cargo test --no-fail-fast` from the non-elevated desktop window completes, with
+**every test passing and exactly two ignored** -- the two `#[ignore]`d elevation
+tests, which is the correct and only possible outcome for them, since they
+contradict each other by design and no single session can run both. The same
+counts as the elevated run.
+
+**So this is the first measurement in this project's history that the suite
+passes on Windows without elevation.** Every Windows run before it -- three
+phases of them -- was from an elevated ssh session, and "the suite passes on
+Windows" carried an unstated condition the whole time. It does not any more, and
+the sentence is now the one that was always meant.
 
 **A packaging defect this turned up, worth one line:** the shipping tarball's
 file list was `Cargo.toml Cargo.lock src tests`, so `build.rs` was **not
@@ -647,7 +654,9 @@ the thing again and looking at what it actually printed.
 
 1. ~~A non-elevated Windows session~~ -- **done, §8.** `elevated -> Some(true)`
    is CAUGHT, and with it items 15 and 19 are closed and the `sys.rs` gate holds
-   nothing. What replaces it is an **open question with a refuted answer**, §13.
+   nothing. ~~What replaces it is an open question with a refuted answer~~ --
+   **that is closed too, §13: cause confirmed, fixed, and the suite measured
+   running unelevated.**
 2. **Item 20's observation** -- unchanged by this round. 70 contended rounds
    remains the bound. §7 above removes one of the arguments that had been read
    as evidence against the retry's delay.

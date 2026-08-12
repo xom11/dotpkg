@@ -2632,3 +2632,56 @@ fn on_a_real_elevated_windows_session_the_pre_check_refuses_a_user_scope_removal
         ),
     }
 }
+
+/// The mirror of the test above, and the only thing that can kill the last
+/// mutant this repository's `sys.rs` gate is still holding.
+///
+/// `cargo mutants` on Windows kills `elevated -> None`, `elevated ->
+/// Some(false)` and the `:163` inversion, and **cannot** kill `elevated ->
+/// Some(true)`: in an elevated session `Some(true)` is the correct answer, so
+/// the mutant is genuinely equivalent there. No elevated run can settle it, no
+/// matter how carefully it is done. What settles it is this test, run from a
+/// session that is **not** elevated -- which is also still-open item 15's
+/// unmeasured half, so the two are one gap seen from two ends.
+///
+/// Three ways of getting a non-elevated session from a remote shell have now
+/// been **measured** not to work on the machine under test, and each was
+/// measured rather than assumed because an earlier phase assumed one of them
+/// and was wrong: `runas /trustlevel:0x20000` leaves `TokenIsElevated` set,
+/// `schtasks /RL LIMITED` does not lower it, and launching through
+/// `Shell.Application`'s `ShellExecute` from an OpenSSH session runs in session
+/// 0 and comes back at High integrity. So this is run by hand:
+///
+/// ```text
+/// # in an ORDINARY PowerShell window on the desktop -- NOT "Run as administrator"
+/// cargo test --test cli -- --ignored on_an_ordinary_windows_session
+/// ```
+///
+/// Like its sibling it fails loudly when run in the wrong place, so it cannot
+/// pass by accident from an elevated shell -- which is the failure mode a line
+/// in a checklist has.
+#[test]
+#[cfg(windows)]
+#[ignore = "needs an ORDINARY, non-elevated Windows session; run by hand from the desktop"]
+fn on_an_ordinary_windows_session_elevated_answers_some_false() {
+    let elevated = dotpkg::sys::elevated();
+    assert_eq!(
+        elevated,
+        Some(false),
+        "run this from an ORDINARY, NON-elevated Windows shell -- `sys::elevated()` said \
+         {elevated:?}. An elevated session cannot produce this observation, and a run from one \
+         proves nothing either way."
+    );
+
+    // The consequence, not just the reading: the elevation pre-check exists to
+    // refuse a user-scope winget removal *while elevated*. From an ordinary
+    // session there is nothing to refuse, and asserting that keeps this test
+    // from being a bare environment probe -- it pins the branch the answer
+    // selects, which is what the mutant changes.
+    let steps = vec![winget_removal("Brave.Brave")];
+    let gate = dotpkg::apply::gate_the_run(&steps, &[], &[], true, true, elevated, &measured_scope);
+    assert!(
+        !matches!(&gate, dotpkg::apply::RunGate::Refuse(why) if why.contains("0x8A15007D")),
+        "a non-elevated session must not produce the elevated-removal refusal, got {gate:?}"
+    );
+}

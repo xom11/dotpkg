@@ -1285,22 +1285,35 @@ impl<C: WingetCmd> Winget<C> {
         // (measurements-2026-08-11-phase5-guard-unmanaged-retry.md §5, "The
         // writer"), so 1 s cleared that success range with margin.
         //
-        // Measured again on the same machine on 2026-08-12
-        // (measurements-2026-08-12-phase5-residuals.md §11): successful calls now
-        // take **1.2-5.4 s**, and the one observed failure took **1245 ms**
-        // against a success of **1266 ms** in the same round. So 1 s is now
-        // INSIDE the range of how long the competitor it waits out takes to
-        // finish, and duration no longer separates a failure from a success at
-        // all -- only the exit code and the empty stdout do.
+        // ~~Measured again on 2026-08-12: successful calls now take 1.2-5.4 s,
+        // so 1 s is INSIDE the range of how long the competitor it waits out
+        // takes to finish.~~ -- **withdrawn 2026-08-12 by re-measurement, and
+        // the withdrawal is the more useful record.** That 1.2-5.4 s was
+        // captured while an unrelated workload was compiling and taking
+        // screenshots on the same 8 cores; the residual document's own §6b says
+        // so, says no timestamp was recorded beside those timings, and says
+        // they had to be taken again on a machine proven quiet.
         //
-        // The delay is left at 1 s deliberately. A retry that fires too early
-        // simply fails a second time and warns, which is the behaviour already
-        // shipped and already tested; lengthening it would make every contended
-        // `dotpkg update` slower to reach the same warning, and no measurement
-        // says which longer value would be enough. What is withdrawn is the
-        // claim that 1 s is comfortably clear of the success range -- it is not,
-        // and still-open item 11's "sufficient on a slower machine" question is
-        // now answered NO for this machine, at today's durations.
+        // Taken again, on a machine an idle gate certified IDLE immediately
+        // before and immediately after each block
+        // (measurements-2026-08-12-phase6-citations.md, and every call carries
+        // its own wall-clock stamp this time): **30 calls, 30 successes.**
+        // - warm, 20 calls: **294-621 ms**, and **0 of 20** over 1 s;
+        // - cold, 10 calls: eight in 308-405 ms, and two over 1 s at 1340 ms
+        //   and 2070 ms, the 2070 being the very first call of the block.
+        //
+        // So the steady-state success range is essentially §5's original
+        // 348-623 ms; it never aged, and the number that said it had was
+        // measuring a busy machine. **1 s does clear the steady-state range
+        // with margin, and does not clear a cold first call.**
+        //
+        // The delay is left at 1 s. A retry that fires too early simply fails a
+        // second time and warns, which is the behaviour already shipped and
+        // already tested, and the only calls it can fire too early for are the
+        // first after a period of inactivity. Still-open item 11's "sufficient
+        // on a slower machine" question is still open -- both measurements are
+        // this one machine -- but on this machine, at today's durations, the
+        // answer is yes for a warm index and no for a cold one.
         self.update_source_with(std::time::Duration::from_secs(1))
     }
 

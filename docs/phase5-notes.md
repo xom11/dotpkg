@@ -2322,6 +2322,54 @@ partly wrong about themselves**, not merely unfinished: 16's stated reason for
 staying open, 18's diagnosis of its own mechanism, and 19's claim about what a
 Windows run could settle.
 
+**Status after the 2026-08-12 citation round**
+(`docs/measurements-2026-08-12-phase6-citations.md`). **19 is closed** -- the one
+assertion tying `package_roots()` to the environment it reads now exists, and
+both survivors die: `vec![Default::default()]` on macOS for the first time, and
+**both** on Windows, measured by a `-j 2` run from a machine an idle gate
+certified quiet first. **15 is unchanged and is now the only thing the `sys.rs`
+gate still holds**, down from six mutants to one; a third route to a
+non-elevated session was measured not to work (launching through
+`Shell.Application` from an OpenSSH session runs in session 0 at High
+integrity), and `tests/cli.rs` now carries the `#[ignore]`d test that a desktop
+window would run. **20 is decided rather than measured further -- see below.**
+**11 gains a correction that cuts the other way:** the 1.2-5.4 s success range
+this file records was itself measured on a busy machine and does not reproduce;
+on a machine proven idle before and after, 30 calls give **294-621 ms** in
+steady state, essentially the 348-623 ms it was said to have aged out of.
+
+**And the citation defect class is closed as a shape rather than fixed again.**
+Six citations in shipped `.rs` files were stale on `3666d38` -- including
+Instance 2's and Instance 3's own citations, drifting a second time after being
+corrected -- and all six passed the only gate there was. `src/` and `tests/` now
+hold zero line citations, `tests/citations.rs` refuses to let one back in, and
+`scripts/check-citations.py` requires every `docs/` citation to name one tracked
+file. A whole-repo content check was **measured** infeasible first: 221 of 421
+citations fire, almost all of them legitimately.
+
+**A decision about this file, since it was asked for.** The strikethrough
+convention **continues**; this file is not consolidated. The 21 in-place
+corrections are the only durable evidence of the four defect classes, and this
+round consumed three of them as input -- compressing them would delete exactly
+the data that makes the next round cheaper. Length is not what costs a reader:
+the prompt for this round pointed at four sections and only those four were
+read. What does cost is that the *live* open-items list is buried at line 2295
+of a record that is otherwise frozen, and the fix for that is a pointer, not a
+rewrite.
+
+**A decision about item 20, since it was asked for: accept that it is not
+observable in practice, and record 70 rounds as a lower bound.** Not "drop the
+retry": §11 measured the trigger still exists (1 of 10 against four
+competitors), so the retry guards a real, measured failure, and its branch is
+pinned by four tests -- its maintenance cost is bounded and already paid.
+Not "find a sharper trigger" either: three configurations have been tried and
+the expected yield of a fourth is low. **And one argument that had been read as
+evidence against the retry is now withdrawn** -- the 1 s delay does clear the
+steady-state success range after all, and only fails to clear a cold first call
+(`docs/measurements-2026-08-12-phase6-citations.md` §7). Item 20 becomes
+*structural + instrumented, live-unobserved at a measured bound of 70 contended
+rounds*.
+
 1. **Downgrading a winget package.** *Decided, not deferred.* Unchanged from
    Phase 4b: measured, `install --version <older>` cannot do it, and the
    alternative would reintroduce a nightly uninstall-and-reinstall loop on every

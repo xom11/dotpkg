@@ -389,30 +389,43 @@ pub(crate) fn segment_names_id(seg: &str, key: &str) -> bool {
             .is_some_and(|tail| tail.starts_with('_'))
 }
 
-/// Does any winget package root hold a directory belonging to this id?
+/// Every directory name under the winget package roots, folded.
 ///
-/// This is the *capability* question, not the *liveness* one: `running_ids`
-/// asks whether a live process runs from such a directory, and this asks
-/// whether such a directory exists for the fence to ever match against. A
-/// package with no directory here is invisible to the path signal no matter
-/// what is running.
+/// This answers the *capability* question, where `running_ids` answers the
+/// *liveness* one: that function asks whether a live process runs from such a
+/// directory, and a caller of this one asks whether such a directory exists for
+/// the fence to ever match against. A package with no directory here is
+/// invisible to the path signal no matter what is running.
 ///
 /// **Measured on a14, 2026-08-12:** a directory exists for exactly the 4
 /// `portable (zip)` ids of the 41 installed, and for none of the other 37 --
-/// no exception in either direction. An unreadable root answers "no", which is
-/// the same answer an absent one gives and the safe direction: it produces a
-/// warning the user can dismiss rather than silence they cannot notice.
-pub(crate) fn has_package_dir(roots: &[std::path::PathBuf], name: &Name) -> bool {
-    let key = name.key();
-    roots.iter().any(|root| {
+/// no exception in either direction. An unreadable root contributes nothing,
+/// which is what an absent one contributes and is the safe direction: it
+/// produces a warning the user can dismiss rather than silence they cannot
+/// notice.
+///
+/// **It returns the set rather than answering per package on purpose.** The
+/// only caller asks about one id per pending change, and reading the roots
+/// inside that loop made the directory scan O(actions) -- up to 60 `read_dir`
+/// calls on the measured plan where 2 suffice, since the roots cannot change
+/// while the plan is being described. The *matching* stays in
+/// `segment_names_id`, so hoisting the I/O does not put a second copy of the
+/// rule at the call site.
+pub(crate) fn package_dir_segments(
+    roots: &[std::path::PathBuf],
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for root in roots {
         let Ok(entries) = std::fs::read_dir(root) else {
-            return false;
+            continue;
         };
-        entries.flatten().any(|e| {
-            e.file_type().is_ok_and(|t| t.is_dir())
-                && segment_names_id(&e.file_name().to_string_lossy().to_ascii_lowercase(), key)
-        })
-    })
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                out.insert(e.file_name().to_string_lossy().to_ascii_lowercase());
+            }
+        }
+    }
+    out
 }
 
 /// Turn `parse_list`'s rows into a `Scan`: one fact per id, or an admission

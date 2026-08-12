@@ -1197,17 +1197,26 @@ pub fn sample_fence_with_roots(
 /// "cannot tell them which entry they are missing".
 ///
 /// **Why it is keyed on a pending change rather than on being installed.** A
-/// line per unguarded installed package would be 37 lines on the measured
-/// machine, which is a flood and not information -- and Phase 5 spent itself
+/// line per unguarded installed package would be **32** lines on the measured
+/// machine -- 4 of the 36 ids dotpkg can establish a fact about own a package
+/// directory, and 32 do not. (Winget itself reports 41; the extra 5 are the
+/// ones dotpkg refuses to read a version for, and it can raise no line about a
+/// package it has no facts about, so 32 rather than 37 is the ceiling that
+/// matters here.) That is a flood and not information -- and Phase 5 spent
+/// itself
 /// deleting lines from `status` for that reason. A package dotpkg is not about
 /// to touch cannot be damaged by a fence that cannot see it, so the moment the
 /// sentence is worth printing is the moment there is a change pending for it.
 /// `Action::Install` is deliberately not one of those moments: nothing is
 /// installed yet, so nothing of it can be running.
 ///
-/// The three shapes that *are* moments each replace or remove a live
-/// installation, and each names itself in the message, because "may upgrade it
-/// while it is running" is actionable in a way that "is unprotected" is not.
+/// The two shapes that *are* moments -- `Upgrade` and `Prune` -- each replace
+/// or remove a live installation, and each names itself in the message, because
+/// "may upgrade it while it is running" is actionable in a way that "is
+/// unprotected" is not. It was three until `Downgrade` was measured to be
+/// refused rather than performed; this sentence said "three" for one commit
+/// after that stopped being true, which is the class this repository keeps
+/// paying for.
 pub fn unprotected_winget_changes(
     plan: &Plan,
     guard: &std::collections::BTreeMap<Name, Vec<String>>,
@@ -1233,6 +1242,13 @@ pub fn unprotected_winget_changes_with_roots(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let mut said = std::collections::BTreeSet::new();
+
+    // Read the roots once. The directories cannot change while a plan is being
+    // described, and asking per action made this O(actions) `read_dir` calls.
+    // The matching rule stays in `backend::winget::segment_names_id`, which
+    // `running_ids` uses too -- hoisting the I/O must not put a second copy of
+    // that comparison here.
+    let dir_segments = crate::backend::winget::package_dir_segments(roots);
 
     for action in &plan.actions {
         // Only the shapes that can actually replace or remove a live
@@ -1263,7 +1279,10 @@ pub fn unprotected_winget_changes_with_roots(
         }
         // The path half can fire for this package, so it is covered by the
         // signal that needs no declaration at all.
-        if crate::backend::winget::has_package_dir(roots, name) {
+        if dir_segments
+            .iter()
+            .any(|seg| crate::backend::winget::segment_names_id(seg, name.key()))
+        {
             continue;
         }
         if !said.insert(name.clone()) {
@@ -1288,8 +1307,9 @@ pub fn unprotected_winget_changes_with_roots(
         out.push(format!(
             "pkg.toml [winget.guard] {name}: winget created no package directory for this id, \
              so dotpkg cannot recognise its processes by path, and the only names it will \
-             match are guesses ({guesses}). If it runs under any other name, add {name} = \
-             [\"<process name>\"] under [winget.guard] -- otherwise dotpkg may {verb} it \
+             match are guesses ({guesses}). If it runs under any other name, add \
+             \"{name}\" = [\"<process name>\"] under [winget.guard] -- otherwise dotpkg \
+             may {verb} it \
              while it is running"
         ));
     }
@@ -3777,6 +3797,59 @@ mod tests {
             w.contains("msvc"),
             "the warning must name the guesses, so the user can judge whether \
              they are right rather than take dotpkg's word for it: {w}"
+        );
+    }
+
+    #[test]
+    fn the_guard_entry_the_warning_suggests_is_valid_toml_that_dotpkg_itself_parses() {
+        // Found by this branch's own review and, independently, by the
+        // post-merge audit. The warning's whole purpose is to hand the user a
+        // line they can paste, and **every real winget id contains a dot**: an
+        // unquoted `Google.Chrome = ["chrome"]` under `[winget.guard]` is a
+        // TOML *table path*, not a key, so `config::parse` fails with
+        // `invalid type: map, expected a sequence`. Correct diagnosis, unusable
+        // advice.
+        //
+        // Asserting a substring cannot catch that, which is why this test
+        // extracts the suggested line and feeds it to the real parser. The
+        // check is the round trip, not the spelling.
+        let empty_root = tempfile::tempdir().unwrap();
+        let id = "Google.Chrome";
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![upgrade_of(id)],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row(id, &["chrome", "google chrome"])],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+
+        // Lift the suggestion out of the sentence the way a reader would.
+        let msg = &out[0];
+        let start = msg
+            .find("add ")
+            .expect("the message offers something to add")
+            + "add ".len();
+        let end = msg[start..]
+            .find(" under [winget.guard]")
+            .expect("the message says where the line goes")
+            + start;
+        let suggested = msg[start..end].replace("<process name>", "chrome");
+
+        let toml = format!("[winget.guard]\n{suggested}\n");
+        let cfg = crate::config::parse(&toml).unwrap_or_else(|e| {
+            panic!(
+                "dotpkg's own parser rejects the line it told the user to \
+                 add.\n  suggested: {suggested}\n  error: {e:#}"
+            )
+        });
+
+        assert_eq!(
+            cfg.winget.guard.get(&Name::new(id)).map(Vec::as_slice),
+            Some(["chrome".to_string()].as_slice()),
+            "the suggested line must land as a guard entry for the package the \
+             warning named, not as a nested table: {toml}"
         );
     }
 

@@ -1235,13 +1235,23 @@ pub fn unprotected_winget_changes_with_roots(
     let mut said = std::collections::BTreeSet::new();
 
     for action in &plan.actions {
-        // Only the shapes that touch an existing installation. Matching on the
-        // variant rather than on a "does it change something" helper is
-        // deliberate: `Action::Install` differs from these three by what is on
-        // disk, not by whether it acts, so a shared predicate would sweep it in.
+        // Only the shapes that can actually replace or remove a live
+        // installation, and the list is shorter than "everything that acts" by
+        // two measured exclusions rather than by taste:
+        //
+        // - `Install` has nothing installed to be running.
+        // - `Downgrade` reaches `execute` and fires `winget install --version`,
+        //   but that command only ever moves a package *up*: it returns
+        //   `NO_AVAILABLE_UPGRADE`, the step ends `touched: false`, and
+        //   `render`'s summary counts a winget downgrade separately from
+        //   `change_count` for exactly that reason. Warning about it would
+        //   print a sentence dotpkg has been measured unable to carry out.
+        //
+        // Matching on the variant rather than on a "does it change something"
+        // helper is deliberate: both exclusions differ from `Prune`/`Upgrade`
+        // by what reaches the disk, not by whether an action exists.
         let (name, verb) = match action {
             Action::Upgrade { backend, name, .. } if backend == WINGET => (name, "upgrade"),
-            Action::Downgrade { backend, name, .. } if backend == WINGET => (name, "downgrade"),
             Action::Prune { backend, name, .. } if backend == WINGET => (name, "remove"),
             _ => continue,
         };
@@ -3843,6 +3853,76 @@ mod tests {
         assert!(
             out.is_empty(),
             "an install has nothing installed to be running: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_downgrade_is_not_reported_because_winget_refuses_it_rather_than_performing_it() {
+        // Found by running the check against a real machine rather than by
+        // reading it. Declaring all 41 of a14's installed ids pinned above
+        // their installed version produced two `Action::Downgrade`s --
+        // `Google.Chrome` and `Microsoft.Edge`, both installed ahead of the pin
+        // -- and the first version of this check warned about both.
+        //
+        // The sentence it printed was false. A winget downgrade does reach
+        // `execute` and does fire `winget install --version <pin>`, but
+        // measured, that command only ever moves a package *up*: it comes back
+        // `NO_AVAILABLE_UPGRADE`, the step ends `touched: false`, and
+        // `render`'s summary counts it separately from `change_count` for
+        // exactly this reason. So "dotpkg may downgrade it while it is running"
+        // describes something dotpkg has been measured unable to do, and a
+        // warning that sends the user to guard against it is asking for work
+        // that buys nothing.
+        //
+        // `Prune` stays in: `winget uninstall` does remove a running package.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Downgrade {
+                    backend: WINGET.into(),
+                    name: Name::new("Google.Chrome"),
+                    from: "150.0.7871.187".into(),
+                    to: "99.0.0".into(),
+                    arch: None,
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("Google.Chrome", &["chrome", "google chrome"])],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert!(
+            out.is_empty(),
+            "a winget downgrade is refused rather than performed, so there is nothing \
+             for a guard entry to protect: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_removal_is_still_reported_because_uninstall_really_does_remove_it() {
+        // The other half of the pair above, and the reason `Prune` cannot be
+        // dropped alongside `Downgrade`: `winget uninstall` is not refused.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Prune {
+                    backend: WINGET.into(),
+                    name: Name::new("Obsidian.Obsidian"),
+                    version: "1.12.7".into(),
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("Obsidian.Obsidian", &["obsidian"])],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "a removal can still hit a running package: {out:?}"
+        );
+        assert!(
+            out[0].contains("remove"),
+            "the message must name the action it is warning about: {}",
+            out[0]
         );
     }
 

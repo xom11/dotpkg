@@ -10,9 +10,10 @@
 //! `WingetMutator` cannot be held to that standard, and this module must not
 //! pretend otherwise. **Not because winget has no hash** — it has one and
 //! verifies it: `winget show` prints `Installer SHA256`, which is exactly the
-//! correction `docs/specs/2026-08-09-phase4-backend-winget-design.md:60` made
-//! to `design.md:78`'s "winget pins a version, not a hash", and a correction
-//! this module must not quietly undo. What winget lacks is an **on-disk
+//! correction `docs/specs/2026-08-09-phase4-backend-winget-design.md` made
+//! to `docs/specs/2026-08-08-design.md`'s "winget pins a version, not a
+//! hash", and a correction this module must not quietly undo. What winget
+//! lacks is an **on-disk
 //! manifest and hash dotpkg can read back after the install**, the way
 //! `verify::verdict` compares scoop's installed manifest bytes against the
 //! staged file. With no such handle there is nothing independent of winget to

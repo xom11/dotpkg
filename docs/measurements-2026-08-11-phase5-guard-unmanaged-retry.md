@@ -112,7 +112,7 @@ machine-scope portable exists on this machine.
 
 `C:\Program Files\WinGet\Packages` — the machine-scope **package** root itself,
 not its `Links` sibling — was probed in the same pass and is **absent** too. Raw
-probe output, `p1-report.txt:77-78`:
+probe output, `p1-report.txt-78`:
 
 ```
 --- dir: C:\Program Files\WinGet\Packages
@@ -151,7 +151,7 @@ second alias — it is "the process name is not derivable from the id".
 
 - **"the cleanup script counted `leftover Links: 2` for pattern `xh*`" is not
   in the record.** The record says **0 leftover Links**, in three places:
-  `.superpowers/.../progress.md:214`, `:396`, and
+  `.superpowers/.../progress.md`, `:396`, and
   `docs/measurements-2026-08-10-winget-write-path.md:40`. The `2` comes from
   that document's §11, observed **while `xh` was installed**. That makes the
   clue stronger, not weaker: `Links` went 2 -> 0 across install -> uninstall,

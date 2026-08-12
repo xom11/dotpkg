@@ -151,7 +151,7 @@ pub fn remove_argv(id: &Name, version: &str) -> Vec<String> {
 /// mutation's own exit code.
 ///
 /// **`-e`/`--exact` here, but deliberately not in `resolve_latest` or
-/// `resolve_installed` (`src/backend/winget.rs:899`, `:988`) -- the opposite
+/// `resolve_installed` (`src/backend/winget.rs`) -- the opposite
 /// choice, for the same underlying measured reason, not the same choice for
 /// a shared one.** Those two resolvers run *before* the canonical spelling
 /// is known: they must omit `--exact` so winget folds case on the way in,
@@ -217,7 +217,7 @@ pub trait WingetMutator {
 /// equivalent. **Not because winget has no hash** -- it has one and verifies
 /// it, printing `Successfully verified installer hash`, and `winget show`
 /// prints `Installer SHA256`; that correction is on the record at
-/// `docs/specs/2026-08-09-phase4-backend-winget-design.md:60` and
+/// `docs/specs/2026-08-09-phase4-backend-winget-design.md` and
 /// `src/execute.rs`'s module doc restates it. What winget lacks is an
 /// **on-disk manifest or hash dotpkg can read back after the install**, so
 /// there is nothing independent of winget to check winget's own write against.

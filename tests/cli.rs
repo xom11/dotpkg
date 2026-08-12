@@ -724,7 +724,7 @@ fn a_held_prune_appears_in_the_closing_table_not_only_as_a_stderr_note() {
 #[test]
 fn a_ready_prune_with_nothing_held_back_gets_no_routing_bug_warning() {
     // `unrouted_warning(preparation.ready_count(), steps.len() + held.len())`
-    // (main.rs:670). A single adopted, undeclared package with nothing else
+    // (`src/main.rs`). A single adopted, undeclared package with nothing else
     // declared routes to exactly one step and zero held items, so the two
     // numbers already agree without needing addition's identity element to
     // save them -- a product would not: with `held.len() == 0`,
@@ -1107,7 +1107,7 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     // either fix existed -- pinned here so the exit code stays explainable
     // on this branch too, matching the format `render_preparation`'s own
     // test (`src/render.rs`) pins for the identical shape. The name column is
-    // one wider than it used to be (`src/render.rs:505`, Task 16's Windows
+    // one wider than it used to be (`src/render.rs::prepared_line`, Task 16's Windows
     // fix wave) so a real winget id no longer runs into what follows it.
     assert!(
         stdout.contains("  !       scoop  aichat         running -- stop it first\n"),
@@ -1696,10 +1696,14 @@ fn a_declared_unlocked_winget_package_now_refuses_the_whole_run_before_execute_i
 // reading: before these, `tests/cli.rs` invoked only `apply` and `status`, so
 // every exit-code decision in the `Update` and `Adopt` arms of `main.rs` was
 // unreachable from the suite. cargo-mutants reported five survivors there --
-// `main.rs:882` (the undeclared-package refusal), `main.rs:943` (three
-// mutants on `failed_count() > 0`), `main.rs:955` (the relative `--state`
-// refusal) and `main.rs:1004` (adopt's refusal exit) -- all of which are
-// killed by the tests below. Those four numbers name this tree.
+// `src/main.rs`'s undeclared-package refusal, three mutants on its
+// `failed_count() > 0` guard, its relative `--state` refusal, and adopt's
+// refusal exit -- all of which are killed by the tests below. Those four
+// checks are NAMED rather than numbered, which is this repository's rule for
+// any citation into code: a line number is a claim that a later commit can
+// falsify without touching the sentence, and this file has paid for that
+// seven times. The Phase 3 numbers below are the one exception, and they say
+// why.
 //
 // HISTORICAL, DO NOT RE-POINT: the survivors were reported against Phase 3's
 // tree (58c8e29), where the same four checks sat at `:438`, `:459`, `:470` and

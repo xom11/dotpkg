@@ -1608,6 +1608,57 @@ mod tests {
         assert_eq!(package_roots_with(None, None), Vec::<PathBuf>::new());
     }
 
+    /// The one assertion tying `package_roots` to the environment it reads.
+    ///
+    /// The four tests above pin `package_roots_with`, the logic. This pins the
+    /// plumbing, which is the half nothing asserted: that the wrapper reads
+    /// `LOCALAPPDATA` and `ProgramFiles`, in that order, and passes them
+    /// through unchanged. Two mutation survivors sat on that wrapper across
+    /// three phases -- `-> vec![]` and `-> vec![Default::default()]` -- and a
+    /// mutation run on Windows was **measured** unable to close either
+    /// (`docs/measurements-2026-08-12-phase5-residuals.md` §4.1 and §12): the
+    /// cause was never a platform gap, it was that nothing in the suite
+    /// asserted anything depending on this function's value.
+    ///
+    /// **It reads the environment and never writes it.** `std::env::set_var` is
+    /// process-global and this suite runs in parallel threads, so a test that
+    /// set either variable would race every other test; that race is the whole
+    /// reason `package_roots_with` was split out in the first place, and a test
+    /// re-introducing it here would give the split back.
+    ///
+    /// **What it kills, per platform, stated rather than assumed** -- the point
+    /// being that it bites on both, for different reasons:
+    /// - Where both variables are set (Windows): the expectation is a real
+    ///   two-element vector, so **both** survivors die.
+    /// - Where neither is set (macOS, every run of this suite): the expectation
+    ///   is empty, so `vec![]` is genuinely indistinguishable and survives --
+    ///   but `vec![Default::default()]` is one element against an expected
+    ///   zero, and **dies here for the first time**.
+    ///
+    /// The expectation is built from `PathBuf::join` literally rather than by
+    /// calling `package_roots_with`, so this test does not pass merely because
+    /// the wrapper and the helper agree with each other.
+    #[test]
+    fn package_roots_reads_localappdata_and_program_files_from_the_environment() {
+        let local = std::env::var("LOCALAPPDATA").ok();
+        let program_files = std::env::var("ProgramFiles").ok();
+
+        let mut expected: Vec<PathBuf> = Vec::new();
+        if let Some(local) = local.as_deref() {
+            expected.push(
+                PathBuf::from(local)
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Packages"),
+            );
+        }
+        if let Some(program_files) = program_files.as_deref() {
+            expected.push(PathBuf::from(program_files).join("WinGet").join("Packages"));
+        }
+
+        assert_eq!(package_roots(), expected);
+    }
+
     #[test]
     fn guard_names_are_the_two_signals_measured_to_catch_a_real_process() {
         // Measured on a14 against the live process table: of 36 source-backed

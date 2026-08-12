@@ -1494,7 +1494,7 @@ mod tests {
         // a mutant that stops reconciling altogether goes red here too.
         scoop_root_with(tmp.path(), "fzf", "1.0.0");
         // `manifest.json` with no `version` key: `Scoop::scan` puts this in
-        // `opaque`, not `installed` (src/backend/scoop.rs:283-287; was
+        // `opaque`, not `installed` (`src/backend/scoop.rs::scan`; was
         // `:299-303` before this branch removed `Scoop::running_set`).
         let opaque_cur = tmp.path().join("apps").join("busybox").join("current");
         std::fs::create_dir_all(&opaque_cur).unwrap();

@@ -110,31 +110,31 @@ from this run.
 Recorded here rather than edited in place, matching the precedent set by
 `docs/specs/2026-08-08-phase2a-design.md`.
 
-**`design.md:205-208` still asserts what `design.md:323-336` retracts.** The
+**`docs/specs/2026-08-08-design.md:205-208` still asserts what `docs/specs/2026-08-08-design.md:323-336` retracts.** The
 correction block sits 115 lines below the paragraph it corrects, and the
 paragraph — "without pretending a downgrade is safe … `↓` makes that visible" —
 is the one a prompt author reads. Every version change is uninstall + install;
 `^` carries the same risk as `↓`. The prompt specified below must not imply
 otherwise.
 
-**`design.md:239-247`'s `Backend` trait sketch is unimplementable.**
+**`docs/specs/2026-08-08-design.md:239-247`'s `Backend` trait sketch is unimplementable.**
 `install(&self, pkg: &str, pin: &Pin)` cannot be written: only a staged
 manifest path installs anything, and `pkg: &str` reintroduces the untyped name
 that `src/model.rs:19-21` exists to make unrepresentable. `helpers()` shipped
 in the planner (`src/plan.rs:13`), not the backend. The real seam is the
 `Mutator` trait below.
 
-**`design.md:309`'s "offer to clone (URL is in `pkg.toml`)" describes code that
+**`docs/specs/2026-08-08-design.md:309`'s "offer to clone (URL is in `pkg.toml`)" describes code that
 does not exist.** `ScoopSection.buckets` (`src/config.rs:15`) is read by
 nothing outside a length assertion in its own test module, and the documented
 `name=url` form is never split.
 
-**`design.md:289-292`'s restore recipe stages to `%TEMP%` and uses `scoop
+**`docs/specs/2026-08-08-design.md:289-292`'s restore recipe stages to `%TEMP%` and uses `scoop
 install` to change a version.** Both are wrong: `install.json` records the
 staging path, so staging is permanent (`src/apply.rs:46-56`), and `scoop
 install` over an installed app changes nothing.
 
-**`design.md:307` and `design.md:315-317` contradict each other** — "hard fail,
+**`docs/specs/2026-08-08-design.md:307` and `docs/specs/2026-08-08-design.md:315-317` contradict each other** — "hard fail,
 print the recovery command" against "per-package failures accumulate; the run
 continues". This document picks, in "Halt or proceed" below.
 
@@ -285,7 +285,7 @@ merely prints advice leaves nothing if the terminal is gone.
 **`running` is re-checked immediately before each mutation.** Today it is
 sampled once (`src/main.rs:97`), before roughly two dozen downloads. A user who
 opens their editor during the prefetch would otherwise have it uninstalled —
-the row `design.md:306` exists to prevent, reopened by the phase split.
+the row `docs/specs/2026-08-08-design.md:306` exists to prevent, reopened by the phase split.
 
 ### The `state.json` write path
 
@@ -372,7 +372,7 @@ a **mutation** fails partway through a run that did start.
 proceeds.** From there, a mutation failure is per package: it is recorded and
 reported, and it neither stops nor cancels its neighbours. Stopping halfway
 through 25 packages leaves a worse machine than finishing the ones that work.
-This is where `design.md:315-317` is right and `design.md:307` is wrong; the
+This is where `docs/specs/2026-08-08-design.md:315-317` is right and `docs/specs/2026-08-08-design.md:307` is wrong; the
 "hard fail" that row calls for is the *exit code and the recovery text*, not an
 abort of the remaining packages.
 

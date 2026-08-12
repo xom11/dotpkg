@@ -19,3 +19,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+      # The docs/ half of the citation gate. The src/ and tests/ half is a test
+      # in the suite above, because those two directories are what the Windows
+      # shipping tarball carries; docs/ is only ever present in a full checkout,
+      # which is what CI has. Neither half claims the other's scope.
+      - run: python3 scripts/check-citations.py

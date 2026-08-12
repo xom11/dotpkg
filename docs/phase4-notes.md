@@ -96,7 +96,7 @@ vocabulary rather than refusing or asking for its own.
 
 **The design's own promise is now half true, and that needs to be said
 plainly rather than left implied.** The approved design this phase carries
-forward from quoted, at `design.md:95`: *"the backend trait exists from v1 so
+forward from quoted, at `docs/specs/2026-08-08-design.md:95`: *"the backend trait exists from v1 so
 choco slots in without touching the planner."* Phase 4's own design doc
 states outright: *"That was never built... Phase 4 is where the promise is
 either made true or withdrawn."* After this phase: `plan()` does run one pass
@@ -276,7 +276,7 @@ the shape, not a re-measurement, and is recorded as such.
 
 **Already adjudicated, carried from earlier phases:**
 
-- **`bucket.rs:99`** — `tip`'s success guard. Accepted **in Phase 3**, with a
+- **`src/bucket.rs:99`** — `tip`'s success guard. Accepted **in Phase 3**, with a
   measured reason: under the mutation, both arms produce the same `rev` and
   the same `Some`-ness: only the wording of the `stale` flag differs, and
   nothing downstream reads that wording differently in a way any test
@@ -336,7 +336,7 @@ the shape, not a re-measurement, and is recorded as such.
   `Preparation` whose `Prepared` list includes an `Action::Skip{reason:
   NotLocked}` paired directly with `Outcome::Skipped{why}`, and assert it is
   absent from `outstanding_skips()`'s result.
-- **`adopt.rs:468` — GAP.** `adopt_one`'s `scan.installed.iter().find(|i|
+- **`src/adopt.rs:468` — GAP.** `adopt_one`'s `scan.installed.iter().find(|i|
   i.backend == SCOOP && &i.name == name)`, `&&` mutated to `||`. Traced
   precisely: `run_scoop` calls `Backend::scan` **once**, before the
   per-name loop (`src/adopt.rs:206`), so a multi-package `adopt` call sees
@@ -570,7 +570,7 @@ same task).
    in Phase 3, `backend/scoop.rs`'s manifest-read guard closed in this
    phase's Task 4). Explicit Phase 4 non-goal, carried again.
 8. **Four new mutation survivors, ruled in this document**: three gaps
-   (`apply.rs:384`, `adopt.rs:468`, `winget.rs:150`, each with the specific
+   (`apply.rs:384`, `src/adopt.rs:468`, `winget.rs:150`, each with the specific
    test that would close it named above) and one accepted equivalent
    mutant (`winget.rs`'s `RealWinget::run` fallback code).
 9. **69 of the 71 timeout mutants from the final mutation run are

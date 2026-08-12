@@ -1531,7 +1531,7 @@ fn a_winget_step_and_a_scoop_step_are_different_types() {
 fn a_winget_set_sorts_before_every_removal_of_either_backend() {
     // `WingetStep` appeared in exactly one test before this (as `Remove`
     // only, above); `WingetStep::Set` appeared in none. This pins `order`'s
-    // group assignment for it (execute.rs:223): it must sort into group 0,
+    // group assignment for it (`src/execute.rs::order`): it must sort into group 0,
     // with installs, ahead of every removal -- scoop's or winget's --
     // because install-before-uninstall exists so that a run that dies
     // partway leaves an extra package rather than a missing one, per
@@ -1672,7 +1672,7 @@ fn a_winget_package_that_starts_running_mid_run_is_held() {
 // because `main.rs` is unobservable -- `tests/cli.rs` spawns the real binary and
 // `a_declared_package_skipped_as_running_is_outstanding_not_success` there drives
 // this fence end to end. The reason is narrower and specific to winget:
-// `path_without_winget` (`tests/cli.rs:55-64`) strips `winget` from `PATH` in
+// `path_without_winget` (`tests/cli.rs`) strips `winget` from `PATH` in
 // every `cli.rs` fixture by design, so a winget scan there is always empty and
 // the winget half of the fence cannot be reached from `cli.rs` either.
 // `apply::sample_fence` is what narrows that gap, by moving the choice of ids and

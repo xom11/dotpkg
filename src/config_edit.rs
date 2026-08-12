@@ -420,7 +420,7 @@ python = { arch = "64bit" }   # force an architecture
     // -- the LAYOUT the edit leaves behind -------------------------------
     //
     // Added by the Task 14 mutation run, which found six survivors in the
-    // `multiline` decision (`src/config_edit.rs:35` and `:38`). Every test
+    // `multiline` decision (`append_to_packages_array`). Every test
     // above asserts that the result PARSES and that comments survive; none
     // asserted the shape of the text, so the whole `multiline` branch --
     // the reason this function uses `toml_edit` at all rather than
@@ -900,9 +900,9 @@ packages = [
         // bucket URL's `#branch` fragment, which `src/config.rs` permits,
         // sitting inside a quoted string on a line that ALSO carries a real
         // trailing comment. Both mutations this function survived --
-        // deleting `in_string = !in_string` (config_edit.rs:296, so the
+        // deleting `in_string = !in_string` (`line_comment`'s `'"'` arm, so the
         // tracker never turns true) and widening `'#' if !in_string` to
-        // match unconditionally (config_edit.rs:297) -- produce the
+        // match unconditionally (`line_comment`'s `'#'` arm) -- produce the
         // identical wrong answer here: the FIRST `#`, which is the one
         // inside the URL, rather than the second, which is the real
         // comment. One fixture with a quote-open, a `#` inside, and a

@@ -93,7 +93,7 @@ EXIT 0    version 0.24.1    available 0.26.2
 and winget verifies the installer hash while doing it (`Successfully verified
 installer hash`), which is the "URL + hash" property
 `docs/specs/2026-08-09-phase4-backend-winget-design.md` already corrected
-`design.md:78` about.
+`docs/specs/2026-08-08-design.md:78` about.
 
 ## 2. On an already-installed package, `install` becomes `upgrade` and `--version` becomes a floor
 

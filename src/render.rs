@@ -391,7 +391,7 @@ pub fn render_execution(ex: &Execution) -> String {
         let line = match &item.result {
             // `{name:<14} ` -- a literal space after the padded field, the
             // same fix `prepared_line` needed and got at Task 16
-            // (`src/render.rs:493`, the comment on `prepared_line`'s own
+            // (the comment on `prepared_line`'s own
             // `format!`; read it for the mechanism). This citation said `:303`
             // until the whole-branch review; `:303` was two lines off the
             // function even before this branch, and this branch's own
@@ -1872,7 +1872,7 @@ mod tests {
     #[test]
     fn a_declared_unlocked_winget_package_is_told_to_run_dotpkg_update() {
         // Two reversals, in order. Task 15 made `update::run` resolve winget
-        // packages too (`src/update.rs:403-459`), which reversed
+        // packages too (`src/update.rs::run`), which reversed
         // `a_declared_unlocked_winget_package_is_not_told_to_run_update` into
         // this test. Phase 4b Task 13 then changed what shape carries the message:
         // `SkipReason::ReportedOnly(Divergence::NotLocked)` existed only
@@ -1995,7 +1995,7 @@ mod tests {
 
     #[test]
     fn a_done_package_alongside_an_untouched_failure_still_says_some_changed() {
-        // render.rs:443's `changed() > 0 || touched() > 0` looked like it
+        // `render_execution`'s `changed() > 0 || touched() > 0` looked like it
         // might be an equivalent mutant under `>` -> `<`, reasoning that
         // `touched()` is a superset of `changed()` (the comment above the
         // line argues `touched()` catches cases `changed()` misses). But the
@@ -2006,7 +2006,7 @@ mod tests {
         //
         // This is the case where it does not: one `Done` and one
         // `Failed { touched: false }` (reachable -- `ScoopStep::Remove`'s
-        // uninstall-command-failed arm, `execute.rs:383-388`, never touches
+        // uninstall-command-failed arm, `src/execute.rs::run_scoop_step`, never touches
         // the machine -- post-merge audit M1: this citation had drifted to
         // `:328`, inside a different arm entirely whose `touched` is a
         // mutable variable that CAN be `true`, a counterexample to this very

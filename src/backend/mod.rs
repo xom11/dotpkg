@@ -271,9 +271,9 @@ pub fn scan_or_warn(backend: &dyn Backend) -> ScanOutcome {
 ///
 /// `winget_ids` is the winget scan's `installed` names and never its `opaque`
 /// ones. **Structural:** `plan()` only ever reaches `Running::covers` through an
-/// `Installed` (`src/plan.rs:431` and `:479`, both passing an `&Installed`), and
+/// `Installed` (`src/plan.rs::plan_backend`, both passing an `&Installed`), and
 /// an `opaque` id is turned into `SkipReason::Opaque` and `continue`d at
-/// `src/plan.rs:362-369`, before either fence check is reached.
+/// `src/plan.rs::plan_backend`, before either fence check is reached.
 pub fn running_set(
     scoop: &scoop::Scoop,
     winget_ids: &[Name],
@@ -310,12 +310,12 @@ pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
 /// checkable by reading:
 ///
 /// - Plan time: `plan()` hands a whole `&Installed` to `Running::covers`
-///   (`src/plan.rs:431` and `:479`), and `covers`' third disjunct asks
+///   (`src/plan.rs::plan_backend`), and `covers`' third disjunct asks
 ///   `inst.bins` against the live process names.
 /// - Mid-run: `apply::guard_for` clones the same `Installed.bins` into the
 ///   `guard` field of `WingetStep::Set`/`Remove`, `Step::guard_names` returns
 ///   it, and `execute`'s per-step re-sampler passes it to
-///   `Running::covers_any` (`src/execute.rs:1032`).
+///   `Running::covers_any` (`src/execute.rs::execute`).
 ///
 /// Neither list has any other source: `guard_for` reads `bins` or falls back to
 /// `winget::guard_names`, and a **winget** row's `bins` is filled only by
@@ -342,7 +342,7 @@ pub fn winget_fence_ids(outcome: &ScanOutcome) -> Vec<Name> {
 /// - **The id is in `scan.opaque`.** Winget reported the package with no source,
 ///   so `rows_to_scan` gave it no `Installed` row at all -- there is nothing for
 ///   a guard name to be merged into -- and `plan()` turns it into
-///   `SkipReason::Opaque` and `continue`s (`src/plan.rs:362-369`) before either
+///   `SkipReason::Opaque` and `continue`s (`src/plan.rs::plan_backend`) before either
 ///   fence check is reached. So the guard names genuinely protect nothing, but
 ///   *not* because nothing is installed. **Measured**, and the ordinary shape
 ///   rather than an edge case: 84 of 126 ids on a14 were sourceless (see

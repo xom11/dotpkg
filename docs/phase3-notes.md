@@ -393,7 +393,7 @@ Verified: `cargo mutants -f src/bucket.rs` on the changed tree caught **all 15**
 data.len() with true`, which is the one the extraction existed to reach. That
 re-run was stopped at 52 of 72 once it was past the parser (the remaining
 mutants are in `choose_bucket`, all of which run 1 had already caught); at that
-point its only survivors were `bucket.rs:99` and the two at `bucket.rs:191`,
+point its only survivors were `src/bucket.rs:99` and the two at `src/bucket.rs:191`,
 both ruled below.
 
 The strictness of `<` is the point and now has a test that says so: a stream

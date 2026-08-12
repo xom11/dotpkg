@@ -163,7 +163,7 @@ Adding ~\AppData\Local\Temp\dotpkg-probe-root\shims to your path.
 
 stderr on every one of the above (and nearly everything else in this round)
 carried the same non-fatal noise, ANSI colour codes included, from
-`buckets.ps1:61`'s `Get-ChildItem` failing to find a `buckets` directory that
+`buckets.ps1`'s `Get-ChildItem` failing to find a `buckets` directory that
 does not exist in a fresh probe root — never a sign that anything went wrong.
 
 ### M4 — what a successful install created

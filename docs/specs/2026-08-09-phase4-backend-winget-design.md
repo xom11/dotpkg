@@ -8,7 +8,7 @@
 carried because each one gets *harder* once a second backend exists, not
 because Phase 4 is a convenient place to put them.
 
-The approved design promised at `design.md:95` that *"the backend trait exists
+The approved design promised at `docs/specs/2026-08-08-design.md:95` that *"the backend trait exists
 from v1 so choco slots in without touching the planner."* That was never built.
 `Backend` has `name` and `scan`; `resolve` is a free scoop-only function called
 directly from `update::run`; and `SCOOP` appears on **141 lines of `src/`**
@@ -57,11 +57,11 @@ design is built on:
 Recorded here rather than edited in place, matching the precedent set by the
 2a, 2b-2 and Phase 3 designs.
 
-**`design.md:78` — "winget pins a version, not a hash" — is wrong about
+**`docs/specs/2026-08-08-design.md:78` — "winget pins a version, not a hash" — is wrong about
 winget.** `winget show` prints `Installer Url` and `Installer SHA256`, and
 winget verifies the hash; `show -e --id ajeetdsouza.zoxide -v 0.9.0` returns a
 complete manifest with its SHA256 for a release dated 2023-01-08. winget
-manifests are the same "URL + hash" shape `design.md:60` credits scoop with.
+manifests are the same "URL + hash" shape `docs/specs/2026-08-08-design.md:60` credits scoop with.
 
 What winget lacks is a **local content handle**. A scoop bucket is a git clone
 on the user's own machine, so `git show <commit>:bucket/<app>.json` recovers a
@@ -76,7 +76,7 @@ content by. The corrected sentence:
 `pin = "version-only"` in the lock stays exactly as it is. It was always the
 right field; only the explanation was wrong.
 
-**`design.md:78`'s "only while that version's manifest still exists upstream"
+**`docs/specs/2026-08-08-design.md:78`'s "only while that version's manifest still exists upstream"
 is right, and the window is three orders of magnitude wide.** Versions in the
 index today: `JanDeDobbeleer.OhMyPosh` 828, `Brave.Brave` 150, `Git.Git` 73
 (back to `2.24.1.2`), `Obsidian.Obsidian` 65, `ajeetdsouza.zoxide` **11**,
@@ -86,7 +86,7 @@ continuous (`2.30.2`, `2.30.1`, `2.30.0.2` exist; `2.30.0` does not).
 
 This is a fact `status` should be able to state, not only a caveat in a README.
 
-**`design.md:257`'s scan-cost table omits the expensive case.** `winget list`
+**`docs/specs/2026-08-08-design.md:257`'s scan-cost table omits the expensive case.** `winget list`
 at 1213 ms is confirmed warm (measured 1105 / 1117 / 1108 ms via
 `Start-Process`). The **first invocation of a session is 8125 ms**, and
 "cached once per run" does not help the first run — which is the one
@@ -100,7 +100,7 @@ folded form and Phase 3 settled that the scoop lock records
 folded name into `winget --exact --id` gets "not found" for a package that
 exists.** This is the Phase 3 bucket-spelling defect pointing the other way.
 
-**`design.md:243`'s `Backend` sketch will not survive contact.**
+**`docs/specs/2026-08-08-design.md:243`'s `Backend` sketch will not survive contact.**
 `fn resolve(&self, pkg: &str) -> Result<Pin>` is too narrow in three ways: it
 returns `Result` where the shipped code needs a per-package *outcome* that does
 not abort the run (`update::Resolution`), it takes a `&str` where the crate has
@@ -108,7 +108,7 @@ not abort the run (`update::Resolution`), it takes a `&str` where the crate has
 / offline / lock context `resolve_latest` already needs. The trait below
 replaces it.
 
-**`design.md:245`'s `helpers()` does not generalise, and is not where it was
+**`docs/specs/2026-08-08-design.md:245`'s `helpers()` does not generalise, and is not where it was
 put.** It lives as `plan::SCOOP_HELPERS`, not on the backend. Its winget
 counterpart is not a fixed list — it is the 83 sourceless rows, which change
 per machine. The generalised idea is *"the backend decides which installed
@@ -531,7 +531,7 @@ Unchanged from the approved design. Additionally, Phase 4:
   the answer this document proposes is **no third resolver**: `add` is
   `pkg.toml` plus `update <pkg>` plus `apply`, composed. Settled in Phase 5, not
   here.
-- **does not touch chocolatey**, which `design.md:91` defers to v2 for a reason
+- **does not touch chocolatey**, which `docs/specs/2026-08-08-design.md:91` defers to v2 for a reason
   that still holds.
 - **does not act on architecture drift or on a same-version commit re-pin**, and
   does not add locking against two concurrent dotpkg runs.

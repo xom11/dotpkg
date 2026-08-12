@@ -716,7 +716,7 @@ nobody checks.
       `format!("  {marker:<8}{backend:<6} {name:<14} {rest}\n")`, which is
       **`:505`** here. `:493` resolves, reads like the right neighbourhood, and is
       twelve lines above the claim.
-    - `tests/execute.rs:1534`'s target was proposed as `execute.rs:221`,
+    - `tests/execute.rs:1534`'s target was proposed as `src/execute.rs:221`,
       `order`'s `sort_by_key` line. The citation is about the *group assignment*
       for `WingetStep::Set`, and at its origin `4ebd831` it pointed at the group-0
       match arm, which is **`:223`** here.
@@ -817,7 +817,7 @@ directory over.
 - **The phase brief's `leftover Links: 2` is not in the record.** The brief
   reported that a dogfood cleanup script "counted `leftover Links: 2` for pattern
   `xh*`". The record says **0 leftover Links**, in three places — Phase 4b's own
-  ledger at `progress.md:214` and `:396`, and
+  ledger at `progress.md` and `:396`, and
   `docs/measurements-2026-08-10-winget-write-path.md:40`, which is the one of the
   three that is checked in and reads "0 leftover `WinGet\Links` entries". The `2`
   is that same document's §11, observed **while `xh` was installed**. The clue survives the
@@ -933,7 +933,7 @@ rather than by a wrong sentence.
 used to read "Thirteen" and thirteen counted nothing.** It was **9 rows of the
 first table below plus 4 numbers of the second** — two units added together, a
 total matching neither. Caught by the independent citation sweep that followed the
-fix wave (ledger, `progress.md:132`), and it survived into this document anyway.
+fix wave (ledger, `progress.md`), and it survived into this document anyway.
 Recounted against the two tables, which are themselves unchanged:
 
 - **16 citation numbers** — a number being one `:NNN` or one `:NNN-MMM` range;
@@ -1189,7 +1189,7 @@ only thing the boundary changed was who looked.
 | `tests/cli.rs:1698`, same line | `main.rs:459` | `:943` | `:901` |
 | `tests/cli.rs:1699`, same comment | `main.rs:470` | `:955` | `:913` |
 | `tests/cli.rs:1700`, same comment | `main.rs:496` | `:1004` | `:962` |
-| `tests/execute.rs:1534`, `a_winget_set_sorts_before_every_removal…` | `execute.rs:190` | `:223` | `:223` |
+| `tests/execute.rs:1534`, `a_winget_set_sorts_before_every_removal…` | `src/execute.rs:190` | `:223` | `:223` |
 
 Three details worth keeping rather than flattening:
 
@@ -1516,7 +1516,7 @@ carried forward from Task 9c's `4bbe3be` run:
 #### The suite's one wall-clock assertion, and it was measured under load
 
 **Recorded here because it existed only in the git-ignored ledger
-(`progress.md:131`), and this is the one branch that lost a merge gate to a
+(`progress.md`), and this is the one branch that lost a merge gate to a
 timing-dependent test.** The 634 entry above names three tests without saying that
 one of them asserts on a clock:
 `the_retry_delay_is_not_slept_after_the_final_failed_attempt`
@@ -2236,7 +2236,7 @@ triages whatever remains.
   changed a real plan, with A2c as the counterweight proving the entry's *contents*
   were the cause. **The `opaque` warning branch is still not covered live** —
   `Tailscale.Tailscale` is source-backed on a14, so no dogfood stage put a guard
-  entry on a sourceless id, and `mod.rs:409`'s arm has never run outside a unit
+  entry on a sourceless id, and `src/backend/mod.rs:409`'s arm has never run outside a unit
   test.
 - **`package_roots()` has no direct test anywhere.** A swap of its two
   environment-variable names, or an extra `Microsoft` segment on the

@@ -196,7 +196,7 @@ disambiguation table; no such case exists on a14.
 
 ## 4. Version retention is a publisher policy, not a winget guarantee
 
-`design.md:78` says a winget version is pinnable *"only while that version's
+`docs/specs/2026-08-08-design.md:78` says a winget version is pinnable *"only while that version's
 manifest still exists upstream"*. True, and the size of the window was never
 measured. `show -e --id <id> --versions`, row counts computed programmatically:
 
@@ -228,9 +228,9 @@ Installer:
   Release Date: 2023-01-08
 ```
 
-**So `design.md:78`'s "winget pins a version, not a hash" is wrong about
+**So `docs/specs/2026-08-08-design.md:78`'s "winget pins a version, not a hash" is wrong about
 winget.** winget manifests carry a SHA256 and winget verifies it — the same
-"URL + hash" shape `design.md:60` credits scoop with. What winget lacks is a
+"URL + hash" shape `docs/specs/2026-08-08-design.md:60` credits scoop with. What winget lacks is a
 *local content handle*: a scoop bucket is a git clone on the user's own
 machine, so `git show <commit>:bucket/<app>.json` recovers a historical
 manifest offline and forever; winget's source is a pre-indexed cache served
@@ -253,7 +253,7 @@ The pin-liveness check, with two distinguishable failures:
 | `show -e --id ajeetdsouza.zoxide -v 99.99.99` | `0x8A150017` | `No version found matching: 99.99.99` |
 | `show -e --id Xyzzy.NoSuch.Dotpkg -v 1.0` | `0x8A150014` | `No package found matching input criteria.` |
 
-`0x8A150017` is exactly the signal `design.md:311`'s row *"winget version
+`0x8A150017` is exactly the signal `docs/specs/2026-08-08-design.md:311`'s row *"winget version
 manifest gone upstream → Report, skip that package"* needs, and the package
 -level failure takes precedence over the version-level one.
 
@@ -289,7 +289,7 @@ All warm unless marked. `probe1` used in-process piping; `probe2`/`probe3` used
 | `winget source list` | 1106 |
 | `winget --info` / `list --help` (probe1, in-process) | 127 / 120 |
 
-`design.md:257`'s **1213 ms for `winget list`** is confirmed for the warm case.
+`docs/specs/2026-08-08-design.md:257`'s **1213 ms for `winget list`** is confirmed for the warm case.
 What the table omits is the **8125 ms first invocation** — and "cached once per
 run" does not help the first run, which is the one `dotpkg status` makes.
 

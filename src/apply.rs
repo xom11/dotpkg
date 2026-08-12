@@ -1083,11 +1083,11 @@ pub struct Driver {
 /// `main.rs` is unobservable: `tests/cli.rs` spawns the real binary through
 /// `CARGO_BIN_EXE_dotpkg`, and
 /// `a_declared_package_skipped_as_running_is_outstanding_not_success`
-/// (`tests/cli.rs:1000`) already drives this very fence end to end -- it copies
+/// (`tests/cli.rs`) already drives this very fence end to end -- it copies
 /// the binary into `<scoop_root>/apps/aichat/current/`, runs it live, and asserts
 /// the `held … running -- stop it first` line. What that test cannot reach is the
 /// **winget** half, and the reason is narrower: `path_without_winget`
-/// (`tests/cli.rs:55-64`) strips every `PATH` directory holding `winget.exe` or
+/// (`tests/cli.rs::path_without_winget`) strips every `PATH` directory holding `winget.exe` or
 /// `winget` from every `cli.rs` fixture by design, so `Winget::scan` there always
 /// returns an empty `Scan`, `winget_fence_ids` always returns an empty vector,
 /// and `running_ids` has no scanned id to match a package directory against.
@@ -3409,11 +3409,11 @@ mod tests {
 
     #[test]
     fn a_prune_from_a_backend_that_is_neither_winget_nor_scoop_does_not_become_a_winget_removal() {
-        // `backend == WINGET` (apply.rs:912) is the only thing standing
+        // `backend == WINGET` (`plan_to_steps`) is the only thing standing
         // between this arm's `Step::Winget(WingetStep::Remove)` and a
         // routing bug -- but `Action::Prune` + `Outcome::ReadyToRemove`
         // structurally matches BOTH this arm and the scoop Prune arm above
-        // it (apply.rs:858), so a literal `backend: SCOOP` action never even
+        // it (`plan_to_steps`), so a literal `backend: SCOOP` action never even
         // reaches THIS arm's guard: the scoop arm's own `backend == SCOOP`
         // claims it first, every time, mutated or not. Only a THIRD backend
         // -- one that matches neither guard -- actually exercises this arm's
@@ -3514,7 +3514,7 @@ mod tests {
     #[test]
     fn guard_for_needs_both_the_right_backend_and_the_right_name_not_either_alone() {
         // `guard_for`'s `.find(|i| i.backend == WINGET && &i.name == name)`
-        // (apply.rs:974) survived mutation to `||` because both tests above
+        // (`guard_for`) survived mutation to `||` because both tests above
         // pass an `installed` slice with exactly one winget row -- with only
         // one candidate, "is winget" and "is this name" agree on the same
         // row, and `&&` vs `||` cannot be told apart. Two fixtures close that,
@@ -3598,7 +3598,7 @@ mod tests {
     #[test]
     fn a_winget_install_and_a_winget_upgrade_produce_no_scoop_step_and_are_reported_as_unrouted() {
         // Mirrors the test above for the other two `backend == SCOOP`
-        // guards (apply.rs:834 and :853): a winget action ready to fetch
+        // guards (`plan_to_steps`): a winget action ready to fetch
         // must not fall through into a `ScoopStep::Install` or
         // `ScoopStep::Replace` either.
         let prep = Preparation {
@@ -3653,7 +3653,7 @@ mod tests {
 
     #[test]
     fn a_scoop_action_carrying_a_readytoset_does_not_become_a_winget_step() {
-        // `backend == WINGET` (apply.rs:900) is the only thing standing
+        // `backend == WINGET` (`plan_to_steps`) is the only thing standing
         // between this arm's `Step::Winget(WingetStep::Set)` and a routing
         // bug: nothing in the type system stops a SCOOP action from
         // carrying an `Outcome::ReadyToSet` -- scoop's own arms above this

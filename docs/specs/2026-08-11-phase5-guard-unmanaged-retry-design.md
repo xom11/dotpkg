@@ -28,7 +28,7 @@ Recorded here rather than edited in place, matching the precedent set by the 2a,
 
 The brief reports that a dogfood cleanup script "counted `leftover Links: 2`
 for pattern `xh*`". The record says **0 leftover Links**, in three places
-(`progress.md:214`, `:396`,
+(`progress.md`, `:396`,
 `docs/measurements-2026-08-10-winget-write-path.md:40`). The `2` is that
 document's §11, observed **while `xh` was installed**. The clue survives the
 correction and is strengthened by it — `Links` went 2 → 0 across install →

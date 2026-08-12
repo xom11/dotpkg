@@ -58,7 +58,7 @@ Two further measured results drive the algorithms below:
 Recorded here rather than edited in place, matching the precedent set by
 `docs/specs/2026-08-08-phase2a-design.md` and continued by the 2b-2 design.
 
-**`design.md:174` and `design.md:176` contradict each other, two rows apart.**
+**`docs/specs/2026-08-08-design.md:174` and `docs/specs/2026-08-08-design.md:176` contradict each other, two rows apart.**
 The command table states `update` is *"**The only command that writes the
 lock.**"* and then, two rows below, that `add` *"Install, add to `pkg.toml`,
 **record in `pkg.lock`**."* The rule was already false in the approved design;
@@ -73,12 +73,12 @@ adopts:
 > **`apply` never writes the lock, and no command resolves "latest" on
 > `apply`'s behalf.**
 
-**`design.md:176`'s `add` is `adopt` plus `update` plus `apply`.** It is not
+**`docs/specs/2026-08-08-design.md:176`'s `add` is `adopt` plus `update` plus `apply`.** It is not
 implemented in this phase and, on the reading above, probably should not exist
 as a third resolver. Recorded as a question for Phase 5 rather than settled
 here.
 
-**`design.md:189` — "`update` drops the entry" — is right, and one step from a
+**`docs/specs/2026-08-08-design.md:189` — "`update` drops the entry" — is right, and one step from a
 defect.** Dropping an entry for a package removed from `pkg.toml` is correct.
 Dropping an entry for a package that merely *failed to re-resolve* would turn a
 working pin into `Skip{NotLocked}`, which makes the next `apply` refuse the
@@ -90,7 +90,7 @@ twelve hex characters. `lock::parse` accepts it — there is no hex check
 there — and `lock_coherence_guard` then refuses the whole run. The split is
 deliberate and stays: a lock too broken to run must still be *readable*, or
 `status` could not explain it. But the test should say so instead of looking
-like the documented shape, and `design.md:51`'s illustrative `git show
+like the documented shape, and `docs/specs/2026-08-08-design.md:51`'s illustrative `git show
 a28d0c5648:` is prose, not a lock, so it is left alone.
 
 **`status` does not run `lock_coherence_guard`.** Combined with the above, the
@@ -109,7 +109,7 @@ scoop subprocess.
 ### "Latest" means fetching, and this is the network reach the design allows
 
 `update` is the one command the approved design permits to reach the network
-(`design.md:250` — "`resolve` is the only method that reaches the network, and
+(`docs/specs/2026-08-08-design.md:250` — "`resolve` is the only method that reaches the network, and
 only `update` calls it"). It has to be: **"latest" in a bucket nobody has
 fetched is "latest as of the last time something else pulled it"**, and a lock
 built from that is stale while claiming to be current. This is the same class

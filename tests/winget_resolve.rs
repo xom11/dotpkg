@@ -229,7 +229,7 @@ fn a_pin_whose_version_left_the_index_is_refused_and_says_how_deep_the_index_is(
 
 #[test]
 fn a_failed_depth_lookup_is_not_trusted_even_though_its_stdout_would_parse() {
-    // `versions_out.code == 0` (`src/backend/winget.rs:1086`) is what a
+    // `versions_out.code == 0` (`src/backend/winget.rs::version_liveness`) is what a
     // failed second call must not be able to fake past: reusing the SAME
     // fixture the passing test above trusts (`show-versions-zoxide.txt`,
     // which parses to 11 versions) but attaching it to a NONZERO exit code

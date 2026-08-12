@@ -133,9 +133,25 @@ fn a_commit_the_bucket_does_not_have_names_the_fetch_that_would_get_it() {
     let root = tempfile::tempdir().unwrap();
     let stage_dir = tempfile::tempdir().unwrap();
     bucket_repo(root.path(), "main", "tool.json", &["1.0.0"]);
-    let bucket_dir = root.path().join("buckets").join("main");
 
-    let r = Scoop::new(root.path().to_path_buf()).stage(
+    let scoop = Scoop::new(root.path().to_path_buf());
+    // Ask the object under test which root it resolved, rather than assuming
+    // the spelling the OS handed the fixture. `Scoop::new` canonicalizes, so
+    // the refusal names the TRUE on-disk path; where `TEMP` is an 8.3 alias or
+    // differs in case, the raw `tempfile` path is a different string and
+    // `contains` -- case-sensitive, and knowing nothing about aliases -- fails.
+    //
+    // Not a hypothetical, and not a product bug: this failed on
+    // `windows-latest` for ten commits, where `TEMP` sits under `runneradmin`
+    // and shortens to `RUNNER~1`, while passing on every developer machine.
+    // **Measured** by setting `TEMP` to an 8.3 alias on a real Windows machine:
+    // this test, and only this test, failed at exactly this assertion, and
+    // passed in the same session with `TEMP` set to the long form. The message
+    // is right -- the resolved path is the one a user can paste into `git -C`
+    // -- and the expectation was the thing that was wrong.
+    let bucket_dir = scoop.root().join("buckets").join("main");
+
+    let r = scoop.stage(
         stage_dir.path(),
         &Name::new("tool"),
         &pin("main", &"0".repeat(40), "1.0.0"),

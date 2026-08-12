@@ -2381,6 +2381,22 @@ hold zero line citations, `tests/citations.rs` refuses to let one back in, and
 file. A whole-repo content check was **measured** infeasible first: 221 of 421
 citations fire, almost all of them legitimately.
 
+**Status after the 2026-08-12 fence-coverage round**
+(`docs/measurements-2026-08-12-phase7-fence-coverage.md`). **Item 9's second
+half is closed**: dotpkg now names the `[winget.guard]` entry a user is missing,
+for a winget package with a pending change that neither fence half can see.
+**Item 10's strongest lead was opened and priced**: `installed.db` is SQLite,
+262144 bytes, with a populated `commands` table — and it would raise coverage
+from 4 to 10 of 41 while disagreeing with `winget list` on 31 names, at least 11
+of them packages **scoop** installed, so it stays unopened in production for a
+measured reason rather than an estimated one. **And the `portable`-only bound
+that items 5, 9 and 10 all rest on is measured for the first time**: a package
+directory exists for exactly the 4 `portable (zip)` ids of the 41 installed and
+for none of the other 37, across eight installer types, no exception in either
+direction. **Two numbers in this list are now known to be from an unreconciled
+instrument**: every "4 of 36" is 4 of **41** by `winget export`, and the two
+counts have not been diffed by name.
+
 **A decision about this file, since it was asked for.** The strikethrough
 convention **continues**; this file is not consolidated. The 21 in-place
 corrections are the only durable evidence of the four defect classes, and this
@@ -2442,7 +2458,27 @@ rounds*.
    source for a package's process names — `winget list` does not expose aliases
    at all; they appear only in `install`'s stdout, at install time — so a user
    who does not write the guard entry gets no protection for a non-portable
-   package, and dotpkg cannot tell them which entry they are missing. **And the
+   package, ~~and dotpkg cannot tell them which entry they are missing~~ —
+   **that second half is closed 2026-08-12**
+   (`docs/measurements-2026-08-12-phase7-fence-coverage.md`). A winget package
+   with a pending change, no `[winget.guard]` entry and no package directory now
+   gets one line naming the entry to add. **Measured live on a14 against a
+   synthetic config declaring all 41 installed ids: 27 of the 30 pending changes
+   warn, and the 3 that stay silent are exactly the ones the path signal
+   covers.** It adds **no coverage** — 4 of 41 before and after — and says so;
+   what it removes is the silence.
+
+   **Three corrections to this item's own numbers, from that round.** The
+   denominator is **41**, not 36, by `winget export -s winget`; the two figures
+   come from different instruments and are **not** reconciled by name, which is
+   now its own still-open item. The `portable`-only bound was an assumption
+   nobody had checked and is **now measured true**: a package directory exists
+   for exactly the 4 `portable (zip)` ids and none of the other 37, no exception
+   in either direction across eight installer types. And the first half of this
+   item — no scan-time source for process names — **has a measured price rather
+   than only a shrug**: `installed.db` does carry a populated `commands` table,
+   it would raise coverage to 10 of 41, and it disagrees with `winget list` on
+   31 names, at least 11 of them packages scoop installed. **And the
    `portable` half that `running_ids` does answer is now known to be
    live-unverified**: Task 9's dogfood could not separate the path signal from
    `guard_names` on the only live subject a14 offered — see item 21. The
@@ -2457,8 +2493,30 @@ rounds*.
     `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\Microsoft.Winget.Source_8wekyb3d8bbwe\installed.db`,
     **262144 bytes** — a winget-written catalog that is not portable-only.
     Reading it means bundling SQLite and depending on an undocumented internal
-    schema. Recorded as a lead, not as a finding; nothing in this phase opened
-    the file.
+    schema. ~~Recorded as a lead, not as a finding; nothing in this phase opened
+    the file.~~ — **opened 2026-08-12**
+    (`docs/measurements-2026-08-12-phase7-fence-coverage.md`), and the lead is
+    real but smaller and dearer than it looked. It is SQLite (header read), the
+    byte count is exact, it holds 23 tables, and its `commands` table is
+    **populated**: 31 commands over 14 ids. But only **7** of those 14 are
+    installed at all, one of the 7 is already covered by the path signal, and
+    the net is **4 to 10 of 41**.
+
+    **What disqualifies it as an oracle is measured, not argued.** It disagrees
+    with `winget list` in both directions: **16** ids it carries appear in
+    `winget list`'s output *not at all* (positive-controlled — the same search
+    finds every id that is there), and **at least 11 of those 16 are packages
+    scoop installed on that machine**; conversely **15** installed ids are
+    absent from it. This item asks for an *independent oracle for a winget
+    mutation*, and a catalog that attributes winget ids to scoop's packages is
+    not one. The narrower use that survives — never take the id set from it,
+    only look up names keyed by an id `winget list` already reported — is
+    recorded in that document, still unopened, and still costs a bundled SQLite
+    and an undocumented schema.
+
+    **Two cheaper routes were measured dead** in the same round: `winget show`
+    prints no Commands field at all, and `WinGet\Links`' five shims all resolve
+    under `Packages\`, so they are portable-only too.
 11. **A transient winget failure — rewritten. Now a decision with numbers behind
     it, not an open gap.** 0 nonzero exits across 105 reader invocations of two
     argvs, so no retry there; 3 of 10 on the writer, so one retry there, once,

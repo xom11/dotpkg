@@ -3927,6 +3927,69 @@ mod tests {
     }
 
     #[test]
+    fn a_scoop_removal_is_not_reported_as_a_winget_removal() {
+        // The `Upgrade` arm's `backend == WINGET` guard was already pinned by
+        // the scoop-upgrade test below; the `Prune` arm's was not, and an
+        // `--in-diff` mutation run found it: replacing that guard with `true`
+        // survived the whole suite. Both arms carry the same guard, so both
+        // need their own fixture -- one test per arm, not one per predicate.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Prune {
+                    backend: SCOOP.into(),
+                    name: Name::new("ripgrep"),
+                    version: "15.2.0".into(),
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert!(
+            out.is_empty(),
+            "a scoop removal must not be reported as a missing [winget.guard] entry: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_production_entry_point_reports_through_the_roots_it_reads_for_itself() {
+        // `unprotected_winget_changes` is the thin wrapper that reads the
+        // environment, and `_with_roots` is the seam every other test drives.
+        // An `--in-diff` mutation run found the wrapper completely unpinned --
+        // `vec![]`, `vec![String::new()]` and `vec!["xyzzy".into()]` all
+        // survived -- which is the same shape `package_roots()` carried for two
+        // phases before one assertion closed it.
+        //
+        // It READS the environment and never sets it: `std::env::set_var` is
+        // process-global and this suite runs in parallel, which is why the
+        // roots seam exists at all.
+        //
+        // The id is synthetic so the answer cannot depend on which machine this
+        // runs on: with the variables unset the root list is empty, and with
+        // them set no winget package directory is named this, so both give the
+        // same verdict.
+        let id = "Dotpkg.NoSuchPackage.ForTheWrapperTest";
+        let out = unprotected_winget_changes(
+            &Plan {
+                actions: vec![upgrade_of(id)],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row(id, &["forthewrappertest"])],
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "the wrapper must report through real roots: {out:?}"
+        );
+        assert!(
+            out[0].contains(id) && out[0].contains("[winget.guard]"),
+            "and it must be the real message, not any one-element vector: {}",
+            out[0]
+        );
+    }
+
+    #[test]
     fn a_scoop_change_is_not_reported_by_the_winget_fence_coverage_check() {
         // Scoop's path signal is a different mechanism with a different root,
         // and it covers every scoop package rather than 4 of 41. A warning

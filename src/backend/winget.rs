@@ -3,7 +3,7 @@ use crate::lock::Pin;
 use crate::model::{Installed, Name, WINGET};
 use crate::update::Resolution;
 use anyhow::{bail, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
 
 /// One row of `winget list`'s fixed-width text table.
@@ -331,12 +331,12 @@ pub(crate) fn running_ids(
     roots: &[std::path::PathBuf],
     procs: &[crate::sys::Process],
     scanned: &[Name],
-) -> std::collections::BTreeSet<Name> {
+) -> BTreeSet<Name> {
     fn fold(p: &std::path::Path) -> String {
         p.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
     }
 
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = BTreeSet::new();
     for root in roots {
         // `trim_end_matches` makes a root with or without its own trailing
         // separator equivalent. Without it, a root already ending in `/`
@@ -411,10 +411,8 @@ pub(crate) fn segment_names_id(seg: &str, key: &str) -> bool {
 /// while the plan is being described. The *matching* stays in
 /// `segment_names_id`, so hoisting the I/O does not put a second copy of the
 /// rule at the call site.
-pub(crate) fn package_dir_segments(
-    roots: &[std::path::PathBuf],
-) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+pub(crate) fn package_dir_segments(roots: &[std::path::PathBuf]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
     for root in roots {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;

@@ -340,7 +340,55 @@ loudly if the session it is run from is elevated.
    manifest result. The failure looked like a dropped connection, which is a
    failure mode this project already has, and I nearly attributed it to that.
 
-## 11. Still outstanding
+## 11. The automated Windows gate had been red for ten commits, and nobody looked
+
+Found by checking whether the CI step added in this round had ever been observed
+to run. It had not -- and the reason turned out to be much larger than the step.
+
+**`windows-latest` had failed on every push since `98f3d33` (2026-08-10). The
+last green run was `5bd69c3` (2026-08-09): ten consecutive commits, spanning the
+end of Phase 4b, all of Phase 5, the residual round and this one.** No phase
+document mentions it. `ubuntu-latest` and `macos-latest` were green throughout,
+which is why nothing announced itself.
+
+**This is expensive in a specific way.** Three consecutive phases built a manual
+Windows verification apparatus -- a hashed 73-file shipping manifest, an ssh
+session to a14, a name-by-name cross-reference, a first-ever `cargo mutants` run
+on Windows -- while the *automatic* Windows gate sat red and unwatched. It is
+this project's own fourth defect class (a gate whose result nobody reads) at the
+top level, and it survived because every phase's Verification section describes
+what that phase ran by hand.
+
+**One test, and the mechanism is measured with a control rather than reasoned.**
+`tests/prepare.rs`'s `a_commit_the_bucket_does_not_have_names_the_fetch_that_would_get_it`
+asserts the refusal message contains the bucket directory, comparing against the
+**raw** `tempfile` path. `Scoop::new` canonicalizes its root, so the message
+carries the **true on-disk spelling**. Where the two differ, `String::contains`
+-- case-sensitive, and knowing nothing about 8.3 aliases -- fails.
+
+Reproduced on a real Windows machine by making `TEMP` an 8.3 alias, with the
+long form as the control, in the same session:
+
+| | `TEMP` | before the fix | after the fix |
+|---|---|---|---|
+| control | `C:\Users\kln\ph6-longtemp-directory` | 1 passed | 1 passed |
+| probe | `C:\Users\kln\PH6-LO~1` | **1 failed**, at exactly that assertion | **1 passed** |
+
+`windows-latest` puts `TEMP` under `runneradmin`, which shortens to `RUNNER~1`;
+a14's `C:\Users\kln` is already short and correctly cased, which is why the
+machine this project verifies on could never reproduce what CI was reporting.
+
+**The product message was never wrong** -- the resolved path is the one a user
+can paste into `git -C`. The expectation was, and it now asks the object under
+test which root it resolved, through the public `Scoop::root()`.
+
+**Observed green afterwards, rather than assumed:** all three jobs succeeded,
+and the `docs/` citation gate ran on **all three runners** with identical counts
+(35 files, 436 citations), which also settles the open question of whether
+`python3` exists on the Windows runner -- it does, and this is the first run in
+which that step ever executed there.
+
+## 12. Still outstanding
 
 1. **A non-elevated Windows session** -- §8. Three routes measured not to work.
    The test exists and is `#[ignore]`d; it needs one command in an ordinary
@@ -354,3 +402,13 @@ loudly if the session it is run from is elevated.
    open, and that no new one can be written into `src/` or `tests/`.
 4. **`docs/` has no drift check and will not get one from this round.** The
    number that says why is 221 of 421.
+5. **The idle precondition is enforceable on Windows and is still only prose on
+   macOS.** The standing rule covers both platforms; `scripts/idle-gate.ps1`
+   covers one. This round's own macOS mutation run was on a machine measured
+   **not** idle -- load 2.34 rising to 10.01, `syspolicyd` at 100% of one core
+   from its own builds -- which is stated in §9 rather than discovered later,
+   but stating it is what the Windows half no longer has to settle for.
+6. **The `docs/` gate reads `git ls-files`, so a file that has not been
+   `git add`ed is not scanned.** It skipped this document on its first run. CI
+   is unaffected, because a checkout only contains tracked files; a local run
+   before staging can still mislead.

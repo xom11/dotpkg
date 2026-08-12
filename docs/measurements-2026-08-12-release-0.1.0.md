@@ -25,16 +25,31 @@ cross-compiles from the x64 `windows-latest` runner without extra setup beyond
 MSVC libraries to be present on the image -- and it was going to be found out
 either here or by a failed tag.
 
-## 2. The checksums agree in three places
+## 2. The build is not byte-reproducible, and that nearly made this document lie
 
-| | `dotpkg-aarch64-pc-windows-msvc.exe` | `dotpkg-x86_64-pc-windows-msvc.exe` |
+The dispatch run's artifacts and the tag's artifacts are **different bytes from
+the same commit**:
+
+| | aarch64 | x86_64 |
 |---|---|---|
-| computed by CI, in the build job | `f00d78f2…` | `951456b4…` |
-| recomputed on the developer machine after download | `f00d78f2…` | `951456b4…` |
-| recomputed on a14 before running it | `f00d78f2…` | not run -- see §4 |
+| dispatch build (`workflow_dispatch`, no tag) | `f00d78f2…` | `951456b4…` |
+| **published build** (the tag, what a user downloads) | **`9daeae0c…`** | **`e50d092f…`** |
 
-Three independent computations of the same bytes, which is what makes the
-`SHA256SUMS` file beside the release mean something.
+Same source, same workflow, same runner image; this toolchain does not produce
+identical bytes twice. So the binary verified in §3's first pass was *a build of
+the commit* and not *the artifact*, and "the release binary was verified" would
+have been a claim about bytes nobody downloads. Caught by comparing hashes
+rather than by assuming a rebuild is the same rebuild.
+
+**The published bytes now agree in three independent computations:**
+
+| | `dotpkg-aarch64-pc-windows-msvc.exe` |
+|---|---|
+| written into `SHA256SUMS` by the publish job | `9daeae0c…` |
+| recomputed on the developer machine after `gh release download` | `9daeae0c…` |
+| recomputed on a14 immediately before running it | `9daeae0c…` |
+
+which is what makes the `SHA256SUMS` file beside the release mean something.
 
 ## 3. The aarch64 binary starts, and works, on real ARM64 hardware
 
@@ -42,7 +57,10 @@ Three independent computations of the same bytes, which is what makes the
 what it cross-compiled, so until this run nothing had ever started that
 artifact.
 
-Run on a14 from the downloaded bytes, read-only:
+Run on a14 from the downloaded bytes, read-only. **Done twice**: once against
+the dispatch build before the tag existed, and again against the published
+artifact once §2 showed the two were not the same bytes. Both passed; the second
+is the one that describes what a user gets.
 
 | | |
 |---|---|
@@ -63,10 +81,11 @@ landmark.
 
 ## 4. What is still unverified, and it is not small
 
-- **The x86_64 binary has never run on real hardware.** It ran on the
-  `windows-latest` runner, which executed its own `--version` in the build job,
-  and that is the whole of it. No x64 Windows machine has ever run dotpkg at
-  all -- which the README's "Verified on" table says in as many words.
+- **The x86_64 binary has never run on real hardware.** A build of it ran its
+  own `--version` on the `windows-latest` runner, and that is the whole of it --
+  and by §2 that was not even the published build. No x64 Windows machine has
+  ever run dotpkg at all, which the README's "Verified on" table says in as many
+  words.
 - **`apply` was not exercised from the release binary.** Only `status`, which
   mutates nothing. Every mutating path's evidence comes from the phase rounds
   and their own trees, not from this artifact.

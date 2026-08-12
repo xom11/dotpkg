@@ -930,7 +930,8 @@ fn a_fetch_moves_the_pin_forward() {
     );
 }
 
-/// `build.rs`'s manifest is present in the binary this test is running in.
+/// The execution-level manifest `build.rs` embeds is present in the binary this
+/// test is running in.
 ///
 /// # Why this test is in this file specifically
 ///
@@ -945,39 +946,61 @@ fn a_fetch_moves_the_pin_forward() {
 ///
 /// It was checked once -- by hand, on one machine, by reading the bytes of
 /// twelve test binaries -- and **nothing re-checks it**. The automatic Windows
-/// gate cannot: `windows-latest` was green on `e91f4b1`, which is an ancestor
-/// of the commit that added `build.rs`, with this file already compiling to
-/// `update-<hash>.exe`. The runner started that binary happily without any
-/// manifest, so CI has never been able to observe the failure this suppresses,
+/// gate cannot: `windows-latest` was green on `e91f4b1`, an ancestor of the
+/// commit that added `build.rs`, with this file already compiling to
+/// `update-<hash>.exe`. That runner started the binary happily with no manifest
+/// at all, so CI has never been able to observe the failure this suppresses,
 /// and a regression in `build.rs` would leave every automatic gate green.
 ///
-/// That is this project's fourth defect class one level up: a fix whose only
-/// verification is a person remembering to look. This makes it a gate that
-/// runs everywhere the suite runs, including on the runner that is blind to
-/// the symptom.
+/// # Why the needle is obfuscated, which is not decoration
 ///
-/// # What it checks
+/// The check is a byte search of the running executable for the level string
+/// an embedded manifest puts into its resources. **The first version of this
+/// test could not fail**: it spelled that string literally in its own assert
+/// message, so the search always found the test's own copy of it. Built and run
+/// against a deliberately neutered `build.rs`, it passed -- a gate that reports
+/// success when the thing it guards is gone, which is this project's second
+/// defect class, written inside the round whose document quotes that class.
 ///
-/// An embedded manifest puts the literal UTF-8 bytes `asInvoker` into the
-/// binary's resources, so the check is a byte search of the running
-/// executable, which is exactly what the manual check did.
+/// So the literal appears nowhere in this file. It is reconstructed at run time
+/// from a byte-shifted copy, and the assert message names it only indirectly.
+/// If you edit this test, do not write the level string out.
 #[cfg(windows)]
 #[test]
-fn this_test_binary_carries_the_as_invoker_manifest_build_rs_embeds() {
+fn this_test_binary_carries_the_execution_level_manifest_build_rs_embeds() {
     let exe = std::env::current_exe().expect("libtest always knows its own path");
     let bytes =
         std::fs::read(&exe).unwrap_or_else(|e| panic!("could not read {}: {e}", exe.display()));
 
-    let needle = b"asInvoker";
-    let found = bytes.windows(needle.len()).any(|w| w == needle);
+    // Each byte is one more than the byte it stands for, so the string this
+    // searches for does not exist anywhere in this binary except where a real
+    // embedded manifest put it.
+    const SHIFTED: &[u8] = b"btJowplfs";
+    let needle: Vec<u8> = SHIFTED.iter().map(|b| b - 1).collect();
+
+    // The obfuscation is only worth anything if it round-trips, and a silent
+    // typo in SHIFTED would make the search look for a string nothing has and
+    // turn this into a test that always fails for the wrong reason -- the back
+    // side of the same defect class. Pin the reconstruction itself.
+    assert_eq!(needle.len(), 9, "the shifted table is the wrong length");
+    assert_eq!(
+        needle[0] as char, 'a',
+        "the shifted table does not decode to the level string"
+    );
+    assert_eq!(
+        needle[2] as char, 'I',
+        "the level string is capitalised mid-word"
+    );
+
+    let found = bytes.windows(needle.len()).any(|w| w == needle.as_slice());
 
     assert!(
         found,
-        "{} carries no embedded asInvoker manifest, so Windows' UAC installer \
-         detection will refuse to start it from an ordinary session -- which is \
-         the failure build.rs exists to suppress, and which no CI runner has \
-         ever been able to reproduce. Check that build.rs still emits \
-         cargo::rustc-link-arg-tests=/MANIFEST:EMBED and /MANIFESTINPUT:.",
+        "{} carries no embedded execution-level manifest, so Windows' UAC \
+         installer detection will refuse to start it from an ordinary session \
+         -- the failure build.rs exists to suppress, and one no CI runner has \
+         ever been able to reproduce. Check that build.rs still emits both \
+         cargo::rustc-link-arg-tests lines.",
         exe.display()
     );
 }

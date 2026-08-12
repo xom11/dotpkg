@@ -372,11 +372,23 @@ a coincidence of platform: the run before the import fix reported 18 caught and
 5 unviable, and the run after reports 23 caught. Five mutants that had been
 silently exempt are now tested, and all five die.
 
-## 8b. Two findings from looking at Phase 6 rather than at this phase
+## 8b. What came from looking at Phase 6 rather than at this phase
 
-The independent post-merge audit this round was supposed to open with is
-queued and has not run. These two came from working through the prompt's own
-list of suspect surfaces while waiting, and both are about the previous round.
+**The independent post-merge audit this round was supposed to open with did not
+happen, by decision.** That is recorded here rather than left to be inferred
+from its absence, because the previous phase's Instance 2 and Instance 3 were
+found by exactly that audit and by nothing else, and this round's own prompt
+says so.
+
+What stands in for it is weaker in a specific way. The findings below came from
+*me* working through the prompt's ranked list of suspect surfaces. That is a
+second careful look, not a second pair of eyes, and the defects it is worst at
+finding are the ones whose author already believes they are fine -- which is
+the category both of the previous round's escapes belonged to.
+
+Three of the four ranked surfaces produced a finding; the fourth is checked and
+sound; one residual could not be closed at all. All of it is about the previous
+round rather than this one.
 
 ### 8b.1 A "still outstanding" item that had been closed 31 minutes after it was written
 
@@ -688,6 +700,15 @@ attributed otherwise above.
    a14, 11 of the 16 phantom entries correlate to scoop installs, so the
    population mechanism observed here may be ARP correlation rather than winget
    installation.
-7. **Item 17 and item 20 are untouched by this round**, and item 9 is closed
+7. **The independent post-merge audit of Phase 6 was not run**, by decision,
+   and the four surfaces the prompt ranked are covered unevenly without it: the
+   two citation gates and `build.rs` each produced a finding (§8b.1, §8b.2,
+   §8b.5), `sys.rs`'s three-runs claim was checked and holds (§8b.4), and **the
+   idle gate's thresholds still come from one machine per platform**. That last
+   one could not be closed here -- it needs hardware this round does not have. A
+   second macOS baseline was taken (11.62-13.62 % against the previous round's
+   14.42-15.68 %), but that is the same machine on a different day, not a second
+   machine.
+8. **Item 17 and item 20 are untouched by this round**, and item 9 is closed
    only in its second half -- there is still no scan-time source for a
    package's process names that this round is willing to ship.

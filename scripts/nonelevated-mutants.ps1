@@ -23,6 +23,23 @@
     failed in an unmutated tree" and aborts at the baseline. Naming the test is
     what keeps the baseline honest here.
 
+    WHY --test cli IS ALSO NOT OPTIONAL, and this one was measured the hard way.
+    tests/update.rs compiles to update-<hash>.exe, and Windows' UAC installer
+    detection flags any executable whose filename contains "update" (or
+    "install", "setup", "patch") as requiring elevation. From an ordinary session
+    that binary cannot be launched at all: cargo reports
+
+        could not execute process ...\update-<hash>.exe (never executed)
+        Caused by: The requested operation requires elevation. (os error 740)
+
+    and the baseline fails for a reason that has nothing to do with any test's
+    content. It is invisible from an elevated ssh session, which is how every
+    Windows run in this project's history has been done -- so "cargo test passes
+    on Windows" has only ever been measured with elevation. Restricting to the
+    one binary that holds the test under measurement side-steps it; making the
+    whole suite runnable unelevated is a separate decision, recorded as still
+    open.
+
     NOTE ON STYLE: no backtick appears anywhere in this file, including in
     comments. A backtick inside a comment is not a parse error, so a parse-check
     passes a file a backtick-check would fail; both gates exist and both run.
@@ -71,11 +88,17 @@ if (Test-Path $gate) {
 
 # --- the run --------------------------------------------------------------
 Push-Location $Tree
-$env:CARGO_TARGET_DIR = 'C:\Users\kln\ph6-target'
+# cargo-mutants manages its own build directories; pointing it at the shared one
+# the suite uses makes every mutant contend for a single target dir.
+Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host 'running cargo mutants -- this takes a few minutes, leave the window open'
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$mutantArgs = @('-f', 'src/sys.rs', '--re', 'elevated', '-j', '2', '--timeout', '600', '-o', $Out, '--', '--', '--include-ignored', 'on_an_ordinary_windows_session')
+# Two separate double-dash boundaries: cargo-test args, then libtest args. The
+# single-dash form the help describes does not reach libtest at all.
+$mutantArgs = @('-f', 'src/sys.rs', '--re', 'elevated', '-j', '2', '--timeout', '600', '-o', $Out,
+    '--', '--test', 'cli',
+    '--', '--include-ignored', 'on_an_ordinary_windows_session')
 $result = & cargo mutants @mutantArgs 2>&1 | ForEach-Object { ([string]$_).TrimEnd([char]13) }
 $code = $LASTEXITCODE
 $sw.Stop()

@@ -2327,12 +2327,34 @@ Windows run could settle.
 assertion tying `package_roots()` to the environment it reads now exists, and
 both survivors die: `vec![Default::default()]` on macOS for the first time, and
 **both** on Windows, measured by a `-j 2` run from a machine an idle gate
-certified quiet first. **15 is unchanged and is now the only thing the `sys.rs`
-gate still holds**, down from six mutants to one; a third route to a
-non-elevated session was measured not to work (launching through
-`Shell.Application` from an OpenSSH session runs in session 0 at High
-integrity), and `tests/cli.rs` now carries the `#[ignore]`d test that a desktop
-window would run. **20 is decided rather than measured further -- see below.**
+certified quiet first. **15 is closed too, and with it the whole `sys.rs`
+gate.** A non-elevated session was obtained by hand at the desktop -- session 1,
+`IsInRole` False, Medium Mandatory Level, all read from APIs other than the
+function under measurement -- and `elevated -> Some(true)` is **CAUGHT**. Five
+remote routes to such a session were tried first: three measured not to
+de-elevate (`runas /trustlevel:0x20000`, `schtasks /RL LIMITED`,
+`Shell.Application.ShellExecute` from OpenSSH, which stays in session 0 at High
+integrity) and two that produced no observation at all (`schtasks /IT`,
+duplicating explorer's token into `CreateProcessWithTokenW`).
+
+**And the rule this file has been refining for three phases gets its final
+form.** It said a mutation run on Windows would settle six; the residual round
+corrected that to three; the true statement is that `sys::elevated()` needs
+**three** runs -- macOS, elevated Windows, ordinary Windows -- because each is
+blind to what the other two see, and **no two of them together kill all six**.
+The one that needed explaining rather than counting is `:163`: inverting the
+`TokenIsElevated` comparison in an ordinary session moves the answer into
+`verdict`'s `(Some(true), Some(false)) => Some(false)` arm -- the measured
+restricted-token case, which exists because winget succeeded there -- so it
+returns the unmutated answer and the mutant is genuinely equivalent in that
+session while dying in the elevated one.
+
+**New, and larger than the item it came out of: the suite cannot be run in full
+from an ordinary Windows shell.** `tests/update.rs` builds `update-<hash>.exe`,
+which UAC installer detection flags as requiring elevation by filename alone, so
+cargo cannot launch it (`os error 740`). Every Windows run in this project's
+history was from an elevated ssh session, so "the suite passes on Windows" has
+always carried a condition nobody wrote down. **20 is decided rather than measured further -- see below.**
 **11 gains a correction that cuts the other way:** the 1.2-5.4 s success range
 this file records was itself measured on a busy machine and does not reproduce;
 on a machine proven idle before and after, 30 calls give **294-621 ms** in

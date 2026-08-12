@@ -275,8 +275,53 @@ recorded as such so a later round does not read it as settled:
 `isinrole_admin True`, `High Mandatory Level`, and refused with exit 1. It
 cannot pass from the wrong place.
 
-So the item still needs an ordinary PowerShell window opened on the desktop by
-hand. `tests/cli.rs` now carries the test that window
+**It was then run by hand from the desktop, and it closed the gate.** The
+session is non-elevated by two APIs independent of the function under
+measurement -- `session_id 1`, `IsInRole(Administrator) False`, **Medium
+Mandatory Level (S-1-16-8192)** -- with the machine gated IDLE at 0.97% first.
+
+**`6 mutants tested in 2m: 4 missed, 2 caught`**, and the four missed are named
+in the output, so the two caught are `sys.rs:139 -> None` and
+**`sys.rs:139 -> Some(true)`** -- the mutant the whole exercise existed for.
+
+**Every one of the six, across all three runs, and each MISSED has a mechanism
+rather than a shrug:**
+
+| mutant | Windows elevated | Windows ordinary | macOS | killed by |
+|---|---|---|---|---|
+| `sys.rs:139 -> None` | CAUGHT | **CAUGHT** | MISSED | either Windows session |
+| `sys.rs:139 -> Some(false)` | CAUGHT | MISSED | MISSED | elevated only |
+| `sys.rs:139 -> Some(true)` | MISSED | **CAUGHT** | MISSED | **ordinary only** |
+| `sys.rs:163 != -> ==` | CAUGHT | MISSED | MISSED | elevated only |
+| `sys.rs:216 -> Some(true)` | MISSED | MISSED | CAUGHT | macOS only |
+| `sys.rs:216 -> Some(false)` | MISSED | MISSED | CAUGHT | macOS only |
+
+- `:139 -> Some(false)` survives an ordinary session because `Some(false)` **is**
+  the correct answer there -- the exact mirror of `Some(true)` surviving an
+  elevated one.
+- `:216`'s two are in the `cfg(not(windows))` arm and are not compiled on
+  Windows at all, so both Windows runs are blind to them by construction.
+- **`:163` is the one that needed explaining, and the explanation is a
+  deliberate production decision rather than a hole.** In an ordinary session
+  `CheckTokenMembership` honours the filtered token's DENY_ONLY Administrators
+  group, so `in_admins` is `Some(false)`. Inverting the `TokenIsElevated`
+  comparison turns `is_elevated` from `Some(false)` into `Some(true)`, which
+  lands in `verdict`'s **third** arm -- `(Some(true), Some(false)) =>
+  Some(false)`, the measured restricted-token case that exists because winget
+  succeeded there and dotpkg must not refuse. That arm returns the same answer
+  the unmutated code returns, so the mutant is genuinely equivalent in this
+  session and dies in the elevated one, where `in_admins` is `Some(true)` and
+  the same flip changes the verdict.
+
+**So the rule the record needed is stronger than "run it on both platforms".**
+It is: **this function needs three runs -- macOS, an elevated Windows session,
+and an ordinary one -- because each is blind to what the other two can see, and
+no two of them together cover all six.** Phase 5 recorded a gate "holding six",
+the residual round corrected that to three, and the correct number was always
+zero-with-three-runs and six-with-any-two.
+
+`mutants_exit: 2` is cargo-mutants' code for "some mutants missed", not a
+failure; the baseline's `0s test` is one test running. `tests/cli.rs` now carries the test that window
 would run, `#[ignore]`d, asserting `elevated() == Some(false)` and failing
 loudly if the session it is run from is elevated.
 
@@ -406,10 +451,19 @@ which that step ever executed there.
 
 ## 12. Still outstanding
 
-1. **A non-elevated Windows session** -- §8. Three routes measured not to work.
-   The test exists and is `#[ignore]`d; it needs one command in an ordinary
-   PowerShell window on a14's desktop. This is the only thing still holding
-   `elevated -> Some(true)`, and therefore the last of the six.
+1. ~~A non-elevated Windows session~~ -- **done, §8.** `elevated -> Some(true)`
+   is CAUGHT, and with it items 15 and 19 are closed and the `sys.rs` gate holds
+   nothing. What replaces it is narrower and new: **the project's own test suite
+   cannot be run in full from an ordinary Windows shell.** `tests/update.rs`
+   compiles to `update-<hash>.exe`, and Windows' UAC installer detection flags
+   any executable whose name contains `update`, `install`, `setup` or `patch` as
+   requiring elevation; from a non-elevated session cargo reports
+   `The requested operation requires elevation. (os error 740)` and never runs
+   it. Every Windows run in this project's history has been from an elevated ssh
+   session, so "the suite passes on Windows" has always carried an unstated
+   condition. This round side-stepped it by scoping the mutation run to
+   `--test cli`; the two real fixes -- rename the test file, or give the test
+   binaries an `asInvoker` manifest -- are a decision nobody has made yet.
 2. **Item 20's observation** -- unchanged by this round. 70 contended rounds
    remains the bound. §7 above removes one of the arguments that had been read
    as evidence against the retry's delay.

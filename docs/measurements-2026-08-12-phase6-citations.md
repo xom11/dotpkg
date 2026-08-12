@@ -552,10 +552,43 @@ version of it:**
 | a zone-identifier stream | **negative**, same reason: 0 alternate data streams |
 | the same binary launched *directly* rather than by cargo | **unknown** -- this is the axis the corrected probe adds |
 
-`scripts/uac-name-probe.ps1` is rewritten to verify every launch **by output**
-and to separate the two axes -- three names (is it the name?) and two launchers,
-PowerShell versus cargo (is it who calls `CreateProcess`?). Until it has run, no
-mechanism is claimed.
+`scripts/uac-name-probe.ps1` was rewritten to verify every launch **by output**
+and to separate the two axes -- three names, and two launchers.
+
+### 13a. Run properly, it confirms the original explanation
+
+Same session, output-verified, one binary under three names:
+
+| name | keyword | test names printed | verdict |
+|---|---|---|---|
+| `update-<hash>.exe` (the original) | `update` | **0** | DID NOT RUN |
+| `ph6-neutral-probe.exe` | none | **24** | **RAN** |
+| `ph6-setup-probe.exe` | `setup` | **0** | DID NOT RUN |
+| the original, launched by cargo | `update` | 0 | DID NOT RUN, `os error 740` |
+
+**The filename is the cause, and it is a class rather than one file** -- a
+*different* keyword fails the same way, and a name with none runs and prints 24
+test names. Same bytes, same sha256; the name is the only variable. Axis B adds
+nothing: cargo and PowerShell fail identically, so it was never about who calls
+`CreateProcess`.
+
+**And the two `exit=0` values next to `DID NOT RUN` are the proof of the first
+probe's flaw**, not an inconsistency: the process never started, and
+`$LASTEXITCODE` kept the previous command's zero. The first probe read exactly
+that and called it a launch.
+
+**So the sequence, kept whole because the shape of it is the lesson:** a correct
+explanation was offered without being tested; an unsound probe appeared to
+refute it; the correct explanation was withdrawn on that evidence; a probe that
+checked *output* rather than an exit code restored it. The original claim was
+never the problem. **Asserting it without measuring it was**, and so was
+accepting a refutation that measured nothing.
+
+**One cosmetic flaw remains in the probe and is not worth a round trip:** its
+error-scan matched the substring `cannot` inside the test name
+`a_winget_resolution_cannot_carry_a_commit`, so the RAN row prints a spurious
+`error:` line. The verdict does not depend on it -- 24 printed test names is the
+verdict.
 
 **Why all of this is in the record rather than tidied away.** The first
 explanation was plausible, fitted the evidence, named a real Windows behaviour,

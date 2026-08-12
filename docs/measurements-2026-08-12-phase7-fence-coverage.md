@@ -662,7 +662,15 @@ attributed otherwise above.
    cascade** because the local shell ate `$` and the quotes. It is not a
    quoting problem to be solved; the working form is a `.ps1` file, and I went
    back to it three times before writing that down.
-5. **I predicted 37 warnings and measured 29, then 27.** The prediction ignored
+5. **I chose an artefact prefix and never captured a listing of the directory
+   before starting.** Cleanup removed 59 entries, refused nothing, and left
+   zero -- but "the machine is as it was found" then rests on spot-checking
+   items by name rather than on a diff. The final listing contains a file
+   called `$(Test-Path`, obviously somebody's shell mishap, and nothing about
+   inspecting it could say whose. It took a timestamp check to rule it out:
+   created 2026-07-10, a month before this round. One `Get-ChildItem` at the
+   start would have made that a comparison instead of an investigation.
+6. **I predicted 37 warnings and measured 29, then 27.** The prediction ignored
    that `status` produces no action at all for a package whose state cannot be
    read, and that a package the fence *catches* is skipped rather than warned
    about. Both are the code being right and the prediction being wrong -- but

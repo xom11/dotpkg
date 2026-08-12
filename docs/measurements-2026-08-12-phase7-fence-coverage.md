@@ -438,6 +438,43 @@ empty, re-run: passes.
 **Nothing about that test looked wrong.** It was caught only because a gate is
 not accepted here until it has been watched failing.
 
+### 8b.4 The three-runs claim: checked, and it is stronger than it was stated
+
+The prompt ranks this one by consequence -- if `src/sys.rs` does not really need
+three mutation runs, the conclusions recorded for still-open items 15 and 19 go
+with it. Checked on two levels rather than taken on trust.
+
+**The six mutants still exist, at the lines the record names.** `cargo mutants
+--list --file src/sys.rs` on this tree reports 15 mutants, and the six the claim
+is about are all present: three at `:139`, one at `:163`, two at `:216`.
+
+**The arithmetic was re-derived from the recorded table by machine, not by
+eye:**
+
+| sessions | mutants covered | missed |
+|---|---|---|
+| elevated Windows alone | 3 of 6 | |
+| ordinary Windows alone | 2 of 6 | |
+| macOS alone | 2 of 6 | |
+| elevated + ordinary | **4 of 6** | both `:216` |
+| elevated + macOS | **5 of 6** | `:139 -> Some(true)` |
+| ordinary + macOS | **4 of 6** | `:139 -> Some(false)`, `:163` |
+| **all three** | **6 of 6** | nothing |
+
+So *three runs suffice* and *no two suffice* both hold.
+
+**And the claim is stronger than the record states it.** It is presented as an
+empirical result about three particular runs. Two of the three gaps are
+**structural** and could not have come out otherwise: `:216`'s pair is in the
+`cfg(not(windows))` arm, so no Windows build ever *compiles* it, and
+`:139 -> Some(true)` is an equivalent mutant in an elevated session because
+`Some(true)` is the correct answer there. Only the third gap -- `:163` and
+`:139 -> Some(false)` needing elevation -- rests purely on measurement.
+
+**No finding here.** Recorded because "checked and found sound" is a result, and
+because an audit that only ever reports problems tells a reader nothing about
+what was looked at.
+
 ## 9. Verification
 
 **The tree is `b445482`**, and every figure here was derived on it unless

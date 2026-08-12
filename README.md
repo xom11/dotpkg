@@ -158,8 +158,36 @@ nothing installed and nothing declared warns once per run, because a stale or
 misspelled entry protects nothing and silence about that is worse than the
 warning; so does an entry on a package winget reported with no source at all,
 since dotpkg cannot establish such a package's state and skips it before any
-process check. A `pkg.toml` with no `[winget.guard]` table behaves exactly as
-before.
+process check.
+
+**And dotpkg now tells you which entry you are missing.** When it is about to
+upgrade or remove a winget package that neither half of the fence can see --
+no `[winget.guard]` entry, and no package directory for the path signal to
+match against -- it says so once, on stderr, naming the package, the guesses it
+would otherwise be relying on, and the line to add:
+
+```console
+warning: pkg.toml [winget.guard] AutoHotkey.AutoHotkey: winget created no
+package directory for this id, so dotpkg cannot recognise its processes by
+path, and the only names it will match are guesses ("autohotkey"). If it runs
+under any other name, add "AutoHotkey.AutoHotkey" = ["<process name>"] under
+[winget.guard] -- otherwise dotpkg may upgrade it while it is running
+```
+
+It is keyed on a **pending change**, not on being installed: a line for every
+unguarded package would be 32 lines on the measured machine, and a package
+dotpkg is not about to touch cannot be hurt by a fence that cannot see it. On a
+synthetic config declaring all 41 of that machine's installed winget ids with a
+change pending for each, 27 of the 30 changes warn, and the 3 that stay silent
+are exactly the `portable` ones the path signal already covers. It adds no
+coverage; what it removes is the silence. An install never warns -- nothing is
+installed yet, so nothing of it can be running -- and neither does a winget
+downgrade, which is refused rather than performed. See
+[the fence-coverage measurements](docs/measurements-2026-08-12-phase7-fence-coverage.md).
+
+A `pkg.toml` with no `[winget.guard]` table is otherwise unchanged: nothing
+new is installed, skipped or refused because of this, and every line it adds
+goes to stderr.
 
 ### Flags
 

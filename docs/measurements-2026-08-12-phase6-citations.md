@@ -372,9 +372,18 @@ loudly if the session it is run from is elevated.
 
 ## 9. Verification
 
-- **macOS**: `cargo test --all` **646 passed / 0 failed**, **15** `test result:`
-  lines. `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
-  clean on the host and on **`aarch64-pc-windows-msvc`**.
+**The tree this round ends on is `8931bab`**, and every figure below that is not
+explicitly attributed to an earlier commit was re-derived on it.
+
+- **macOS**: `cargo test --all` **647 passed / 0 failed**, **15** `test result:`
+  lines, and `--list` agrees at **647**. `cargo fmt --check` clean,
+  `cargo clippy --all-targets -D warnings` clean on the host and on
+  **`aarch64-pc-windows-msvc`**. The count read **646** for most of this round;
+  the 647th is the citation gate's own parser test, added by the whole-branch
+  review below.
+- **The `docs/` gate passes, and its total is deliberately not quoted** -- see
+  §4. `0 unresolvable, 0 ambiguous, 0 past end of file` is the claim that stays
+  true.
 - **Windows**, shipped as a tarball carrying `SHIPPING-SHA.txt` and a
   `SHIPPING-MANIFEST.txt` naming a sha256 for all **73** files:
   `manifest entries : 73     verified equal : 73`, `mismatched : 0    missing :
@@ -407,6 +416,18 @@ loudly if the session it is run from is elevated.
   returns **646** names including
   `on_an_ordinary_windows_session_elevated_answers_some_false`, which did not
   exist in the previous tree.
+- **Which Windows run covers which tree, stated because the manual leg stops
+  partway.** The a14 runs describe `b795d9e`, `060a124`, `e91f4b1` and
+  `8f087524`; the last of those is where a14's build environment was cleaned up.
+  Three commits land after it -- `tests/bucket.rs`'s widened assertion,
+  `tests/citations.rs`'s parser test, and documentation -- and the Windows leg
+  for those is **CI's `windows-latest` job, green on `8931bab`** along with
+  `ubuntu-latest` and `macos-latest`.
+
+  **That substitution is only honest because of §11.** For ten commits that job
+  was red and unwatched, and the manual apparatus was doing its work in
+  ignorance of it; a Windows gate nobody reads cannot stand in for one somebody
+  ran. It is green and watched now, so it can.
 - **Mutation runs on both platforms**, `-j 2`, 0 TIMEOUT, machine state recorded
   beside each. The macOS machine was **not** idle for its run (load 2.34 rising
   to 10.01, `syspolicyd` at 100% of one core from this round's own builds) and

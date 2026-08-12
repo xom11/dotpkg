@@ -279,12 +279,39 @@ All three from `docs/measurements-2026-08-12-phase8-release-apply.md` §7.
 
 - **27. `update` and `apply` leave `.bak` files beside what they rewrite, and
   nothing says so.** Measured: after one round, `pkg.lock.bak` held the previous
-  lock and `state.json.bak` the previous state. Keeping the prior content is the
-  durable-save path working as intended; **leaving the files** is undocumented
-  and uncleaned, so a user running these commands in their dotfiles repository
-  accumulates them next to files they do commit. Decide whether they are a
-  feature (then document and name them) or debris (then remove them), rather
-  than leaving the answer to whoever notices first.
+  lock and `state.json.bak` the previous state.
+
+  ~~a user running these commands in their dotfiles repository **accumulates**
+  them next to files they do commit~~ — **wrong, and corrected on 2026-08-12 by
+  reading the code rather than the artefacts.** The path is fixed
+  (`with_extension("toml.bak")`), so there is at most **one** `.bak` per managed
+  file and it is overwritten in place. Three files, ever. Nothing accumulates.
+
+  **What is actually true, and it is asymmetric by location.** Production writes
+  a `.bak` in three places — `State::save`, `lock`'s writer and
+  `config_edit::save` — and **reads one in none**: the only three reads in the
+  crate sit after the `#[cfg(test)]` boundary in their files, and they assert
+  that the write happened. That is deliberate rather than dead, and the comment
+  at the site says so: the displaced file is *"still readable **by hand**"*. It
+  is an artefact for a human, not an input to the program.
+
+  The decision is therefore not "feature or debris" but **which of the three**:
+
+  - `state.json.bak` lives in `%LOCALAPPDATA%`, is invisible to the user's
+    version control, and backs up **the one file that is not recoverable any
+    other way** — `state.json` is deliberately not committed. Keep.
+  - `pkg.lock.bak` and `pkg.toml.bak` land in the user's dotfiles repository,
+    beside two files the design says are **committed**. Git is a strictly better
+    backup than a `.bak` of a file already under version control, and the cost is
+    a permanently dirty `git status` that every user must diagnose
+    independently. These two are the ones to drop, with a README line saying
+    recovery is `git checkout`.
+
+  One technical note against dropping all three: the write is tmp → `sync_all` →
+  `rename`, and a failed `rename` leaves the original untouched, so the `.bak`
+  guards a window that barely exists — on POSIX. Windows is the only platform
+  this tool runs on, and its rename-over-existing has more variants, so the
+  argument for keeping `state.json.bak` is real rather than ceremonial.
 - **28. Three installed scoop packages cannot be read at all on a14** —
   `actionlint`, `antigravity`, `zellij`, each `cannot read manifest.json: The
   path cannot be traversed because it contains an untrusted mount point. (os

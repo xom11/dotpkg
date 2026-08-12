@@ -840,3 +840,66 @@ fn a_root_reached_through_a_symlink_still_matches_running_processes() {
         "aliased root must still match"
     );
 }
+
+// -- The `NotFound` idiom: unreadable is not empty -------------------------
+//
+// `Scoop::scan` maps one io error to a valid empty machine and every other to
+// a failure:
+//
+//     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Scan::default()),
+//     Err(e) => return Err(e.into()),
+//
+// Replacing that guard with `true` makes **every** read failure read as "this
+// machine has no scoop packages". A mutation run found it surviving, and no
+// previous phase had recorded it, because nothing in the suite could produce a
+// read_dir error that is not `NotFound`.
+//
+// **Why it is the most dangerous of the survivors rather than one more of
+// them.** An empty scan is not a wrong number, it is the input that makes every
+// owned package undeclared-and-absent, and `mass_prune_guard` is the only thing
+// left between that and a plan full of prunes -- a guard the design itself
+// describes as catching the case "far too late". So this mutant converts a
+// permissions problem into a proposal to uninstall everything dotpkg owns.
+//
+// `#[cfg(unix)]` for the same reason as the symlink test above: mode bits are
+// how a directory is made unreadable here, and asserting the Windows
+// equivalent from a macOS machine would be claiming something nobody measured.
+#[cfg(unix)]
+#[test]
+fn an_apps_directory_that_cannot_be_read_is_an_error_and_never_an_empty_machine() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    // A package inside, so "empty" is not merely the wrong answer, it is a
+    // false statement about a directory that has something in it.
+    app(dir.path(), "fzf", "0.74.2", "arm64", "main");
+    let apps = dir.path().join("apps");
+
+    fs::set_permissions(&apps, fs::Permissions::from_mode(0o000)).unwrap();
+    // The control that keeps the assertion honest: root ignores mode bits
+    // entirely, so a suite running as root would read this directory fine and
+    // everything below would pass while measuring nothing.
+    let readable_anyway = fs::read_dir(&apps).is_ok();
+    let scanned = Scoop::new(dir.path().to_path_buf()).scan();
+    // Restored before any assertion fires, or a failure here is buried under a
+    // TempDir cleanup panic about a directory it cannot traverse.
+    fs::set_permissions(&apps, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        !readable_anyway,
+        "this test needs a directory it cannot read, and this process could read \
+         it anyway -- running as root defeats the mode bits, so nothing below \
+         would be measuring what it claims"
+    );
+
+    let err = scanned.expect_err(
+        "an unreadable apps/ must fail the scan. Returning an empty Scan here \
+         says 'no scoop packages are installed', which is the one input that \
+         turns every owned package into a prune candidate",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("permission"),
+        "the failure must name what actually went wrong: {msg}"
+    );
+}

@@ -89,6 +89,70 @@ fn a_not_found_message_is_not_a_table_and_is_not_silently_empty() {
 }
 
 #[test]
+fn a_column_boundary_landing_inside_a_multibyte_character_does_not_panic() {
+    // **Why this is synthetic rather than a fixture.** Every file under
+    // `tests/fixtures/winget/` is raw stdout that `winget.exe` actually wrote
+    // on a14 (`PROVENANCE.md`), and a14 is an en-US machine whose 141 captured
+    // rows are pure ASCII. Fabricating a fixture would put invented bytes in a
+    // directory whose whole value is that nothing there was invented. So the
+    // input is inline, exactly as
+    // `a_header_that_is_not_the_shape_this_parser_measured_is_refused` below
+    // already does for a header nobody captured either.
+    //
+    // **What it covers that 15 real captures cannot.** `parse_list` slices
+    // every field by BYTE offset taken from the header. `floor_char_boundary`
+    // exists so that an offset landing mid-character walks back to a boundary
+    // instead of panicking -- and with only ASCII fixtures, that loop had never
+    // executed once. Measured before this test: 7 of its 12 mutants survived,
+    // including `-=` becoming `+=`, because nothing reached the body at all.
+    // A non-ASCII package name is not exotic; it is what any non-en-US machine
+    // is one install away from.
+    //
+    // The layout, computed rather than eyeballed: `Id` starts at byte 8, and
+    // the three bytes of `日` occupy 6, 7 and 8 -- so the Id column's own
+    // offset is the LAST byte of that character, and is not a boundary.
+    let header = "Name    Id      Version";
+    let row = "Zoxide日       1.0.0";
+    let table = format!("{header}\r\n{}\r\n{row}\r\n", "-".repeat(header.len()));
+
+    let rows = parse_list(&table).expect("a multibyte name must parse, not refuse");
+
+    assert_eq!(rows.len(), 1, "got {rows:?}");
+    // Flooring walks the split character to the FOLLOWING field rather than
+    // cutting it in half: `Name` ends before it, `Id` begins with it. Both
+    // halves are asserted because `-=` mutated to `+=` also avoids the panic --
+    // it walks UP to the next boundary instead -- and would put the character
+    // in `Name` while leaving `Id` empty, which drops the row entirely.
+    assert_eq!(rows[0].name, "Zoxide");
+    assert_eq!(rows[0].id, "日");
+    // The Version column's own offset is a clean boundary, so it must be
+    // untouched by any of this.
+    assert_eq!(rows[0].version, "1.0.0");
+}
+
+#[test]
+fn the_same_layout_in_pure_ascii_splits_at_the_offset_itself() {
+    // The control for the test above. Same columns, same byte width, one
+    // character per byte -- so byte 8 IS a boundary and no walking back
+    // happens. If both tests agreed on the split, the one above would not be
+    // showing that `floor_char_boundary` did anything.
+    // Seven spaces, not six: `Zoxide日` and `Zoxideabc` are both 9 BYTES, so
+    // the padding has to match byte for byte or `Version` lands mid-number and
+    // the two tests stop being comparable. The first draft of this control had
+    // six and failed with `id == "c      1"`, which is the control doing its
+    // job on itself.
+    let header = "Name    Id      Version";
+    let row = "Zoxideabc       1.0.0";
+    let table = format!("{header}\r\n{}\r\n{row}\r\n", "-".repeat(header.len()));
+
+    let rows = parse_list(&table).unwrap();
+    assert_eq!(rows.len(), 1, "got {rows:?}");
+    assert_eq!(rows[0].name, "Zoxideab", "the cut falls at byte 8 exactly");
+    assert_eq!(rows[0].id, "c");
+    assert_eq!(rows[0].version, "1.0.0");
+}
+
+#[test]
 fn a_header_that_is_not_the_shape_this_parser_measured_is_refused() {
     // The header is English and therefore locale-dependent. Guessing offsets
     // on an unrecognised header reports an empty machine -- and an empty

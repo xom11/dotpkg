@@ -508,6 +508,18 @@ fn main() -> Result<()> {
                 &running,
                 &unscannable,
             );
+            // After the plan, because the question is "which pending change is
+            // dotpkg unable to protect" and there is no pending change until
+            // the plan exists. To stderr, beside the other guard warnings,
+            // rather than into the table `render` prints: Phase 5 spent itself
+            // removing lines from that table.
+            for w in &dotpkg::apply::unprotected_winget_changes(
+                &plan,
+                &declared.winget.guard,
+                &installed,
+            ) {
+                eprintln!("warning: {w}");
+            }
             print!("{}", dotpkg::render::render(&plan, show_unmanaged));
         }
         Command::Apply {
@@ -560,6 +572,17 @@ fn main() -> Result<()> {
                 &d.running,
                 &unscannable,
             );
+            // The same call as `status`', and it matters more here: `status`
+            // only describes what would happen, and this is the path that does
+            // it. See the `status` arm for why it sits after the plan and goes
+            // to stderr.
+            for w in &dotpkg::apply::unprotected_winget_changes(
+                &plan,
+                &d.declared.winget.guard,
+                &installed,
+            ) {
+                eprintln!("warning: {w}");
+            }
             print!("{}", dotpkg::render::render(&plan, show_unmanaged));
 
             if clone_missing_buckets {

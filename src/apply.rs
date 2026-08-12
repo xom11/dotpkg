@@ -1180,6 +1180,112 @@ pub fn sample_fence_with_roots(
     crate::backend::running_set(scoop, &winget_ids, winget_roots, procs)
 }
 
+/// Which winget packages this run would change while dotpkg has no way to tell
+/// whether they are running.
+///
+/// **The hole this names, in numbers rather than in principle.** The fence has
+/// two halves. The path half (`backend::winget::running_ids`) can only ever fire
+/// for a package that owns a directory under a winget package root, and winget
+/// creates one only for a `portable` installer: measured on a14 on 2026-08-12,
+/// **4 of 41** installed ids, with no exception in either direction across all
+/// eight installer types present. The name half depends on
+/// `backend::winget::guard_names`' two guesses, which are guesses -- for
+/// `BurntSushi.ripgrep.MSVC` they are `msvc` and `ripgrep msvc`, and the process
+/// is `rg`. A user who writes no `[winget.guard]` entry for one of the other 37
+/// therefore gets no protection, **and until this function nothing said so**:
+/// `docs/phase5-notes.md`'s still-open item 9 records exactly that, that dotpkg
+/// "cannot tell them which entry they are missing".
+///
+/// **Why it is keyed on a pending change rather than on being installed.** A
+/// line per unguarded installed package would be 37 lines on the measured
+/// machine, which is a flood and not information -- and Phase 5 spent itself
+/// deleting lines from `status` for that reason. A package dotpkg is not about
+/// to touch cannot be damaged by a fence that cannot see it, so the moment the
+/// sentence is worth printing is the moment there is a change pending for it.
+/// `Action::Install` is deliberately not one of those moments: nothing is
+/// installed yet, so nothing of it can be running.
+///
+/// The three shapes that *are* moments each replace or remove a live
+/// installation, and each names itself in the message, because "may upgrade it
+/// while it is running" is actionable in a way that "is unprotected" is not.
+pub fn unprotected_winget_changes(
+    plan: &Plan,
+    guard: &std::collections::BTreeMap<Name, Vec<String>>,
+    installed: &[Installed],
+) -> Vec<String> {
+    unprotected_winget_changes_with_roots(
+        plan,
+        guard,
+        installed,
+        &crate::backend::winget::package_roots(),
+    )
+}
+
+/// `unprotected_winget_changes`' tested seam, against roots the caller
+/// supplies. The same split, and for the same reason, as
+/// `sample_fence` / `sample_fence_with_roots`: production reads the environment
+/// once, and a test can hand this one a directory it built.
+pub fn unprotected_winget_changes_with_roots(
+    plan: &Plan,
+    guard: &std::collections::BTreeMap<Name, Vec<String>>,
+    installed: &[Installed],
+    roots: &[PathBuf],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut said = std::collections::BTreeSet::new();
+
+    for action in &plan.actions {
+        // Only the shapes that touch an existing installation. Matching on the
+        // variant rather than on a "does it change something" helper is
+        // deliberate: `Action::Install` differs from these three by what is on
+        // disk, not by whether it acts, so a shared predicate would sweep it in.
+        let (name, verb) = match action {
+            Action::Upgrade { backend, name, .. } if backend == WINGET => (name, "upgrade"),
+            Action::Downgrade { backend, name, .. } if backend == WINGET => (name, "downgrade"),
+            Action::Prune { backend, name, .. } if backend == WINGET => (name, "remove"),
+            _ => continue,
+        };
+
+        // The user named the process themselves: that is the whole protection
+        // this warning asks for, so asking twice would be noise.
+        if guard.contains_key(name) {
+            continue;
+        }
+        // The path half can fire for this package, so it is covered by the
+        // signal that needs no declaration at all.
+        if crate::backend::winget::has_package_dir(roots, name) {
+            continue;
+        }
+        if !said.insert(name.clone()) {
+            continue;
+        }
+
+        // Read out of the scan row rather than re-derived, for the reason
+        // `guard_for`'s own doc comment gives: the display name is only
+        // available at scan time, and re-deriving here would silently drop the
+        // guess that catches Google Chrome.
+        let guesses = guard_for(name, installed);
+        let guesses = if guesses.is_empty() {
+            "none at all".to_string()
+        } else {
+            guesses
+                .iter()
+                .map(|g| format!("{g:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        out.push(format!(
+            "pkg.toml [winget.guard] {name}: winget created no package directory for this id, \
+             so dotpkg cannot recognise its processes by path, and the only names it will \
+             match are guesses ({guesses}). If it runs under any other name, add {name} = \
+             [\"<process name>\"] under [winget.guard] -- otherwise dotpkg may {verb} it \
+             while it is running"
+        ));
+    }
+    out
+}
+
 pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<Driver> {
     let declared = crate::config::load(config)?;
     let locked = crate::lock::load_or_empty(lock)?;
@@ -3592,6 +3698,226 @@ mod tests {
             "a same-named SCOOP row must not be mistaken for the winget scan \
              row; with no matching winget row, guard_for must fall back to \
              the id-derived guess: {fallback:?}"
+        );
+    }
+
+    /// A helper for the fence-coverage tests below: one winget `Installed`
+    /// carrying whatever `guard_names` would have guessed for it.
+    fn winget_row(id: &str, guesses: &[&str]) -> Installed {
+        Installed {
+            backend: WINGET.to_string(),
+            name: Name::new(id),
+            version: "1.0.0".to_string(),
+            arch: None,
+            bucket: None,
+            bins: guesses.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn upgrade_of(id: &str) -> Action {
+        Action::Upgrade {
+            backend: WINGET.into(),
+            name: Name::new(id),
+            from: "1.0.0".into(),
+            to: "2.0.0".into(),
+            arch: None,
+        }
+    }
+
+    #[test]
+    fn a_winget_change_dotpkg_cannot_see_by_path_and_has_no_guard_entry_for_is_reported() {
+        // The measured hole this exists to close: on a14, winget creates a
+        // package directory for 4 of 41 installed ids -- every `portable` one
+        // and no other -- so for the other 37 the path signal can never fire.
+        // With no `[winget.guard]` entry either, the only names left are
+        // `guard_names`' guesses, and those are measured wrong for the one
+        // package anybody checked: `BurntSushi.ripgrep.MSVC` guesses `msvc`
+        // and `ripgrep msvc`, and the process is `rg`.
+        //
+        // Before this, that user got no protection and no sentence saying so.
+        let empty_root = tempfile::tempdir().unwrap();
+        let roots = vec![empty_root.path().to_path_buf()];
+
+        let plan = Plan {
+            actions: vec![upgrade_of("BurntSushi.ripgrep.MSVC")],
+        };
+        let installed = vec![winget_row(
+            "BurntSushi.ripgrep.MSVC",
+            &["msvc", "ripgrep msvc"],
+        )];
+
+        let out = unprotected_winget_changes_with_roots(
+            &plan,
+            &std::collections::BTreeMap::new(),
+            &installed,
+            &roots,
+        );
+
+        assert_eq!(out.len(), 1, "expected exactly one warning, got {out:?}");
+        let w = &out[0];
+        assert!(
+            w.contains("BurntSushi.ripgrep.MSVC"),
+            "the warning must name the package the user has to act on: {w}"
+        );
+        assert!(
+            w.contains("[winget.guard]"),
+            "the warning must name the section the entry goes in: {w}"
+        );
+        assert!(
+            w.contains("msvc"),
+            "the warning must name the guesses, so the user can judge whether \
+             they are right rather than take dotpkg's word for it: {w}"
+        );
+    }
+
+    #[test]
+    fn a_winget_change_the_path_signal_can_see_is_not_reported() {
+        // The first of the two ways a package IS protected, and the one that
+        // needs no declaration: winget gave it a package directory, so
+        // `running_ids` can match a process running out of it. This is the
+        // control that stops the warning from firing on all 41 ids instead of
+        // the 37 it means.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(
+            root.path()
+                .join("burntsushi.ripgrep.msvc_Microsoft.Winget.Source_8wekyb3d8bbwe"),
+        )
+        .unwrap();
+        let roots = vec![root.path().to_path_buf()];
+
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![upgrade_of("BurntSushi.ripgrep.MSVC")],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("BurntSushi.ripgrep.MSVC", &["msvc"])],
+            &roots,
+        );
+        assert!(
+            out.is_empty(),
+            "a package the path signal covers must not be reported as invisible: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_change_with_a_declared_guard_entry_is_not_reported() {
+        // The other way a package is protected: the user answered the question
+        // this warning asks. Asking again would be the flood.
+        let empty_root = tempfile::tempdir().unwrap();
+        let mut guard = std::collections::BTreeMap::new();
+        guard.insert(Name::new("BurntSushi.ripgrep.MSVC"), vec!["rg".to_string()]);
+
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![upgrade_of("BurntSushi.ripgrep.MSVC")],
+            },
+            &guard,
+            &[winget_row("BurntSushi.ripgrep.MSVC", &["msvc"])],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert!(
+            out.is_empty(),
+            "a package with a declared guard entry must not be warned about: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_install_is_not_reported_because_nothing_of_it_can_be_running_yet() {
+        // `Install` is the one acting shape that cannot damage a live process:
+        // there is no installation to replace. Keyed on the variant rather than
+        // on "does it change something", which would sweep this in.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Install {
+                    backend: WINGET.into(),
+                    name: Name::new("Obsidian.Obsidian"),
+                    version: "1.10.0".into(),
+                    arch: None,
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert!(
+            out.is_empty(),
+            "an install has nothing installed to be running: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_scoop_change_is_not_reported_by_the_winget_fence_coverage_check() {
+        // Scoop's path signal is a different mechanism with a different root,
+        // and it covers every scoop package rather than 4 of 41. A warning
+        // about a missing `[winget.guard]` entry for a scoop package would send
+        // the user to edit a table that cannot affect it.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Upgrade {
+                    backend: SCOOP.into(),
+                    name: Name::new("ripgrep"),
+                    from: "14.1.0".into(),
+                    to: "15.2.0".into(),
+                    arch: None,
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert!(
+            out.is_empty(),
+            "scoop is not this check's business: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_package_directory_check_matches_a_directory_the_fence_would_match_and_no_other() {
+        // The rule is shared with `running_ids` through
+        // `backend::winget::segment_names_id`, and this pins both ends of it
+        // from the directory side. A directory that merely STARTS with the id
+        // belongs to a different package -- `PhatMT97.VKey.Classic_…` is a real
+        // one on a14, sitting beside `PhatMT97.VKey_…` -- and treating it as a
+        // match would silence the warning for the wrong package.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(
+            root.path()
+                .join("phatmt97.vkey.classic_Microsoft.Winget.Source"),
+        )
+        .unwrap();
+        let roots = vec![root.path().to_path_buf()];
+
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![upgrade_of("PhatMT97.VKey")],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("PhatMT97.VKey", &["vkey"])],
+            &roots,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "`PhatMT97.VKey.Classic_…` is a different package's directory and must not \
+             be read as covering `PhatMT97.VKey`: {out:?}"
+        );
+
+        // And the exact-name form, which winget does not currently produce but
+        // `segment_names_id` accepts, does cover it.
+        std::fs::create_dir(root.path().join("phatmt97.vkey")).unwrap();
+        let covered = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![upgrade_of("PhatMT97.VKey")],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("PhatMT97.VKey", &["vkey"])],
+            &roots,
+        );
+        assert!(
+            covered.is_empty(),
+            "an exactly-named directory covers it: {covered:?}"
         );
     }
 

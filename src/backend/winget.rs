@@ -359,18 +359,60 @@ pub(crate) fn running_ids(
                 continue;
             };
             for id in scanned {
-                let key = id.key();
-                let hit = seg == key
-                    || seg
-                        .strip_prefix(key)
-                        .is_some_and(|tail| tail.starts_with('_'));
-                if hit {
+                if segment_names_id(seg, id.key()) {
                     out.insert(id.clone());
                 }
             }
         }
     }
     out
+}
+
+/// Does one path segment under a winget package root belong to this id?
+///
+/// Winget names a package directory `<Id>_<SourceIdentifier>`, so the segment
+/// is the id itself or the id followed by an underscore. Both `seg` and `key`
+/// must already be folded; `Name::key` and `running_ids`' own `fold` produce
+/// them that way.
+///
+/// **Extracted so exactly one rule exists.** `running_ids` decides which
+/// packages the fence can *see*, and `has_package_dir` below decides which
+/// packages `apply::unprotected_winget_changes_with_roots` tells the user it
+/// *cannot* see. Two copies of this comparison that drifted apart would make
+/// dotpkg warn about a package the fence covers, or stay silent about one it
+/// does not -- and the second of those is the failure this whole warning
+/// exists to end.
+pub(crate) fn segment_names_id(seg: &str, key: &str) -> bool {
+    seg == key
+        || seg
+            .strip_prefix(key)
+            .is_some_and(|tail| tail.starts_with('_'))
+}
+
+/// Does any winget package root hold a directory belonging to this id?
+///
+/// This is the *capability* question, not the *liveness* one: `running_ids`
+/// asks whether a live process runs from such a directory, and this asks
+/// whether such a directory exists for the fence to ever match against. A
+/// package with no directory here is invisible to the path signal no matter
+/// what is running.
+///
+/// **Measured on a14, 2026-08-12:** a directory exists for exactly the 4
+/// `portable (zip)` ids of the 41 installed, and for none of the other 37 --
+/// no exception in either direction. An unreadable root answers "no", which is
+/// the same answer an absent one gives and the safe direction: it produces a
+/// warning the user can dismiss rather than silence they cannot notice.
+pub(crate) fn has_package_dir(roots: &[std::path::PathBuf], name: &Name) -> bool {
+    let key = name.key();
+    roots.iter().any(|root| {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return false;
+        };
+        entries.flatten().any(|e| {
+            e.file_type().is_ok_and(|t| t.is_dir())
+                && segment_names_id(&e.file_name().to_string_lossy().to_ascii_lowercase(), key)
+        })
+    })
 }
 
 /// Turn `parse_list`'s rows into a `Scan`: one fact per id, or an admission

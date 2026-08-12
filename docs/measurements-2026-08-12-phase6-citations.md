@@ -147,8 +147,13 @@ re-pointed.** They were correct about the trees they were written against.
 `HISTORICAL, DO NOT RE-POINT` marker naming the tree (`58c8e29`) the numbers are
 true about -- and the gate honours it, requiring the marker to name a tree.
 
-**Result on this tree:** `src/` **0**, `tests/` **0**, `docs/` **430 of 430
-resolving**, 0 ambiguous, 0 unresolvable, 0 past end of file.
+**Result, stated as the invariant rather than as a count:** `src/` and `tests/`
+hold **zero** line citations, and every citation in `docs/` resolves -- **0
+unresolvable, 0 ambiguous, 0 past end of file**. The total is deliberately not
+quoted here: it was `430` when this paragraph was first written and `444` an
+hour later, because the sections below added citations of their own, and a
+number that a later edit falsifies is the thing this document is about. Run
+`python3 scripts/check-citations.py` for today's total.
 
 ## 5. Still-open item 2: `package_roots()`, closed on both platforms
 

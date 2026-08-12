@@ -230,16 +230,72 @@ fn every_symbol_citation_into_code_resolves() {
         }
     }
 
-    assert!(
-        checked > 0,
-        "the gate resolved zero symbol citations. Either every citation was converted away, or \
-         the parser stopped recognising the form it exists to check -- and a gate reporting zero \
-         findings because it looked at nothing is this project's fourth defect class."
-    );
+    // Deliberately NOT `assert!(checked > 0)`. That was the first version, and
+    // it is the wrong guard: it couples the gate to the corpus happening to
+    // contain the form, so a refactor that legitimately rewrote the last
+    // fourteen symbol citations would turn this red with a message about the
+    // parser. What needs proving is that the PARSER still recognises the form,
+    // and `the_parser_recognises_both_citation_shapes` below proves that on
+    // synthetic input, independently of what the tree currently holds.
+    let _ = checked;
     assert!(
         offenders.is_empty(),
         "{} symbol citation(s) do not resolve, out of {checked} checked:\n{}",
         offenders.len(),
         offenders.join("\n"),
     );
+}
+
+/// The gate's own parser, proved on synthetic input rather than on whatever the
+/// tree happens to contain.
+///
+/// Added by this branch's own review. The first version of
+/// `every_symbol_citation_into_code_resolves` asserted that it had resolved at
+/// least one citation, which reads like a self-check and is not one: it fails
+/// when the corpus stops using the form, not when the parser stops recognising
+/// it, and those are different events with the same red. A gate that cannot
+/// distinguish them is the fourth defect class wearing a seatbelt.
+#[test]
+fn the_parser_recognises_both_citation_shapes() {
+    let banned = |s: &str| {
+        tokens(s).iter().any(|t| {
+            split_at_extension(t)
+                .is_some_and(|(_, rest)| rest.starts_with(':') && !rest.starts_with("::"))
+        })
+    };
+    let symbol = |s: &str| {
+        tokens(s).iter().any(|t| {
+            split_at_extension(t).is_some_and(|(path, rest)| {
+                rest.starts_with("::") && (path.starts_with("src/") || path.starts_with("tests/"))
+            })
+        })
+    };
+
+    // The banned shape, in the spellings this repository actually used.
+    // The banned shape is BUILT rather than written out. This file lives inside
+    // the directory the gate scans, so a literal example makes the gate fail on
+    // itself -- which it duly did on the first run of this test. That is the
+    // gate being total, not a hole in it, and the right place for the
+    // workaround is here rather than in a new exemption.
+    let c = ":";
+    assert!(banned(&format!("(`tests/cli.rs{c}1000`) already drives")));
+    assert!(banned(&format!("// (apply.rs{c}912) is the only thing")));
+    assert!(banned(&format!("`src/backend/winget.rs{c}899`, `{c}988`")));
+
+    // The required shape.
+    assert!(symbol("(`src/plan.rs::plan_backend`), and `covers`"));
+    assert!(symbol("`tests/cli.rs::path_without_winget` strips every"));
+
+    // Neither shape, and each is something this repository really writes.
+    for innocent in [
+        "the same `sysinfo` 0.32 dotpkg links",
+        "`Running::covers` third disjunct",
+        "std::path::PathBuf::from(local)",
+        "at 12:30 on a ratio of 1.5:1",
+        "under C:\\Users\\kln\\AppData",
+        "https://example.com/a.md and nothing else",
+    ] {
+        assert!(!banned(innocent), "false positive on: {innocent}");
+        assert!(!symbol(innocent), "false positive on: {innocent}");
+    }
 }

@@ -215,6 +215,46 @@ threshold. The header's "roughly three times the noise floor" is really about
 two times the observed maximum; the separation from a working machine (38.3 %)
 is what makes it hold.
 
+### 6b. The Unix half, and the two things measuring it changed
+
+`scripts/idle-gate.sh` and `scripts/idle-baseline.sh` are the same decision on
+the other platform, added because the standing rule covers both while the gate
+covered one -- and because this round's own macOS mutation run went ahead on a
+machine it had measured as busy.
+
+**The macOS baseline is nothing like a14's, and that is the finding rather than
+an inconvenience.** Three rounds on this developer desktop (10 logical cores):
+**14.42 / 15.60 / 15.68 %**, with `WindowServer` alone at 28.3 % of one core
+every round, plus a browser and the editor session. a14, a laptop with a
+keyboard remapper and little else, sits at 2.85-5.14 %. **A single default
+threshold cannot be right for both**, which is why both gates read theirs from
+the environment and both ship a baseline script that prints what to set it to.
+
+**The default stays at 10 %, and it refuses this machine** -- `machine_busy_pct
+17.83, VERDICT: NOT IDLE, exit 1`. That is the correct answer, not a
+miscalibration: a mutation run competing with a browser and a compositor is
+exactly what the rule forbids. **It would also have refused this round's own
+macOS run**, which recorded `syspolicyd` at 100 % of one core against a 35 %
+per-process rule.
+
+**Positive-controlled at three points, because a gate that only ever refuses is
+as useless as one that only ever passes:**
+
+| | threshold | machine busy | verdict | exit |
+|---|---|---|---|---|
+| A | 10 % (default) | 17.83 % | NOT IDLE | **1** |
+| B | 60 % | 16.02 % | IDLE | **0** |
+| C | 60 %, four spinners | **51.53 %**, four processes at ~100 % of one core | NOT IDLE | **1** |
+
+**One thing the measurement corrected, in both gates.** The first Unix version
+refused an otherwise-quiet machine because `node` was on its
+presence-alone-is-disqualifying list, and the editor session runs node. That
+list is now only names that exist *while a compile is happening*
+(`cargo`, `rustc`, `cc1`, `ld`, `clang`, …); long-lived runtimes are left to the
+CPU threshold, which is the signal that actually separates a resident runtime
+from a working one. **The same correction was applied to the PowerShell half**,
+where the bug was latent -- a14 has no node running, so it never fired there.
+
 ## 7. §11's durations, re-measured on a machine proven quiet -- and withdrawn
 
 §6b said the 1.2-5.4 s success range was the measurement most exposed to the
@@ -472,12 +512,13 @@ which that step ever executed there.
    open, and that no new one can be written into `src/` or `tests/`.
 4. **`docs/` has no drift check and will not get one from this round.** The
    number that says why is 221 of 421.
-5. **The idle precondition is enforceable on Windows and is still only prose on
-   macOS.** The standing rule covers both platforms; `scripts/idle-gate.ps1`
-   covers one. This round's own macOS mutation run was on a machine measured
-   **not** idle -- load 2.34 rising to 10.01, `syspolicyd` at 100% of one core
-   from its own builds -- which is stated in §9 rather than discovered later,
-   but stating it is what the Windows half no longer has to settle for.
+5. ~~The idle precondition is enforceable on Windows and only prose on macOS~~ --
+   **closed, §6b.** Both halves exist, both are positive-controlled, and the
+   macOS one refuses this machine at its default, which is the right answer.
+   What it does **not** do is get wired into anything: no `cargo mutants`
+   invocation is gated on it automatically, so it is still a gate someone has to
+   remember to run. That is one step better than prose and one step short of a
+   precondition.
 6. **The `docs/` gate reads `git ls-files`, so a file that has not been
    `git add`ed is not scanned.** It skipped this document on its first run. CI
    is unaffected, because a checkout only contains tracked files; a local run

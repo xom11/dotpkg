@@ -60,15 +60,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Names that mean somebody is building or testing here. Presence alone is
-# disqualifying, whether or not the process is burning CPU this instant: a linker
-# between two translation units is idle for a moment and the machine is still in
-# use. This is the sharp signal; the CPU thresholds are the blunt one that catches
-# work this list does not name.
+# Names that ONLY exist while something is being compiled or tested. Presence
+# alone is disqualifying for these, whether or not the process is burning CPU
+# this instant: a linker between two translation units is idle for a moment and
+# the machine is still in use.
+#
+# `node`, `python` and their kin were in this list and have been REMOVED, for a
+# measured reason: on a developer machine the editor session itself runs node,
+# and the Unix half of this gate refused an otherwise-quiet machine over it. A
+# long-lived runtime that happens to be resident is not a build. Those are left
+# to the CPU threshold, which is the signal that actually distinguishes them.
 $BuilderNames = @(
     'cargo', 'rustc', 'rustdoc', 'cc1', 'cc1plus', 'cl', 'link', 'lld', 'ld',
-    'msbuild', 'ninja', 'make', 'cmake', 'node', 'python', 'python3', 'go',
-    'clang', 'gcc', 'devenv', 'vctip', 'mspdbsrv', 'cargo-mutants'
+    'msbuild', 'ninja', 'make', 'cmake', 'clang', 'gcc', 'devenv', 'vctip',
+    'mspdbsrv', 'cargo-mutants'
 )
 
 function Test-Allowed {

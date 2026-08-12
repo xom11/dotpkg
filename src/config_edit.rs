@@ -320,9 +320,17 @@ fn line_comment(line: &str) -> Option<&str> {
     None
 }
 
-/// Replace `pkg.toml`, keeping the file the user wrote as `pkg.toml.bak`.
+/// Replace `pkg.toml`.
 ///
 /// Temp-then-rename, the same discipline as `State::save` and `lock::save`.
+///
+/// **No `.bak`.** This used to keep the file the user wrote as `pkg.toml.bak`.
+/// Removed on 2026-08-12: `pkg.toml` is the hand-written, **committed** half of
+/// the three files, so the user's own version control already holds every
+/// version of it, not just the displaced one. What the copy actually produced
+/// was a permanently dirty `git status` beside a file they do commit. The rule
+/// this leaves is worth stating once: a `.bak` is for a file nothing else can
+/// recover, which here is `state.json` alone.
 pub fn save(path: &Path, text: &str) -> Result<()> {
     let stem = path
         .file_name()
@@ -337,9 +345,6 @@ pub fn save(path: &Path, text: &str) -> Result<()> {
             .with_context(|| format!("cannot write {}", tmp.display()))?;
         f.sync_all()
             .with_context(|| format!("cannot flush {}", tmp.display()))?;
-    }
-    if path.exists() {
-        let _ = std::fs::copy(path, path.with_extension("toml.bak"));
     }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -516,7 +521,15 @@ python = { arch = "64bit" }   # force an architecture
     }
 
     #[test]
-    fn saving_keeps_the_displaced_file_alongside() {
+    fn saving_leaves_no_bak_beside_the_hand_written_file() {
+        // Inverted on 2026-08-12, with `lock.rs`'s sibling test and for the
+        // same reason: `pkg.toml` is the hand-written, **committed** file, so
+        // the user's own history already holds every version of it. A sibling
+        // copy of the last one adds nothing recoverable and subtracts a clean
+        // `git status`.
+        //
+        // The positive half matters as much as the negative one here: an edit
+        // that silently wrote nothing would also leave no `.bak`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pkg.toml");
         std::fs::write(&path, HAND_WRITTEN).unwrap();
@@ -525,11 +538,12 @@ python = { arch = "64bit" }   # force an architecture
         save(&path, &out).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), out);
+        assert_ne!(out, HAND_WRITTEN, "the edit must have changed something");
         let bak = path.with_extension("toml.bak");
-        assert_eq!(
-            std::fs::read_to_string(&bak).unwrap(),
-            HAND_WRITTEN,
-            "the file the user wrote is kept at {bak:?}"
+        assert!(
+            !bak.exists(),
+            "pkg.toml is committed; git is the backup, and {bak:?} would only \
+             dirty the user's git status"
         );
     }
 

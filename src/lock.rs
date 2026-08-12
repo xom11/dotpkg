@@ -163,6 +163,16 @@ pub fn render(lock: &Lock) -> String {
 /// hand. Same temp-then-rename discipline as `State::save`, and for the same
 /// reason -- except that `pkg.lock` is committed, so a torn write is also a
 /// git conflict.
+///
+/// **No `.bak`, and that asymmetry with `State::save` is the point.** This used
+/// to keep the displaced file as `pkg.lock.bak`. It was removed on 2026-08-12
+/// for the reason the paragraph above already contains: `pkg.lock` is
+/// **committed**. Git is a strictly better backup of a file under version
+/// control than a sibling copy is -- it keeps every version, not the last one --
+/// and the copy's only durable effect was a permanently dirty `git status` in
+/// the user's dotfiles repository, which each of them would have had to diagnose
+/// alone. `State::save` keeps its `.bak` because `state.json` is deliberately
+/// NOT committed and is the one file no other mechanism can recover.
 pub fn save(lock: &Lock, path: &Path) -> Result<()> {
     crate::apply::lock_coherence_guard(lock)
         .context("refusing to write a pkg.lock that `dotpkg apply` would reject")?;
@@ -187,9 +197,6 @@ pub fn save(lock: &Lock, path: &Path) -> Result<()> {
             .with_context(|| format!("cannot write {}", tmp.display()))?;
         f.sync_all()
             .with_context(|| format!("cannot flush {}", tmp.display()))?;
-    }
-    if path.exists() {
-        let _ = std::fs::copy(path, path.with_extension("lock.bak"));
     }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -483,9 +490,21 @@ version = "0.26.1"
     }
 
     #[test]
-    fn a_save_that_replaces_an_existing_lock_keeps_the_previous_one() {
-        // pkg.lock is committed. A torn write is a git conflict on top of a
-        // broken tool, and the previous pins are the only way back.
+    fn a_save_that_replaces_an_existing_lock_leaves_no_bak_beside_it() {
+        // **This test was inverted on 2026-08-12, and the reason is the same
+        // sentence that used to justify the opposite.** It read "pkg.lock is
+        // committed. A torn write is a git conflict on top of a broken tool,
+        // and the previous pins are the only way back" -- and then asserted a
+        // `.bak`. But *committed* is exactly why the `.bak` was never the way
+        // back: git holds every previous version of this file, not merely the
+        // displaced one, so `git checkout pkg.lock` recovers strictly more than
+        // the copy ever did. What the copy did produce was a permanently dirty
+        // `git status` beside a file the user commits.
+        //
+        // `State::save` keeps its own `.bak` and its test still asserts one:
+        // `state.json` is deliberately not committed and nothing else can
+        // recover it. The rule is "a `.bak` is for a file nothing else can
+        // recover", not "every write leaves one".
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pkg.lock");
         let mut first = Lock::default();
@@ -510,10 +529,15 @@ version = "0.26.1"
         save(&first, &path).unwrap();
         save(&second, &path).unwrap();
 
+        // The write itself still has to land, or "no .bak" would be satisfied
+        // by a save that did nothing at all.
         assert_eq!(load_or_empty(&path).unwrap(), second);
         let bak = path.with_extension("lock.bak");
-        assert!(bak.exists(), "the displaced lock is kept at {bak:?}");
-        assert_eq!(load_or_empty(&bak).unwrap(), first);
+        assert!(
+            !bak.exists(),
+            "pkg.lock is committed; git is the backup, and {bak:?} would only \
+             dirty the user's git status"
+        );
     }
 
     #[test]

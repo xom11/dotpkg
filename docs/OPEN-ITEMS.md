@@ -406,21 +406,25 @@ This is the section the README's "Verified on" table is the summary of.
   it, as the standing rule requires. Full round in
   `docs/measurements-2026-08-13-phase14b-winget-mutation.md`.
 
-  **Still open for removal, and refused rather than skipped.** The prune was
-  planned and prepared and then refused at exit 2 by
-  `refuse_elevated_winget_removal`: the ssh session is elevated and the package
-  is user-scope, both measured directly. `WingetStep::Remove` has therefore
-  still never run outside Phase 4b. The refusal was **vindicated in the same
-  round**: winget itself, asked to perform that uninstall from that session,
-  returned `0x8A15007D` and *"The package installed for user scope cannot be
-  uninstalled when running with administrator privileges."* — the exact code
-  `winget_exec::CANNOT_UNINSTALL_ELEVATED` names. The pre-check and the
-  behaviour it predicts were observed agreeing.
+  **Closed for removal too, one round later.** 14b's prune was refused at exit 2
+  by `refuse_elevated_winget_removal` — the ssh session is elevated and the
+  package is user-scope, both measured directly — and that refusal was
+  **vindicated in the same round**: winget itself, asked to perform that
+  uninstall from that session, returned `0x8A15007D` and *"The package installed
+  for user scope cannot be uninstalled when running with administrator
+  privileges."*, the exact code `winget_exec::CANNOT_UNINSTALL_ELEVATED` names.
 
-  **How to close the remaining half:** run `dotpkg apply --yes --allow-prune`
-  under `gsudo -i Medium`, which §4 of that round measured to de-elevate
-  successfully where `scripts/nonelevated-mutants.ps1`'s three recorded routes
-  do not. The elevation pre-check will not fire there.
+  Phase 14c then drove `dotpkg apply --yes --allow-prune` from a
+  **medium-integrity** context (`gsudo -i Medium`, the fourth de-elevation
+  route), where the pre-check does not fire: `done winget ducaale.xh verified on
+  disk`, the package absent from a fresh scan, and ownership released to
+  `{"winget": {}}` by `run_winget_step`'s own `Remove` arm. Round in
+  `docs/measurements-2026-08-13-phase14c-winget-removal.md`.
+
+  **What both halves still lack:** release-binary evidence and CI evidence. Each
+  ran from a binary built on the machine, not from a published artifact, and no
+  CI job performs a winget mutation at all. That is the shape item 23 closed for
+  scoop and nothing has closed for winget.
 - **One machine, one architecture, one winget version, one scoop layout, and one
   elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
   observed `apply` from an ordinary non-elevated session.

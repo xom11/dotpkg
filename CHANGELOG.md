@@ -2,11 +2,31 @@
 
 ## Unreleased
 
-Since `v0.1.0` (`7ab9413`). **Eight behaviour changes: one deletion, six bug
-fixes and a new exit code.** Six of them are ways dotpkg could silently lose
-or withhold something — an ownership record, a usable pin, a warning about a
-running application, or the truth about which version is installed — and
-losing any of them looked exactly like working correctly.
+Nothing yet.
+
+## 0.2.0 — 2026-08-13
+
+Since `v0.1.0` (`7ab9413`). **Nine behaviour changes: one new `pkg.toml`
+surface, one deletion, six bug fixes and a new exit code.**
+
+**Why this is a release and not just commits on `main`.** Until it, a build from
+`main` and the published `v0.1.0` binary both answered `dotpkg 0.1.0`, so no
+consumer could tell them apart — not by `--version`, not by any gate a calling
+repository could write. `github.com/xom11/nix` cannot adopt `pin = "none"`, or
+tighten its handling of exit 1, until a machine can be *known* to carry the new
+binary. That is what the version number is for, and leaving it at `0.1.0` made
+every fix below unusable downstream however correct it was.
+
+**The headline for a caller: `[winget.opts] pin = "none"`, and exit 3.** Between
+them they remove the two reasons a nightly `dotpkg apply` had to be treated as
+"any non-zero means broken": a self-updating application no longer has to be
+deleted from the declaration to stop failing the run, and a run whose only
+outstanding item is an open application no longer looks like a failure.
+
+**Six of the fixes are ways dotpkg could silently lose or withhold something** —
+an ownership record, a usable pin, a warning about a running application, or the
+truth about which version is installed — and losing any of them looked exactly
+like working correctly.
 
 **Two came from outside this project** — the trailing zero and exit 3 — from
 the first dotfiles repository to call dotpkg rather than be managed by hand.
@@ -285,12 +305,10 @@ removed; the other five fixes came from this project's own audit.
   file for a flake that does not exist, in a project whose whole thesis is that a
   lock records what was actually resolved.
 
-**One caveat about this section, stated rather than left to be discovered.** The
-`version_order` fix and the purity-guard change are in the working tree and not
-yet in a commit; everything above them is. Work is still in flight there, and
-nothing has been entered here that cannot be read out of the tree as it stands —
-an entry for a change that has not landed would be a prediction, which is the
-one thing a changelog must never carry.
+**The caveat this section carried while it was unreleased is now spent.** It
+said the `version_order` fix and the purity-guard change were in the working
+tree and not yet committed. Everything in this section is committed and tagged
+`v0.2.0`; nothing here is a prediction.
 
 ## 0.1.0 — 2026-08-12
 

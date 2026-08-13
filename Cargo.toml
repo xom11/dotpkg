@@ -1,6 +1,6 @@
 [package]
 name = "dotpkg"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Declarative package management for Windows: winget and scoop from one dotfile, with a real lock file and prune"

@@ -371,7 +371,7 @@ fn a_winget_package_that_differs_from_the_lock_is_a_real_upgrade_with_both_versi
 
 #[test]
 fn a_winget_downgrade_is_a_downgrade_not_an_upgrade() {
-    // The other side of `is_older`, for winget. `Divergence::Change` had one
+    // The other side of `version_order`, for winget. `Divergence::Change` had one
     // shape for both directions -- a backend that could not act on either had
     // no reason to carry a distinction that exists purely to pick an arrow.
     // Winget acts now, so the distinction is back, and the user is entitled to
@@ -381,7 +381,7 @@ fn a_winget_downgrade_is_a_downgrade_not_an_upgrade() {
     // test.** `render` no longer prints it as "(downgrade, from lock)" -- it
     // prints the refusal the executor will produce, and `change_count()`
     // excludes it -- but the decision was deliberately made THERE and not here.
-    // Gating the planner on `is_older` would promote a function its own doc
+    // Gating the planner on `version_order` would promote a function its own doc
     // comment calls cosmetic, and the step must still be built and fired,
     // because winget's own measured refusal is the gate rather than dotpkg's
     // guess about which version is newer. So this asserting `Action::Downgrade`
@@ -409,6 +409,54 @@ fn a_winget_downgrade_is_a_downgrade_not_an_upgrade() {
             arch: None,
         }]
     );
+}
+
+#[test]
+fn a_trailing_zero_component_is_the_same_version_and_produces_no_action() {
+    // Measured on zenbook-a14 (ARM64, winget 1.29.280) on 2026-08-12, with
+    // dotpkg being *called by* a real dotfiles repo rather than run by hand:
+    //
+    //   ! winget JanDeDobbeleer.OhMyPosh 30.6.4.0 -> 30.6.4 (dotpkg will not
+    //     downgrade a winget package -- run `dotpkg update`)
+    //
+    // winget's ARP version carries four components where winget's own index
+    // carries three. `parts` kept every numeric run, so `[30,6,4,0]` compared
+    // against `[30,6,4]`, longer-compares-greater made the machine look ahead
+    // of its pin, and the `else` arm picked `Downgrade`. It did not self-heal:
+    // `dotpkg update` re-pins the three-component spelling the index gives it,
+    // so the refusal returned on every run, forever, and floored the calling
+    // module to exit 1 every time.
+    //
+    // Two boundaries this test deliberately does NOT cross, because both are
+    // pinned by their own tests immediately above and below:
+    //
+    //  - It is not the prerelease residual `version_order`'s doc comment discloses.
+    //    `1.0.0-rc1` against a pin of `1.0.0` is still classified `Downgrade`;
+    //    `a_prerelease_suffix_does_not_reduce_to_the_release_version` pins that.
+    //  - It is not the counterweight above. `Brave.Brave` 151.1.93.134 against
+    //    a pin of 151.1.93.132 is a genuine downgrade of a genuinely different
+    //    version and still emits `Downgrade`.
+    //
+    // These two versions are the same version, so the rule that already governs
+    // an exactly-equal string applies: a healthy package produces no line.
+    let p = plan(
+        &config::parse("[winget]\npackages = [\"JanDeDobbeleer.OhMyPosh\"]\n").unwrap(),
+        &lock::parse(
+            "[winget.\"JanDeDobbeleer.OhMyPosh\"]\nversion = \"30.6.4\"\npin = \"version-only\"\n",
+        )
+        .unwrap(),
+        &[installed_winget("JanDeDobbeleer.OhMyPosh", "30.6.4.0")],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![],
+        "30.6.4.0 and 30.6.4 are the same version: the plan must say nothing"
+    );
+    assert_eq!(p.change_count(), 0);
 }
 
 #[test]
@@ -846,9 +894,15 @@ fn the_planner_source_performs_no_io() {
     const ALLOWED: &[&str] = &[
         "crate::",
         "std::collections",
+        // `std::cmp::Ordering` is a three-variant enum and two trait methods on
+        // it. It opens no file, spawns nothing, and reads no environment --
+        // admitted for the same reason `std::collections` is, and narrowed to
+        // the one type rather than to `std::cmp` so a later `std::cmp::min` on
+        // something expensive still has to come back through this list.
+        "std::cmp::Ordering",
         // `super::*` re-exports exactly what the lines above already admitted,
         // so it can smuggle nothing in. It is how the in-file test module gets
-        // at `is_older`.
+        // at `version_order`.
         "super::",
     ];
     let src = include_str!("../src/plan.rs");
@@ -868,10 +922,25 @@ fn the_planner_source_performs_no_io() {
     // A `use` line is the usual way in, but not the only one: `std::fs::read`
     // called at full path needs no import at all. Every `std::` the planner
     // names, in code or in prose, must be one this test has vouched for.
+    //
+    // Read out of ALLOWED rather than spelled again: this half used to carry
+    // its own hardcoded copy of the list, so admitting a second pure `std::`
+    // import above left this loop still rejecting it, and the guard failed for
+    // a reason that had nothing to do with purity.
+    let vouched: Vec<&str> = ALLOWED
+        .iter()
+        .copied()
+        .filter(|a| a.starts_with("std::"))
+        .collect();
+    assert!(
+        !vouched.is_empty(),
+        "the fully-qualified half of this guard vouches for nothing, so it \
+         would reject every `std::` in the file -- ALLOWED lost its `std::` entries"
+    );
     for (i, _) in src.match_indices("std::") {
         let tail = &src[i..];
         assert!(
-            tail.starts_with("std::collections"),
+            vouched.iter().any(|a| tail.starts_with(a)),
             "src/plan.rs must stay pure: fully-qualified `{}` bypasses the import allowlist",
             tail.lines().next().unwrap_or(tail).trim_end()
         );

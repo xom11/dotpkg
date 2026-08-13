@@ -459,7 +459,7 @@ pub(crate) fn package_dir_segments(roots: &[std::path::PathBuf]) -> BTreeSet<Str
 ///      least*, for an install whose exact version it could not determine --
 ///      not "several versions installed": `list -e --id` returns exactly one
 ///      row for each. Left in `installed`, `cur.version == want` would be
-///      `"> 17.14.37" == "17.14.37"`, false forever, and `plan::is_older`
+///      `"> 17.14.37" == "17.14.37"`, false forever, and `plan::version_order`
 ///      splits on non-digits so both sides reduce to the same digit sequence
 ///      and the remaining arm is `Downgrade` -- a false `↓` on every `status`
 ///      run, and something `apply --yes` would act on. At two ids out of 126

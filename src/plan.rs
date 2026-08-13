@@ -2,6 +2,7 @@ use crate::config::{Config, PkgOpts};
 use crate::lock::{Lock, Pin};
 use crate::model::{Installed, Name, Running, SCOOP, WINGET};
 use crate::state::State;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Scoop installs these itself to unpack other packages and does NOT record
@@ -119,7 +120,7 @@ impl Plan {
     /// it is a second method rather than a change to `ready_count` itself.
     ///
     /// Matched on the action's own `backend` rather than on any version
-    /// comparison: `plan::is_older` stays cosmetic, and the step is still built
+    /// comparison: `plan::version_order` stays cosmetic, and the step is still built
     /// and still fired -- winget's refusal is the gate, not dotpkg's guess. See
     /// `render`'s own comment on this arm for the residual that leaves.
     pub fn change_count(&self) -> usize {
@@ -437,25 +438,32 @@ fn plan_backend(
                     });
                 } else {
                     match view.capability {
-                        Capability::Acts => {
-                            if is_older(&cur.version, want) {
-                                actions.push(Action::Upgrade {
-                                    backend: view.backend.into(),
-                                    name: name.clone(),
-                                    from: cur.version.clone(),
-                                    to: want.to_string(),
-                                    arch: arch.clone(),
-                                });
-                            } else {
-                                actions.push(Action::Downgrade {
-                                    backend: view.backend.into(),
-                                    name: name.clone(),
-                                    from: cur.version.clone(),
-                                    to: want.to_string(),
-                                    arch: arch.clone(),
-                                });
-                            }
-                        }
+                        Capability::Acts => match version_order(&cur.version, want) {
+                            Ordering::Less => actions.push(Action::Upgrade {
+                                backend: view.backend.into(),
+                                name: name.clone(),
+                                from: cur.version.clone(),
+                                to: want.to_string(),
+                                arch: arch.clone(),
+                            }),
+                            Ordering::Greater => actions.push(Action::Downgrade {
+                                backend: view.backend.into(),
+                                name: name.clone(),
+                                from: cur.version.clone(),
+                                to: want.to_string(),
+                                arch: arch.clone(),
+                            }),
+                            // The two strings differ but name the same version
+                            // -- `30.6.4.0` against a pin of `30.6.4`. The
+                            // `cur.version == want` arm above already says a
+                            // package that is where it should be produces no
+                            // line; this is the same statement for a machine
+                            // that spells the version differently from the
+                            // index it was pinned from. Emitting `Downgrade`
+                            // here is what floored a caller's every run to
+                            // exit 1 with nothing actually wrong.
+                            Ordering::Equal => {}
+                        },
                     }
                 }
             }
@@ -587,11 +595,24 @@ pub fn plan(
 /// between "will change" and "will be refused" in the two numbers a user
 /// reads before consenting.
 ///
-/// `parts` keeps **every** numeric run, so `1.0.0-rc1` reduces to
-/// `[1,0,0,1]`, not `[1,0,0]`: a prerelease sorts *after* its own release, so
-/// `is_older("1.0.0-rc1", "1.0.0")` is `false` and a machine on the
-/// prerelease is classified `Downgrade` against a pin of the release.
+/// **The shorter side is zero-extended before comparing, and that is a fix
+/// rather than a refinement.** Without it, a version with more components
+/// compared greater purely for being longer, so `30.6.4.0` read as ahead of
+/// `30.6.4`. Measured on zenbook-a14 on 2026-08-12: winget's ARP version for
+/// `JanDeDobbeleer.OhMyPosh` carries four components where winget's own index
+/// carries three, so the machine was announced as a refused downgrade against
+/// its pin on every run -- and it did not self-heal, because `dotpkg update`
+/// re-pins the three-component spelling the index gives it. Four-component ARP
+/// versions are an ordinary Windows shape, not an edge case.
+///
+/// `parts` still keeps **every** numeric run, so `1.0.0-rc1` reduces to
+/// `[1,0,0,1]`, not `[1,0,0]`: zero-extending the pin to `[1,0,0,0]` leaves
+/// the prerelease sorting *after* its own release, so
+/// `version_order("1.0.0-rc1", "1.0.0")` is still `Greater` and a machine on the
+/// prerelease is still classified `Downgrade` against a pin of the release.
 /// `tests/planner.rs` pins this as a fact rather than leaving it as a claim.
+/// Zero-extension closes the trailing-zero case and deliberately leaves the
+/// prerelease one open; they are different bugs and only one of them is fixed.
 ///
 /// **The residual, stated rather than hidden:** for a winget package, that
 /// misclassification is announced as the refusal it will not turn out to be
@@ -602,23 +623,81 @@ pub fn plan(
 /// residual now, not a hypothetical one: a real version comparison --
 /// pre-release ordering, non-numeric suffixes, and the `pa.is_empty()` string
 /// fallback -- is what would close it rather than merely disclose it.
-fn is_older(a: &str, b: &str) -> bool {
+/// Whether `version_order`'s answer for this pair is a statement about the
+/// versions or an artefact of how `parts` reads them.
+///
+/// `parts` keeps every numeric run and throws the separators away, so any
+/// character that is not a digit or a `.` is information the comparison cannot
+/// see: `1.0.0-rc1` becomes `[1,0,0,1]` and outranks its own release. When
+/// both sides are digits and dots the reading is total -- zero-extension
+/// closed the one remaining hole, ragged length -- and the verdict can be
+/// relied on.
+///
+/// Callers use this to tell "dotpkg knows which direction this is" from
+/// "dotpkg guessed"; `apply::unprotected_winget_changes_with_roots` is the one
+/// that must, because it decides whether to stay silent about a package it is
+/// about to replace. It lives here, beside the function whose reliability it
+/// describes, so there is exactly one place that knows the parsing rule.
+pub fn version_order_is_reliable(a: &str, b: &str) -> bool {
+    let plain = |s: &str| s.chars().all(|c| c.is_ascii_digit() || c == '.');
+    plain(a) && plain(b)
+}
+
+fn version_order(a: &str, b: &str) -> Ordering {
     let parts = |s: &str| -> Vec<u64> {
         s.split(|c: char| !c.is_ascii_digit())
             .filter(|p| !p.is_empty())
             .filter_map(|p| p.parse().ok())
             .collect()
     };
-    let (pa, pb) = (parts(a), parts(b));
+    let (mut pa, mut pb) = (parts(a), parts(b));
     if pa.is_empty() || pb.is_empty() {
-        return a < b;
+        return a.cmp(b);
     }
-    pa < pb
+    // Zero-extend rather than compare ragged. `Vec`'s own ordering is
+    // lexicographic, which makes the longer vector greater once the shared
+    // prefix ties -- exactly the trailing-zero misreading this function's doc
+    // comment records. Padding is the whole fix: `[30,6,4,0]` against
+    // `[30,6,4,0]` is `Equal`, and equal is not a direction.
+    let width = pa.len().max(pb.len());
+    pa.resize(width, 0);
+    pb.resize(width, 0);
+    pa.cmp(&pb)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `version_order`'s `Less` arm under the name the assertions below were
+    /// written against. Production reads all three arms -- `Equal` is a real
+    /// answer now, not the absence of one -- so this lives here rather than
+    /// beside the function it wraps, where it would be dead code.
+    fn is_older(a: &str, b: &str) -> bool {
+        version_order(a, b) == Ordering::Less
+    }
+
+    #[test]
+    fn a_trailing_zero_component_names_the_same_version() {
+        // The unit-level half of `tests/planner.rs`'s
+        // `a_trailing_zero_component_is_the_same_version_and_produces_no_action`,
+        // which pins what the planner does with this answer. Measured on
+        // zenbook-a14 2026-08-12: winget's ARP version had four components
+        // where its index had three.
+        assert_eq!(version_order("30.6.4.0", "30.6.4"), Ordering::Equal);
+        assert_eq!(version_order("30.6.4", "30.6.4.0"), Ordering::Equal);
+        assert_eq!(version_order("1.0", "1.0.0.0"), Ordering::Equal);
+
+        // Zero-extension must not flatten a real difference in the padded
+        // position: a trailing component that is not zero still counts.
+        assert_eq!(version_order("30.6.4.1", "30.6.4"), Ordering::Greater);
+        assert_eq!(version_order("30.6.4", "30.6.4.1"), Ordering::Less);
+
+        // The prerelease case is deliberately NOT closed by this: `1.0.0-rc1`
+        // reduces to `[1,0,0,1]`, so it still sorts after its own release.
+        // `version_order`'s doc comment states this as a surviving residual.
+        assert_eq!(version_order("1.0.0-rc1", "1.0.0"), Ordering::Greater);
+    }
 
     #[test]
     fn version_ordering_handles_the_shapes_scoop_actually_uses() {

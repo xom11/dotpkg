@@ -1030,11 +1030,27 @@ fn a_declared_package_skipped_as_running_is_outstanding_not_success() {
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
 
+    // **This asserted 1 until 2026-08-13, and the number is the only thing
+    // that changed.** What the test guarantees is unchanged and is what its
+    // name says: a declared package left skipped-as-running is outstanding
+    // work, so the code is not 0. It is now 3 rather than 1 because 1 also
+    // means "something failed", and an integrator running dotpkg from a real
+    // dotfiles repo measured that on a machine where `python`, `beckon` and
+    // `kanata` are always running, every clean run reported 1 -- leaving a
+    // scheduled caller unable to be correct. `apply_exit_code`'s own doc
+    // comment carries the measurement; `main.rs`'s unit tests pin that a real
+    // failure alongside an open app is still 1, which is what keeps 3 narrow.
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(3),
         "a declared package left skipped-as-running is outstanding work, not success: \
          stdout: {stdout} stderr: {stderr}"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "and it is emphatically not success -- 3 replaced 1 to say which kind \
+         of not-success it is, never to soften it to none"
     );
     // The preparation table (printed before the confirmation question) is
     // not what this pins -- it already named the skip before this fix
@@ -1092,9 +1108,16 @@ fn apply_prepare_also_reports_a_running_skip_as_outstanding() {
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
 
+    // 1 until 2026-08-13, for the reason recorded on the full-apply test
+    // above. The agreement this test exists to pin is what matters, and it is
+    // strictly stronger now: the two commands have to agree on *which* kind of
+    // outstanding, not merely that there is some. Its sibling one test down --
+    // `apply_prepare_also_reports_an_opaque_skip_as_outstanding` -- still
+    // asserts 1, and that pairing is the point: `--prepare` tells the two
+    // kinds apart exactly as `apply` does.
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(3),
         "--prepare must agree with the full apply run over the identical \
          pkg.toml and machine: stdout: {stdout} stderr: {stderr}"
     );
@@ -1125,7 +1148,7 @@ fn a_declared_package_whose_manifest_is_unreadable_is_outstanding_not_success() 
     // Task 4) recognised only `Running` by name -- so a package whose state
     // dotpkg could not establish vanished from the closing table and the run
     // reported exit 0, exactly the "0 lies to a scheduled task" shape
-    // `floor_exit_code`'s own doc comment warns against.
+    // `apply_exit_code`'s own doc comment warns against.
     //
     // No pkg.lock is written: `plan()`'s opaque check fires before the lock
     // lookup, so aichat never needs one to reach `Action::Skip { Opaque }`.

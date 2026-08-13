@@ -530,6 +530,73 @@ impl Preparation {
             })
             .collect()
     }
+
+    /// Which *kind* of outstanding work this preparation leaves, for the exit
+    /// code. `outstanding_skips` answers "how many and which packages"; this
+    /// answers the question the exit code actually turns on, which the other
+    /// method cannot: it hands back a rendered `why` string and drops the
+    /// `SkipReason` that produced it.
+    ///
+    /// The distinction exists because the two kinds ask different things of
+    /// the operator. A package whose own process is running needs an app
+    /// closed and the command run again -- the README already says outright
+    /// that this "is not a failure". A package whose state could not be read
+    /// (`Opaque`), or a backend that could not be scanned at all
+    /// (`Unscannable`), is dotpkg reporting that it does not know something it
+    /// needs to know, and no amount of closing windows changes that.
+    ///
+    /// Reported by an integrator on 2026-08-12, running dotpkg 0.1.0 from a
+    /// real dotfiles repo on zenbook-a14: `python`, `beckon` and `kanata` are
+    /// running essentially all the time, so a fully resolved lock with
+    /// nothing wrong ("7 verified on disk, 0 failed, 1 held") exited 1 on
+    /// nearly every invocation. That left an automated caller choosing between
+    /// treating 1 as success -- which loses every real failure -- and failing
+    /// every night. Neither is correct, and nothing in the exit code let them
+    /// be correct, which is why this is a third code rather than advice.
+    pub fn outstanding(&self) -> Outstanding {
+        let mut running = false;
+        for p in &self.prepared {
+            let (Action::Skip { reason, .. }, Outcome::Skipped { .. }) = (&p.action, &p.outcome)
+            else {
+                continue;
+            };
+            if !is_outstanding(reason) {
+                continue;
+            }
+            match reason {
+                SkipReason::Running => running = true,
+                // One of these is enough to make the whole run's answer
+                // "something needs looking at", so there is nothing to gain
+                // by reading the rest.
+                SkipReason::Opaque | SkipReason::Unscannable => return Outstanding::NeedsAttention,
+                // Unreachable behind `is_outstanding`, and named rather than
+                // swept into a wildcard for the reason `is_outstanding`'s own
+                // match is exhaustive: a `SkipReason` added later must be a
+                // compile error here, not a silent "counts as running".
+                SkipReason::NotLocked => {}
+            }
+        }
+        if running {
+            Outstanding::RunningOnly
+        } else {
+            Outstanding::Nothing
+        }
+    }
+}
+
+/// What a finished run leaves behind that the operator has not got yet, at the
+/// granularity the exit code distinguishes. See `Preparation::outstanding`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outstanding {
+    /// Nothing. Every declared package is where `pkg.lock` says it should be.
+    Nothing,
+    /// Every outstanding item is a package whose own process was running.
+    /// Close the app, run again, and it goes away without anything being
+    /// diagnosed.
+    RunningOnly,
+    /// At least one outstanding item is not a running process: a package
+    /// whose state could not be read, or a backend that could not be scanned.
+    NeedsAttention,
 }
 
 /// Whether a skip is a fact about *this run* that could differ on the next
@@ -1258,19 +1325,44 @@ pub fn unprotected_winget_changes_with_roots(
         // two measured exclusions rather than by taste:
         //
         // - `Install` has nothing installed to be running.
-        // - `Downgrade` reaches `execute` and fires `winget install --version`,
-        //   but that command only ever moves a package *up*: it returns
-        //   `NO_AVAILABLE_UPGRADE`, the step ends `touched: false`, and
-        //   `render`'s summary counts a winget downgrade separately from
-        //   `change_count` for exactly that reason. Warning about it would
-        //   print a sentence dotpkg has been measured unable to carry out.
+        // - `Downgrade` *usually* reaches `execute`, fires `winget install
+        //   --version`, and comes back as winget's own measured refusal:
+        //   `NO_AVAILABLE_UPGRADE`, `touched: false`. Warning about that would
+        //   print a sentence dotpkg has been measured unable to carry out, so
+        //   the exclusion is right whenever the classification is.
+        //
+        // **The exclusion used to be unconditional, and that was a hole.** It
+        // took `Downgrade` as proof that nothing would happen, while
+        // `plan::version_order`'s own doc comment says the verdict is cosmetic
+        // whenever a version carries a non-numeric suffix: `1.0.0-rc1` against
+        // a pin of `1.0.0` reduces to `[1,0,0,1]` against `[1,0,0,0]` and is
+        // classified `Downgrade`, but winget sees a genuine upgrade and
+        // performs it. So for exactly the pairs dotpkg cannot read, the one
+        // warning that would have let a user protect a running app was
+        // withheld -- on the majority class of winget package, the 32 of 36
+        // ids on a14 that the path signal cannot see either.
+        //
+        // `version_order_is_reliable` is the narrow fix: a purely numeric pair
+        // is still excluded, so the measured Chrome refusal
+        // (`docs/measurements-2026-08-12-phase7-fence-coverage.md`) stays
+        // silent and its test stays green. The verb is "change", not
+        // "upgrade": the direction is precisely what is not known here.
         //
         // Matching on the variant rather than on a "does it change something"
-        // helper is deliberate: both exclusions differ from `Prune`/`Upgrade`
+        // helper is deliberate: the exclusions differ from `Prune`/`Upgrade`
         // by what reaches the disk, not by whether an action exists.
         let (name, verb) = match action {
             Action::Upgrade { backend, name, .. } if backend == WINGET => (name, "upgrade"),
             Action::Prune { backend, name, .. } if backend == WINGET => (name, "remove"),
+            Action::Downgrade {
+                backend,
+                name,
+                from,
+                to,
+                ..
+            } if backend == WINGET && !crate::plan::version_order_is_reliable(from, to) => {
+                (name, "change")
+            }
             _ => continue,
         };
 
@@ -3969,6 +4061,58 @@ mod tests {
             out.is_empty(),
             "a winget downgrade is refused rather than performed, so there is nothing \
              for a guard entry to protect: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_winget_downgrade_dotpkg_only_guessed_at_is_reported_because_winget_may_perform_it() {
+        // The boundary of the test above, and the hole it left open until
+        // 2026-08-13. That exclusion reads `Action::Downgrade` as proof that
+        // nothing will reach the disk. It is proof of that only when dotpkg
+        // could actually tell which direction the change is -- and
+        // `plan::version_order`'s own doc comment says it cannot whenever a
+        // version carries anything that is not a digit or a dot, because
+        // `parts` turns the suffix into another numeric run.
+        //
+        // So `1.0.0-rc1` against a pin of `1.0.0` is classified `Downgrade`,
+        // winget sees a perfectly ordinary upgrade, installs it, and replaces
+        // the binaries of a running application -- while this function stayed
+        // silent about a package it can see neither by path nor by guard
+        // entry. That is the 32-of-36 majority class on a14, not an edge case.
+        //
+        // Chrome's `150.0.7871.187 -> 99.0.0` above is digits and dots on both
+        // sides, so the verdict there is reliable and the silence is still
+        // right. Both tests have to hold at once; that is what makes the fix
+        // narrow rather than a blanket re-inclusion.
+        let empty_root = tempfile::tempdir().unwrap();
+        let out = unprotected_winget_changes_with_roots(
+            &Plan {
+                actions: vec![Action::Downgrade {
+                    backend: WINGET.into(),
+                    name: Name::new("Acme.Editor"),
+                    from: "1.0.0-rc1".into(),
+                    to: "1.0.0".into(),
+                    arch: None,
+                }],
+            },
+            &std::collections::BTreeMap::new(),
+            &[winget_row("Acme.Editor", &["acme", "acme editor"])],
+            &[empty_root.path().to_path_buf()],
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "a downgrade dotpkg only guessed at can really happen, so the \
+             package must not be left unmentioned: {out:?}"
+        );
+        assert!(
+            out[0].contains("Acme.Editor"),
+            "the warning must name the package: {out:?}"
+        );
+        assert!(
+            !out[0].contains("upgrade") && !out[0].contains("downgrade"),
+            "the verb must not claim a direction -- not knowing which way this \
+             goes is the entire reason the warning fires: {out:?}"
         );
     }
 

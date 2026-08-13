@@ -257,8 +257,20 @@ impl Backend for Scoop {
                 Ok(t) => t,
                 // No manifest yet is the ordinary shape of a half-finished
                 // install, or of `current` pointing at a version directory
-                // scoop is still unpacking. Nothing to tell the user.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // scoop is still unpacking. Nothing to tell the user -- but
+                // `continue` alone made the name vanish from the scan
+                // entirely, and `present_after` reads a scan as the whole
+                // truth about what is on the machine, so ownership
+                // reconciliation then deleted the record. A `Replace` whose
+                // uninstall succeeded and whose install failed leaves exactly
+                // this shape, so the run that reported "half installed" also
+                // silently forgot it owned the package. `residual` says "on
+                // disk" without saying anything to the planner; see its own
+                // doc comment for why it is not `opaque`.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    out.residual.push(Name::new(name));
+                    continue;
+                }
                 // Anything else -- a permission denial, a dangling junction --
                 // is a fact about this machine. Skipping it silently would make
                 // an app the user *does* have look uninstalled, which in Phase 2

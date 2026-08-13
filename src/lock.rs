@@ -173,6 +173,17 @@ pub fn render(lock: &Lock) -> String {
 /// the user's dotfiles repository, which each of them would have had to diagnose
 /// alone. `State::save` keeps its `.bak` because `state.json` is deliberately
 /// NOT committed and is the one file no other mechanism can recover.
+///
+/// **`rename` replaces the path, so a symlinked `pkg.lock` is detached rather
+/// than written through.** Reported 2026-08-12 by someone integrating dotpkg
+/// into a dotfiles repository: they symlinked `pkg.lock` into the repo, having
+/// read an `fs::write` elsewhere in this tree and reasonably assumed
+/// overwrite-in-place, and the first `dotpkg update` left the link replaced by
+/// a regular file holding the new pin -- with `git status` clean throughout,
+/// so the repo silently stopped receiving updates. The atomic write is not the
+/// bug and must not be weakened to fix this; the README says outright not to
+/// symlink these files, and `a_save_over_a_symlink_replaces_the_link_itself`
+/// pins the behaviour so the documentation cannot quietly stop being true.
 pub fn save(lock: &Lock, path: &Path) -> Result<()> {
     crate::apply::lock_coherence_guard(lock)
         .context("refusing to write a pkg.lock that `dotpkg apply` would reject")?;
@@ -212,6 +223,57 @@ pub fn save(lock: &Lock, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::model::Name;
+
+    /// The README tells users not to symlink `pkg.lock`. This is why, and it
+    /// exists so that sentence cannot quietly stop being true: `rename`
+    /// replaces the directory entry, so the link is destroyed and the new
+    /// bytes land in a regular file where the link used to be. The target the
+    /// link pointed at keeps its old contents, which is exactly why the
+    /// failure is silent -- nothing errors, and `git status` stays clean.
+    ///
+    /// Unix-only because creating a symlink on Windows needs a privilege an
+    /// ordinary session does not have, and the behaviour under test is
+    /// `std::fs::rename`'s, not this crate's.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_over_a_symlink_replaces_the_link_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-pkg.lock");
+        let link = dir.path().join("pkg.lock");
+        std::fs::write(&real, "# the file the link points at\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "precondition: the test must actually be writing over a symlink"
+        );
+
+        let mut lock = Lock::default();
+        lock.scoop.insert(
+            Name::new("fzf"),
+            Pin::ScoopCommit {
+                bucket: "main".into(),
+                commit: "a".repeat(40),
+                version: "0.74.1".into(),
+            },
+        );
+        save(&lock, &link).unwrap();
+
+        assert!(
+            !std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "the link is replaced, not written through -- if this ever fails, \
+             the README's \"do not symlink it\" line has become wrong and must change"
+        );
+        assert!(
+            std::fs::read_to_string(&link).unwrap().contains("0.74.1"),
+            "the new pin lands in the regular file that replaced the link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "# the file the link points at\n",
+            "and the file the link pointed at never sees the write at all -- \
+             this is the whole reason the detachment is silent"
+        );
+    }
 
     #[test]
     fn parses_both_backends_into_distinct_pin_shapes() {

@@ -475,6 +475,65 @@ fn a_winget_lock_entry_is_written_with_the_canonical_id_not_the_declared_case() 
 }
 
 #[test]
+fn a_canonical_id_that_is_a_different_id_fails_the_package_instead_of_writing_an_unusable_pin() {
+    // The boundary of the test above. `resolve_latest` deliberately omits
+    // `--exact` -- that is what folds case on the way in -- which also leaves
+    // `--id` a substring filter, so a declared id can match a *different*
+    // package. Reusing the measured `show-canonical-echo.txt` for exactly what
+    // it shows: asked for something that is a substring of `Git.Git`, winget
+    // answers `Found Git [Git.Git]`.
+    //
+    // Recording that was worse than refusing it, and silently so. The lock
+    // would be keyed `Git.Git` while `plan` looks the pin up under the
+    // declared `Git`, and those two never meet -- so the next `apply` said
+    // `Skip { NotLocked }` and refused the whole run at exit 2, while `update`
+    // rewrote the identical unusable lock every time it was run to fix it.
+    // There is no way out of that loop from inside dotpkg; only editing
+    // pkg.toml escapes it, which is what the message now says to do.
+    let f = Fixture::new();
+    let fake = FakeWinget::returning(0, winget_fixture("show-canonical-echo.txt"));
+    let winget = Winget::new(fake);
+
+    let (u, _warnings) = update::run(
+        &f.scoop_root(),
+        &winget,
+        &cfg("[winget]\npackages = [\"Git\"]\n"),
+        &Lock::default(),
+        &Scope::WholeRun,
+        true,
+    );
+
+    assert!(
+        u.lock.winget.is_empty(),
+        "no pin may be written under a key the planner cannot look up: {:?}",
+        u.lock.winget.keys().collect::<Vec<_>>()
+    );
+    let why = u
+        .changes
+        .iter()
+        .find_map(|c| match c {
+            update::Change::Kept {
+                name,
+                version: None,
+                why,
+                ..
+            } if name == &Name::new("Git") => Some(why.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the package must be reported as unresolved: {:?}",
+                u.changes
+            )
+        });
+    assert!(
+        why.contains("Git.Git") && why.contains("\"Git\""),
+        "the message must name both the id winget matched and the one pkg.toml \
+         declares, since the fix is to edit pkg.toml: {why}"
+    );
+}
+
+#[test]
 fn a_case_difference_between_pkg_toml_and_the_canonical_id_is_reported_not_rewritten() {
     // The canonical-id rule's other half: `pkg.toml` is the user's file, and
     // `update` never touches it at all (only `pkg.lock`) -- so "not silently

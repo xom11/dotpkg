@@ -1296,6 +1296,73 @@ fn adopt_backend_winget_refuses_a_package_already_managed_rather_than_reconfirmi
 }
 
 #[test]
+fn adopt_backend_winget_refuses_when_show_echoes_a_different_id_rather_than_a_different_case() {
+    // The boundary of the test below. `show` runs without `--exact` -- that is
+    // what folds case on the way in -- which also leaves `--id` a substring
+    // filter, so it can answer about a different package entirely.
+    //
+    // **The two fixtures are each a real capture; pairing them is synthetic
+    // and deliberate.** `list-single.txt` really lists `ajeetdsouza.zoxide`
+    // and `show-canonical-echo.txt` really echoes `Git.Git`; no machine would
+    // ever answer both about one package. What is under test is dotpkg's
+    // comparison of the two ids, not winget's behaviour, and no fixture pairs
+    // a list with a foreign `show` echo because nobody has captured one.
+    //
+    // Refusing matters because the alternative was silent and unusable:
+    // `pkg.lock` and `state.json` keyed `Git.Git`, `pkg.toml` keyed what was
+    // typed, and `plan` looking the pin up under the declared name -- so
+    // `adopt` printed success and the next `apply` refused the whole run at
+    // exit 2. `update` refuses the same shape.
+    let fake = FakeWinget::script(vec![
+        (0, winget_fixture("list-single.txt")),
+        (0, winget_fixture("show-canonical-echo.txt")),
+    ]);
+    let winget = Winget::new(fake);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&config_path, "[winget]\npackages = []\n").unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert!(out.adopted.is_empty(), "nothing may be adopted: {out:?}");
+    assert_eq!(out.refused.len(), 1, "{out:?}");
+    let (refused_name, why) = &out.refused[0];
+    assert_eq!(refused_name, &Name::new("ajeetdsouza.zoxide"));
+    assert!(
+        why.contains("Git.Git") && why.contains("ajeetdsouza.zoxide"),
+        "name both the id winget matched and the one that was typed, since the \
+         fix is to retype it: {why}"
+    );
+
+    // And nothing may have been written under either spelling. This is the
+    // half that makes the refusal worth having: a warning would have left all
+    // three files on disk, disagreeing.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert!(lock.winget.is_empty(), "no pin: {:?}", lock.winget);
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(state.ownership(WINGET, &Name::new("Git.Git")), None);
+    assert_eq!(
+        state.ownership(WINGET, &Name::new("ajeetdsouza.zoxide")),
+        None
+    );
+    let cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !cfg_text.contains("Git.Git") && !cfg_text.contains("zoxide"),
+        "pkg.toml must be untouched: {cfg_text}"
+    );
+}
+
+#[test]
 fn adopt_backend_winget_reports_a_canonical_case_difference_the_same_way_update_does() {
     // The other half of Task 15 review's Important 1: `update` warns when
     // the spelling it resolved differs from what pkg.toml declared;

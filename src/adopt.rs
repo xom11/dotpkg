@@ -28,6 +28,23 @@ pub enum Matched {
     /// evidence over a bucket's git history, which winget has no analogue
     /// of at all.
     WingetConfirmed,
+    /// Declared `pin = "none"`: **nothing was confirmed, because nothing is
+    /// being pinned.**
+    ///
+    /// The other three variants report the strength of evidence gathered about
+    /// a version. Here no evidence was gathered, and none was needed: no lock
+    /// entry is written, so there is no version whose liveness could matter,
+    /// and no `winget show` runs at all. The canonical id needs no lookup
+    /// either -- `inst.name` is `winget list`'s own `Id` column, canonical by
+    /// construction.
+    ///
+    /// What the adopt *does* record is ownership, and that is the whole reason
+    /// this path must exist rather than refuse. A user who already has the app
+    /// installed and declares it unpinned gets: `apply` sees it present, does
+    /// nothing, never installs it, and therefore never owns it -- so no prune
+    /// could ever reach it. `adopt` is the only route to ownership for a
+    /// package dotpkg did not install.
+    Unpinned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,7 +267,10 @@ fn run_scoop(
                 lock.scoop.insert(name.clone(), pin);
                 state.set(SCOOP, name, Ownership::Adopted);
                 if let Err(failure) = write_in_order(
-                    WriteLock(|| crate::lock::save(&lock, lock_path)),
+                    // Always `Ok(true)`: a scoop adopt always has a pin to
+                    // write. Stated rather than implied, now that the winget
+                    // side really can have nothing to write.
+                    WriteLock(|| crate::lock::save(&lock, lock_path).map(|()| true)),
                     WritePkgToml(|| {
                         // Skip the write entirely when `pkg.toml`'s bytes
                         // would not change -- see `adopt_one`'s
@@ -354,11 +374,35 @@ fn run_winget<C: WingetCmd>(
                 // call was given, for the same fold-case reason
                 // `resolve_into_lock`'s `previous` lookup in `src/update.rs`
                 // works regardless of which case a prior entry's key used.
-                let previous_version = lock.winget.get(&canonical).map(|p| p.version().to_string());
-                lock.winget.insert(canonical.clone(), pin);
+                // `None` is a package declared `pin = "none"`: nothing is
+                // replaced, because nothing is written. A stale entry left over
+                // from a previous pinned declaration survives untouched here
+                // and is cleared by the next whole-run `update` -- `adopt` does
+                // not own that cleanup.
+                let previous_version = match &pin {
+                    Some(_) => lock.winget.get(&canonical).map(|p| p.version().to_string()),
+                    None => None,
+                };
+                let matched = match &pin {
+                    Some(_) => Matched::WingetConfirmed,
+                    None => Matched::Unpinned,
+                };
+                if let Some(p) = pin {
+                    lock.winget.insert(canonical.clone(), p);
+                }
                 state.set(WINGET, &canonical, Ownership::Adopted);
+                let wrote_lock = matched == Matched::WingetConfirmed;
                 if let Err(failure) = write_in_order(
-                    WriteLock(|| crate::lock::save(&lock, lock_path)),
+                    WriteLock(|| {
+                        // An unpinned package has no lock entry to write, so
+                        // saying so is what keeps `wrote` from naming a file
+                        // that never changed.
+                        if wrote_lock {
+                            crate::lock::save(&lock, lock_path).map(|()| true)
+                        } else {
+                            Ok(false)
+                        }
+                    }),
                     WritePkgToml(|| {
                         if config_changed {
                             crate::config_edit::save(config_path, &config_text).map(|()| true)
@@ -375,8 +419,7 @@ fn run_winget<C: WingetCmd>(
                     });
                     return Ok(out);
                 }
-                out.adopted
-                    .push((canonical, Matched::WingetConfirmed, previous_version));
+                out.adopted.push((canonical, matched, previous_version));
             }
         }
     }
@@ -423,28 +466,35 @@ struct WriteState<F>(F);
 /// only the file that failed, and "which files did this leave changed" is the
 /// one question a user whose `adopt` died half way through actually has.
 ///
-/// `write_pkg_toml` returns `Result<bool>`, not `Result<()>` like the other
-/// two: `run` skips the actual `pkg.toml` write when the text would not
-/// change (see `adopt_one`'s `already_declared`), and `wrote`'s job is to
+/// `write_pkg_toml` returns `Result<bool>`, not `Result<()>` like
+/// `write_state`: `run` skips the actual `pkg.toml` write when the text would
+/// not change (see `adopt_one`'s `already_declared`), and `wrote`'s job is to
 /// name what really changed on disk -- listing "pkg.toml" there for a write
 /// that never happened would itself be the kind of false line this module
 /// exists to avoid, on the (narrow) path where `state.json`'s write fails
 /// right after a skipped `pkg.toml` write.
+///
+/// **`write_lock` gained the identical shape for the identical reason**, when
+/// adopting a package declared `pin = "none"` became possible: no lock entry is
+/// written for one, so an unconditional `wrote.push("pkg.lock")` would name a
+/// file that never changed, in the one report whose entire job is to say which
+/// files did.
 fn write_in_order<L, P, S>(
     write_lock: WriteLock<L>,
     write_pkg_toml: WritePkgToml<P>,
     write_state: WriteState<S>,
 ) -> std::result::Result<(), WriteFailure>
 where
-    L: FnOnce() -> Result<()>,
+    L: FnOnce() -> Result<bool>,
     P: FnOnce() -> Result<bool>,
     S: FnOnce() -> Result<()>,
 {
     let mut wrote: Vec<&'static str> = Vec::new();
-    if let Err(error) = (write_lock.0)() {
-        return Err(WriteFailure { wrote, error });
+    match (write_lock.0)() {
+        Err(error) => return Err(WriteFailure { wrote, error }),
+        Ok(true) => wrote.push("pkg.lock"),
+        Ok(false) => {}
     }
-    wrote.push("pkg.lock");
     match (write_pkg_toml.0)() {
         Err(error) => return Err(WriteFailure { wrote, error }),
         Ok(true) => wrote.push("pkg.toml"),
@@ -566,7 +616,7 @@ fn adopt_one_winget<C: WingetCmd>(
     state: &State,
     name: &Name,
     config_path: &Path,
-) -> std::result::Result<(Name, Pin, String, bool), String> {
+) -> std::result::Result<(Name, Option<Pin>, String, bool), String> {
     let Some(inst) = scan
         .installed
         .iter()
@@ -605,6 +655,25 @@ fn adopt_one_winget<C: WingetCmd>(
         matched: &matched_sink,
     };
 
+    // **Declared `pin = "none"`: no lookup, no pin, ownership only.**
+    //
+    // `resolve_installed`'s entire job is to confirm the installed version
+    // still resolves in winget's index, so that the version may become a pin.
+    // There is no pin, so there is nothing to confirm and no subprocess to
+    // spawn. The canonical id needs no lookup either: `inst.name` is `winget
+    // list`'s `Id` column, canonical by construction rather than something this
+    // call could get wrong the way a hand-typed `pkg.toml` spelling could.
+    if declared.winget.unpinned().contains(name) {
+        let text = std::fs::read_to_string(config_path).map_err(|e| format!("{e}"))?;
+        let already_declared = declared.winget.packages.contains(name);
+        let config_text = if already_declared {
+            text
+        } else {
+            crate::config_edit::add_winget_package(&text, name).map_err(|e| format!("{e:#}"))?
+        };
+        return Ok((inst.name.clone(), None, config_text, !already_declared));
+    }
+
     let version = match Backend::resolve_installed(winget, inst, &ctx) {
         crate::update::Resolution::Resolved { pin } => pin.version().to_string(),
         crate::update::Resolution::Failed { why } => return Err(why),
@@ -633,7 +702,7 @@ fn adopt_one_winget<C: WingetCmd>(
         crate::config_edit::add_winget_package(&text, name).map_err(|e| format!("{e:#}"))?
     };
 
-    Ok((canonical, pin, config_text, !already_declared))
+    Ok((canonical, Some(pin), config_text, !already_declared))
 }
 
 #[cfg(test)]
@@ -655,7 +724,8 @@ mod tests {
         let result = write_in_order(
             WriteLock(|| {
                 log.borrow_mut().push("lock");
-                Ok(())
+                // `true`: this control models a lock write that really happened.
+                Ok(true)
             }),
             WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml");
@@ -729,7 +799,8 @@ mod tests {
         let result = write_in_order(
             WriteLock(|| {
                 log.borrow_mut().push("lock");
-                Ok(())
+                // `true`: this control models a lock write that really happened.
+                Ok(true)
             }),
             WritePkgToml(|| {
                 log.borrow_mut().push("pkg.toml (skipped)");

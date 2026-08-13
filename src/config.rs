@@ -698,7 +698,10 @@ packages = ["Brave.Brave", "Vivaldi.Vivaldi", "BurntSushi.ripgrep.MSVC"]
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("none"), "the error must list the real values: {msg}");
+        assert!(
+            msg.contains("none"),
+            "the error must list the real values: {msg}"
+        );
         assert!(msg.contains("version"), "both of them: {msg}");
     }
 
@@ -713,10 +716,7 @@ packages = ["Brave.Brave", "Vivaldi.Vivaldi", "BurntSushi.ripgrep.MSVC"]
              [winget.opts]\n\"Brave.Brave\" = { arch = \"arm64\" }\n",
         )
         .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("arch"),
-            "got: {err:#}"
-        );
+        assert!(format!("{err:#}").contains("arch"), "got: {err:#}");
 
         // And the reverse: scoop's pin is a bucket commit, not a version, so
         // `pin = "none"` there would need a meaning nobody has designed.

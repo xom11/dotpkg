@@ -849,6 +849,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
             Action::Install { .. } => "install",
             Action::Upgrade { .. } => "upgrade",
             Action::Downgrade { .. } => "downgrade",
+            Action::Ensure { .. } => "ensure",
             Action::Prune { .. } => "prune",
             Action::Skip { .. } => "skip",
             Action::Unmanaged { .. } => "unmanaged",

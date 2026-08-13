@@ -77,6 +77,25 @@ pub enum Change {
         version: Option<String>,
         why: String,
     },
+    /// Declared `pin = "none"`: nothing was resolved, because an unpinned
+    /// declaration resolves to nothing. There is no lock entry and there will
+    /// not be one.
+    ///
+    /// A line rather than silence, so `update` never passes over a declared
+    /// package without saying anything about it.
+    ///
+    /// `previous` splits the same way `Kept`'s `version` does, and for the
+    /// reason that variant's own comment gives -- *two different facts share
+    /// this variant and they must not read the same*. `Some` is a pin this run
+    /// really removed, which is a **write**; `None` is the ordinary steady
+    /// state, where nothing was written and nothing needed to be.
+    /// `wrote_anything` reads exactly that distinction; getting it wrong in
+    /// either direction is a live bug, and both directions are pinned by tests.
+    Unpinned {
+        backend: &'static str,
+        name: Name,
+        previous: Option<String>,
+    },
 }
 
 /// Whether this is `dotpkg update` or `dotpkg update <pkg>...`.
@@ -110,11 +129,25 @@ impl Update {
     }
 
     /// Whether the new lock differs from the old one at all. `main` uses this
-    /// to avoid rewriting a file -- and displacing its `.bak` -- for nothing.
+    /// to avoid rewriting a file for nothing.
+    ///
+    /// **`Change::Unpinned` counts only when it removed a pin, and both halves
+    /// of that are load-bearing in opposite directions.** Without the
+    /// `previous: None` exclusion, five declared unpinned packages make *every*
+    /// `dotpkg update` rewrite `pkg.lock` for a diff that is empty. Applying the
+    /// exclusion to both forms instead, the run that removes a pin would report
+    /// the removal and not write it -- so the stale entry would survive forever
+    /// and no `update` could ever clear it, which is the one thing §8 of the
+    /// design promises `update` will do.
     pub fn wrote_anything(&self) -> bool {
-        self.changes
-            .iter()
-            .any(|c| !matches!(c, Change::Unchanged { .. } | Change::Kept { .. }))
+        self.changes.iter().any(|c| {
+            !matches!(
+                c,
+                Change::Unchanged { .. }
+                    | Change::Kept { .. }
+                    | Change::Unpinned { previous: None, .. }
+            )
+        })
     }
 }
 
@@ -143,6 +176,7 @@ fn fold_backend(
     declared: &[Name],
     resolutions: &BTreeMap<Name, Resolution>,
     canonical: &BTreeMap<Name, Name>,
+    unpinned: &std::collections::BTreeSet<Name>,
     scope: &Scope,
     changes: &mut Vec<Change>,
 ) {
@@ -171,6 +205,35 @@ fn fold_backend(
             }
             continue;
         }
+        // **Declared `pin = "none"`: nothing resolves, so nothing is stored.**
+        //
+        // Deliberately BELOW the `!scope.covers(name)` branch above, and that
+        // ordering decides all three scopes correctly:
+        //
+        // - `WholeRun` -- line printed, any old entry dropped. The lock is
+        //   being rebuilt and an unpinned package contributes nothing to it.
+        // - `Named` naming this package -- same. The user asked about it, and
+        //   the answer is that there is nothing to pin.
+        // - `Named` NOT naming it -- never reaches here at all, because the
+        //   scope branch fired first and carried the old entry forward. A
+        //   `dotpkg update fzf` must not quietly rewrite anything else, which
+        //   is the rule the `fold_backend_keeps_the_canonical_key_*` tests
+        //   already hold one branch over.
+        //
+        // Not inserting into `lock_map` IS the deletion: the map starts empty
+        // and is rebuilt from these branches. The second loop below leaves this
+        // name alone, because `declared.contains(name)` is true -- so an
+        // unpinned package can never produce a `Change::Dropped`, and that
+        // variant's "no longer declared" wording stays true wherever it prints.
+        if unpinned.contains(name) {
+            changes.push(Change::Unpinned {
+                backend,
+                name: name.clone(),
+                previous: previous.map(|p| p.version().to_string()),
+            });
+            continue;
+        }
+
         match resolutions.get(name) {
             Some(Resolution::Resolved { pin }) => {
                 let fresh = pin.clone();
@@ -275,6 +338,11 @@ pub fn resolve_into_lock(
         declared,
         resolutions,
         &BTreeMap::new(),
+        // Scoop has no unpinned concept: its pin is a bucket commit, and
+        // `config::WingetOpts` records why `pin = "none"` is not spellable for
+        // it. Empty because there is nothing to put here, not because nobody
+        // wired it up.
+        &std::collections::BTreeSet::new(),
         scope,
         &mut changes,
     );
@@ -308,6 +376,10 @@ pub fn run<C: WingetCmd>(
     offline: bool,
 ) -> (Update, Vec<String>) {
     let mut warnings = Vec::new();
+    // Derived once, by the one function that knows how, so the planner,
+    // `update`, `adopt` and `apply` cannot disagree about which packages are
+    // unpinned.
+    let unpinned = declared.winget.unpinned();
 
     if offline {
         warnings.push(
@@ -400,7 +472,15 @@ pub fn run<C: WingetCmd>(
     // a non-empty `[winget] packages`, the same way the bucket loop above is
     // implicitly gated on `[scoop] buckets`: nothing declared means nothing
     // needs a fresher index this run.
-    if !declared.winget.packages.is_empty() {
+    // Narrowed from "any declared winget package" to "any PINNED one": a run
+    // that resolves nothing gains nothing from a fresher index, so a pkg.toml
+    // declaring only unpinned packages spawns no `source update` at all.
+    if declared
+        .winget
+        .packages
+        .iter()
+        .any(|n| !unpinned.contains(n))
+    {
         if offline {
             warnings.push(
                 "offline: winget's index was not refreshed, so `latest` means \
@@ -437,6 +517,12 @@ pub fn run<C: WingetCmd>(
     let mut winget_canonical: BTreeMap<Name, Name> = BTreeMap::new();
     for name in &declared.winget.packages {
         if !scope.covers(name) {
+            continue;
+        }
+        // Nothing is recorded for an unpinned package, so nothing needs
+        // resolving: no `winget show`, no subprocess, no ~1.09 s. `fold_backend`
+        // handles the name from `unpinned` alone.
+        if unpinned.contains(name) {
             continue;
         }
         let resolution = winget.resolve_latest(name, &ctx);
@@ -528,6 +614,7 @@ pub fn run<C: WingetCmd>(
         &declared.winget.packages,
         &winget_resolutions,
         &winget_canonical,
+        &unpinned,
         scope,
         &mut update.changes,
     );
@@ -803,6 +890,7 @@ mod tests {
                 },
             )]),
             &canonical,
+            &std::collections::BTreeSet::new(),
             &Scope::WholeRun,
             &mut changes,
         );
@@ -842,6 +930,7 @@ mod tests {
             &[Name::new("fzf")],
             &res(&[("fzf", resolved("main", 'a', "0.74.2"))]),
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             &Scope::WholeRun,
             &mut changes,
         );
@@ -897,6 +986,7 @@ mod tests {
             std::slice::from_ref(&declared_spelling),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             &Scope::Named(vec![]), // covers nothing
             &mut changes,
         );
@@ -934,6 +1024,7 @@ mod tests {
             std::slice::from_ref(&declared_spelling),
             &resolutions,
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             &Scope::WholeRun,
             &mut changes,
         );
@@ -966,6 +1057,7 @@ mod tests {
             std::slice::from_ref(&declared_spelling),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
             &Scope::WholeRun,
             &mut changes,
         );

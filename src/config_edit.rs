@@ -204,17 +204,25 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
 ///
 /// **`[winget]` cannot be compared wholesale here, because `packages` is what
 /// this function changes -- so every OTHER field of `WingetSection` has to be
-/// named on the `ensure!` line, and today that is exactly `guard`.** It was
-/// named nowhere until now, which meant a winget edit that dropped
-/// `[winget.guard]` passed this guard silently. Adding a third field to
+/// named on the `ensure!` line, and today that is exactly `guard` and `opts`.**
+/// `guard` was named nowhere until Phase 5, which meant a winget edit that
+/// dropped `[winget.guard]` passed this guard silently. Adding a field to
 /// `WingetSection` without adding it here reopens that hole; the sibling
 /// `verify_round_trip` does not have this obligation because it can and does
 /// compare the section as a whole.
+///
+/// **`opts` is the third field that obligation warned about, and it arrived.**
+/// Dropping `[winget.opts]` is silent in a way dropping `guard` is not: every
+/// `pin = "none"` entry vanishing turns those packages back into *pinned* ones,
+/// so the next `apply` starts refusing downgrades for applications the user
+/// deliberately unpinned, with nothing anywhere saying the file changed.
 fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
     let after = crate::config::parse(out)
         .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
     anyhow::ensure!(
-        after.scoop == before.scoop && after.winget.guard == before.winget.guard,
+        after.scoop == before.scoop
+            && after.winget.guard == before.winget.guard
+            && after.winget.opts == before.winget.opts,
         "the edit changed something other than [winget] packages; refusing to write it"
     );
     let mut want = before.winget.packages.clone();

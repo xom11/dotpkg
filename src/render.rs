@@ -110,6 +110,25 @@ pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
                     arch_suffix(arch)
                 )
             }
+            // **The version column is `-`, and that is information rather than
+            // a gap.** `render` is pure and `status` spawns nothing, so at plan
+            // time nothing has asked winget anything and there is no version to
+            // print. Writing `latest` here would be a claim about a value
+            // dotpkg does not hold. `render_preparation`'s line for the same
+            // package DOES carry a version, because by then `winget show` has
+            // answered -- the two lines differing is the whole of what
+            // `--prepare` adds.
+            //
+            // An unpinned package that is already installed reaches no arm at
+            // all: `plan_backend` emits nothing for it, exactly as it emits
+            // nothing for a pinned package sitting where its lock says.
+            Action::Ensure { backend, name } => {
+                format!(
+                    "  + {backend:<6} {name:<14} {:<24} (install, unpinned -- whatever winget's \
+                     index has now)",
+                    "-"
+                )
+            }
             Action::Prune {
                 backend,
                 name,
@@ -485,6 +504,19 @@ fn prepared_line(item: &Prepared) -> String {
             ("!", refused_downgrade_rest(&item.action))
         }
         Outcome::ReadyToSet { .. } => ("ready", ready_rest(&item.action)),
+        // Ready like any other ready shape, and printed like one: what was
+        // fetched, staged, confirmed or merely looked up is dotpkg's business,
+        // not something a user reads a table to learn.
+        //
+        // **The one arm whose right-hand side comes from the OUTCOME rather
+        // than from `ready_rest(&item.action)`, and it has to.** Every other
+        // ready shape's version is on the action, so `ready_rest` can branch on
+        // the action alone. `Action::Ensure` deliberately carries no version --
+        // that absence is the variant's whole content -- so the only version
+        // anywhere in this pair is the one `resolve_for_ensure` just read out
+        // of winget's index, and it is here. This is exactly why the plan's own
+        // line for the same package can print only `-`.
+        Outcome::ReadyToEnsure { version, .. } => ("ready", ensure_rest(version)),
         Outcome::Failed { why } => ("FAILED", why.clone()),
         Outcome::Skipped { why } => ("!", why.clone()),
         Outcome::NotLocked => ("!", "no lock entry -- run `dotpkg update`".to_string()),
@@ -512,6 +544,7 @@ fn action_backend_name(action: &Action) -> (&str, &Name) {
         Action::Install { backend, name, .. }
         | Action::Upgrade { backend, name, .. }
         | Action::Downgrade { backend, name, .. }
+        | Action::Ensure { backend, name }
         | Action::Prune { backend, name, .. }
         | Action::Skip { backend, name, .. }
         | Action::Unmanaged { backend, name, .. }
@@ -559,6 +592,23 @@ fn ready_rest(action: &Action) -> String {
         Action::Prune { version, .. } => format!("{version:<18}(prune)"),
         _ => String::new(),
     }
+}
+
+/// The right-hand side of an unpinned install's `ready` line.
+///
+/// Takes the version rather than the `Action`, unlike `ready_rest` beside it,
+/// because `Action::Ensure` carries none: the version reaching this line was
+/// read out of winget's index by `resolve_for_ensure` and lives in
+/// `Outcome::ReadyToEnsure`. `{version:<18}` matches `ready_rest`'s own column
+/// so the two kinds of ready line align in one table.
+///
+/// It says `unpinned` rather than only `install` because the two are not the
+/// same promise, and this table is the last place a user sees the package
+/// before `apply` acts on it: nothing will be written to `pkg.lock`, and the
+/// version printed here is what it happened to install at, not what it is held
+/// to.
+fn ensure_rest(version: &str) -> String {
+    format!("{version:<18}(install, unpinned)")
 }
 
 /// The right-hand side of a winget `Downgrade`'s refusal line in this
@@ -666,6 +716,30 @@ pub fn render_update(u: &Update) -> String {
             } => {
                 format!("  ! {backend:<6} {name:<14} could not be resolved, nothing to keep: {why}")
             }
+            // Two different facts, split for the reason `Change::Kept`'s own
+            // arms are split: a run that really removed a committed pin and a
+            // run that had nothing to remove must not read the same. The first
+            // is a write and shows what it deleted; the second is the steady
+            // state and writes nothing.
+            //
+            // `Change::Dropped` is deliberately NOT reused for the first of
+            // these: its line says `(dropped, no longer declared)`, and an
+            // unpinned package is still declared. That would be a false line.
+            Change::Unpinned {
+                backend,
+                name,
+                previous: Some(v),
+            } => format!(
+                "  - {backend:<6} {name:<14} {v:<26} (pin dropped -- pkg.toml declares pin = \"none\")"
+            ),
+            Change::Unpinned {
+                backend,
+                name,
+                previous: None,
+            } => format!(
+                "  = {backend:<6} {name:<14} {:<26} (no pin -- pkg.toml declares pin = \"none\")",
+                "unpinned"
+            ),
             // An unchanged package is the ordinary case and would drown the
             // lines that matter. Counted in the summary instead.
             Change::Unchanged { .. } => continue,
@@ -679,9 +753,20 @@ pub fn render_update(u: &Update) -> String {
         .iter()
         .filter(|c| matches!(c, Change::Unchanged { .. }))
         .count();
+    // Subtracted alongside `unchanged` for the same reason: an unpinned package
+    // that had no pin to begin with changed nothing, so counting it as
+    // "changed" would report work that did not happen. Its `previous: Some`
+    // sibling really did remove a pin and IS counted -- the same split
+    // `wrote_anything` makes, kept in agreement with it here so the summary
+    // line and the file on disk cannot tell a user different stories.
+    let unpinned_noop = u
+        .changes
+        .iter()
+        .filter(|c| matches!(c, Change::Unpinned { previous: None, .. }))
+        .count();
     out.push_str(&format!(
         "\n  {} changed, {} unchanged, {} could not be resolved.\n",
-        u.changes.len() - unchanged - u.failed_count(),
+        u.changes.len() - unchanged - unpinned_noop - u.failed_count(),
         unchanged,
         u.failed_count(),
     ));
@@ -720,6 +805,15 @@ pub fn render_adopt(backend: &str, o: &AdoptOutcome) -> String {
             Matched::Content => "the installed manifest matches the bucket exactly",
             Matched::Version => "matched by version only -- the installed manifest differs",
             Matched::WingetConfirmed => "winget confirms this version is still in its index",
+            // The honest answer, not a hedge: no evidence was gathered because
+            // none was needed. No pin is written, so no version's liveness
+            // could matter, and the id came off `winget list`'s own `Id`
+            // column. What this adopt records is ownership -- which is the
+            // whole reason the path exists, since `apply` never installs a
+            // package that is already present and so never comes to own it.
+            Matched::Unpinned => {
+                "nothing was pinned and nothing was confirmed -- only ownership was recorded"
+            }
         };
         // `adopt_one` does not refuse when `pkg.lock` already pins this name
         // (see `Outcome::adopted`'s doc comment), so this write can silently

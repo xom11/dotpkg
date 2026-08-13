@@ -2,14 +2,20 @@
 
 ## Unreleased
 
-Since `v0.1.0` (`7ab9413`). **One behaviour change, and it is a deletion:**
-`update` and `apply` no longer write `pkg.lock.bak` and `pkg.toml.bak`. Nothing
-else a user would notice is different — no command, flag, exit code or output
-line moved, and the one refactor was measured to be behaviour-preserving rather
-than asserted to be. Everything else that changed is the evidence behind 0.1.0
-and the shape of the code underneath it.
+Since `v0.1.0` (`7ab9413`). **Seven behaviour changes: one deletion, five bug
+fixes and a new exit code.** Five of them are ways dotpkg could silently lose
+or withhold something — an ownership record, a usable pin, a warning about a
+running application, or the truth about which version is installed — and
+losing any of them looked exactly like working correctly.
 
-### The one behaviour change
+**Two came from outside this project** — the trailing zero and exit 3 — from
+the first dotfiles repository to call dotpkg rather than be managed by hand.
+Being *called by* something is a different test surface from being run, and it
+found what this project's own review had not. The same report also produced the
+symlink warning below, and named `pkg.lock.bak`, which this tree had already
+removed; the other three fixes came from this project's own audit.
+
+### The behaviour changes
 
 - **`pkg.toml.bak` and `pkg.lock.bak` are no longer written.** Both files are
   **committed**, so the user's own history already holds every version of them
@@ -21,6 +27,101 @@ and the shape of the code underneath it.
   where no version control is watching. Existing `.bak` files are safe to
   delete. The rule this leaves is in the README: a `.bak` is for a file nothing
   else can recover.
+- **A trailing zero component is no longer read as a downgrade.**
+  `plan::is_older` became `plan::version_order` and returns `std::cmp::Ordering`
+  rather than `bool`, because a `bool` cannot say *the same version, spelt
+  differently*: the two sides were compared ragged, lexicographic ordering made
+  the longer one greater once the shared prefix tied, and `30.6.4.0` therefore
+  read as ahead of a pin of `30.6.4`. Zero-extending the shorter side to the
+  same width makes that `Equal`, and `Equal` is not a direction, so the pair
+  produces no action at all. Found by an integrator rather than by this project,
+  and measured on `zenbook-a14` (ARM64, winget 1.29.280) on 2026-08-12 with
+  dotpkg being called *by* a real dotfiles repository rather than run by hand:
+
+  ```
+  ! winget JanDeDobbeleer.OhMyPosh 30.6.4.0 -> 30.6.4 (dotpkg will not
+    downgrade a winget package -- run `dotpkg update`)
+  ```
+
+  winget's ARP version carries four components where winget's own index carries
+  three, and it did not self-heal: `dotpkg update` re-pins the three-component
+  spelling the index gives it, so the refusal came back on every run and floored
+  the calling module to exit 1 every time. **The prerelease case is deliberately
+  not closed by this** — `1.0.0-rc1` against a pin of `1.0.0` still classifies
+  as a downgrade, and `version_order`'s doc comment carries that as a surviving
+  residual. They are different bugs and only one of them is fixed.
+- **Exit 3: everything worked, an app was open.** `apply` and `apply
+  --prepare` now answer 3 when nothing failed, everything prepared, and *every*
+  outstanding item is a package skipped because its own process was running.
+  The README already said such a skip "is not a failure" while giving it a
+  failure's exit code, and the cost landed on the first caller that was a
+  program rather than a person: on a machine where `python`, `beckon` and
+  `kanata` run essentially all the time, a fully resolved lock with nothing
+  wrong reported `7 verified on disk, 0 failed, 1 held.` and exited 1 every
+  night, so an automated caller had to treat 1 as success and lose every real
+  failure. 3 is deliberately narrow — one package whose state could not be read
+  anywhere in the same run makes the whole run 1, because closing a window does
+  not fix a package dotpkg could not read. A caller that treats any non-zero
+  code as failure is still correct. `floor_exit_code` became `apply_exit_code`:
+  it no longer only floors.
+- **A failed ghost reconciliation no longer discards the run's ownership.**
+  `reconcile_ghosts` ran ahead of the run's only `State::save` with `?`, so the
+  one `Err` the post-run scoop rescan can return took `main` out before the
+  save *and* before the closing table was printed — leaving every package the
+  run had just installed unowned, which the next run reads as unmanaged and no
+  prune can ever reach. Ownership is now saved first, reconciliation is a
+  warning rather than a return, and the ordering is pinned by a source guard,
+  since the failure cannot be reached from a hermetic fixture: forcing the
+  post-run scan to fail would fail the pre-run scan too, and `apply` refuses
+  there first. Found by this project's own audit, not on hardware.
+
+- **A winget id that matches a *different* id is refused instead of pinned.**
+  `winget show` runs without `--exact` on purpose — that is what folds case on
+  the way in — which also leaves `--id` a substring filter, so a declared
+  `OhMyPosh` matches `JanDeDobbeleer.OhMyPosh`. `update` wrote the lock under
+  the canonical id while `plan` looks the pin up under the declared name, so
+  the two never met: `apply` refused the whole run at exit 2 with
+  `Skip { NotLocked }`, and `update` rewrote the identical unusable lock every
+  time it was run to fix it. There was no way out from inside dotpkg. Both
+  `update` and `adopt` now fail that one package and name the id to declare
+  instead; a difference of case alone still warns and is still recorded, which
+  is what it always did.
+- **An app directory with no manifest keeps its ownership record.**
+  `Scoop::scan` skipped it silently — correct, since the ordinary cause is a
+  half-finished install — but skipping made the name absent from the scan, and
+  ownership reconciliation deletes any owned name a fresh scan does not
+  mention. So a `Replace` whose uninstall succeeded and whose install failed
+  had its ownership dropped in the same output that reported the failure, and
+  for an `Adopted` package that is unrecoverable. `Scan` gained a third
+  category, `residual`: on disk, invisible to the planner. Not folded into
+  `opaque`, because `opaque` means "do not act" and `Install` is exactly the
+  right action for a half-finished install.
+- **The unguarded-winget-change warning is no longer withheld from a downgrade
+  dotpkg only guessed at.** The exclusion read `Action::Downgrade` as proof
+  that winget would refuse and nothing would reach the disk. That holds only
+  when dotpkg could tell which direction the change is, and
+  `version_order`'s own doc comment says it cannot whenever a version carries
+  anything but digits and dots. So for `1.0.0-rc1` against a pin of `1.0.0`
+  winget saw an ordinary upgrade and performed it, while the one warning that
+  would have let a user protect a running application was suppressed — on the
+  majority class of winget package, the 32 of 36 ids on a14 the path signal
+  cannot see either. Purely numeric pairs are still excluded, so the measured
+  Chrome refusal stays silent; the verb is "change", because the direction is
+  precisely what is not known.
+
+### One thing documented rather than changed
+
+- **Do not symlink `pkg.toml`, `pkg.lock` or `state.json`.** Every write is
+  temp-then-rename, and `rename` replaces the *path* — so a symlink at it is
+  destroyed and the new contents land in an ordinary file where the link used
+  to be, while the file the link pointed at never sees the write and
+  `git status` stays clean throughout. Someone wired a dotfiles repository up
+  through a symlinked `pkg.lock`, having read an `fs::write` elsewhere in the
+  tree and reasonably expected overwrite-in-place, and the repository silently
+  stopped receiving updates. The atomic write is correct and has not been
+  weakened; the README now says outright not to symlink these files, and
+  `a_save_over_a_symlink_replaces_the_link_itself` pins the behaviour so that
+  sentence cannot quietly stop being true.
 
 ### The claims got stronger without the features moving
 
@@ -35,10 +136,20 @@ and the shape of the code underneath it.
   `tests/cli.rs` was never it, being hermetic by design. A CI job now installs
   scoop into a throwaway root, builds a bucket that is a real git repository,
   and serves a real archive over HTTP so scoop does its own hash check.
-- **What that still does not cover is stated rather than left to be assumed:** a
-  version change — scoop's uninstall-then-install window — and any winget
-  mutation. Neither has release-binary or CI evidence. See `docs/OPEN-ITEMS.md`
-  item 29.
+- **The version change closed twice, and the two are not interchangeable.** In
+  CI, the `scoop-integration` job now publishes a second bucket commit at 1.0.1
+  — a different archive, hash and url, so scoop cannot satisfy the install from
+  cache and skip the download half — and applies it, asserting the plan
+  presented it as a version change rather than as an install. From the published
+  binary, on real hardware, in **both directions**: `jq` 1.8.2 → 1.8.1 and
+  1.8.1 → 1.8.2, each verified on disk, with the shims and the ownership
+  surviving the window in which the package is absent. That window — scoop's
+  uninstall-then-install gap, the most dangerous path this tool has — had never
+  been watched by anything before.
+- **What that still does not cover is stated rather than left to be assumed:**
+  **no winget mutation has run anywhere** outside the Phase 4b rounds and their
+  own trees. It has no release-binary evidence and no CI evidence. See
+  `docs/OPEN-ITEMS.md` item 29.
 
 ### Code
 
@@ -50,11 +161,20 @@ and the shape of the code underneath it.
   0 lost, 0 added.
 - One test added, joining `Backend::scan` to the `[winget.guard]` opaque warning
   — two halves that were each pinned and never connected.
+- **The planner's purity guard stopped carrying two copies of its own
+  allowlist.** `the_planner_source_performs_no_io` checked fully-qualified
+  `std::` paths against a hardcoded string rather than against the `ALLOWED`
+  list beside it, so admitting one more pure import — `std::cmp::Ordering`, for
+  the fix above — made the guard fail for a reason that had nothing to do with
+  purity. It now reads the `std::` entries out of `ALLOWED`, and asserts that it
+  found some, because a guard that vouches for nothing rejects everything.
 
 ### Record
 
 - **`docs/OPEN-ITEMS.md`** is the one live list, keeping every item under the
-  number it already had.
+  number it already had. Items that closed outright no longer carry their prose:
+  23 and 27 are rows in its own "Closed, with what closed it" table, which
+  exists so a reference to one of those numbers still finds its resolution.
 - Twenty documents removed, about 28,200 lines: the phase narratives and then
   all eight task-breakdown plans. Every one still reads with `git show`; both
   waves name their commit in `OPEN-ITEMS.md`.
@@ -64,6 +184,13 @@ and the shape of the code underneath it.
 - **`flake.lock` was left behind by that removal and is now gone too** — a lock
   file for a flake that does not exist, in a project whose whole thesis is that a
   lock records what was actually resolved.
+
+**One caveat about this section, stated rather than left to be discovered.** The
+`version_order` fix and the purity-guard change are in the working tree and not
+yet in a commit; everything above them is. Work is still in flight there, and
+nothing has been entered here that cannot be read out of the tree as it stands —
+an entry for a change that has not landed would be a prediction, which is the
+one thing a changelog must never carry.
 
 ## 0.1.0 — 2026-08-12
 

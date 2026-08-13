@@ -14,8 +14,8 @@ behind 0.1.0, stated before the feature list rather than after it.
 | that machine | `zenbook-a14`, **aarch64** (ARM64), winget **v1.29.280** |
 | Windows architectures dogfooded | **aarch64 only** — no x86_64 machine has ever run it |
 | what the **published binary** has done on real hardware | installed a package, changed its version **in both directions**, and pruned it — each verified on disk. **No winget mutation, ever** |
-| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push and pull request, plus a Windows job that drives **real scoop** in a throwaway root |
-| suite size | **659** test names on macOS, **660** on Windows — 658 run there and 2 `#[ignore]`d. Both figures read from a run's own output on 2026-08-12, not carried forward |
+| automated coverage | the suite runs on `ubuntu-latest`, `macos-latest` and `windows-latest` on every push to `main` and on every pull request, plus a Windows job that drives **real scoop** in a throwaway root |
+| suite size | **669** test names on macOS, read from `cargo test -- --list` on 2026-08-13. The Windows figure is **not restated here**: it was 660 on 2026-08-12, that tree is three fixes behind this one, and this round had no Windows machine to re-read it on. Deriving it by arithmetic is exactly what this row exists not to do |
 
 **What that does and does not buy.** Every behaviour this README describes is
 pinned by tests that were each confirmed able to fail, and the winget and scoop
@@ -63,7 +63,17 @@ disk, and `winget list`.
 
 **What dotpkg writes beside those files, which is one file and not three.**
 Every write is temp-then-rename, so a run that dies cannot leave a half-written
-file in place. Only `state.json` also keeps its displaced copy, as
+file in place.
+
+**Do not symlink `pkg.toml`, `pkg.lock` or `state.json`.** That same
+temp-then-rename replaces the *path*, so a symlink at it is destroyed and the
+new contents land in an ordinary file where the link used to be — the file the
+link pointed at never sees the write, and `git status` stays clean the whole
+time, so nothing tells you the repository has stopped receiving updates. Point
+`--config`, `--lock` and `--state` at the real paths instead; that is what they
+are for. Reported by the first person to wire dotpkg into a dotfiles
+repository, who reasonably expected overwrite-in-place. The atomic write is
+correct and is not going to be weakened to rescue the link. Only `state.json` also keeps its displaced copy, as
 `state.json.bak` next to it in the platform state directory: it is the one file
 here that is deliberately **not** committed — the truth of one machine rather
 than shareable intent — so nothing else can recover it, and losing it loses the
@@ -260,14 +270,34 @@ goes to stderr.
 Defined by what the operator must do next, not by what happened internally.
 
 - **0** — the plan is fully realised on disk and nothing is outstanding.
-- **1** — something is outstanding: a package failed, was held (by the
-  running re-sampler, or because another package in the run could not be
-  prepared), could not be prepared at all, or was skipped because its own
-  process was running. That last one is not a failure and never gates a
-  removal or refuses the run — the user can close the app and rerun — but it
-  is still outstanding: the machine may or may not have actually changed.
+- **1** — something is outstanding and it needs looking at: a package failed,
+  could not be prepared at all, was held (by the running re-sampler, or
+  because another package in the run could not be prepared), or was skipped
+  because dotpkg could not read its state.
 - **2** — refused before anything was attempted; nothing changed. A guard
   fired, the user said no, or no answer was available.
+- **3** — everything dotpkg could do succeeded, and the only thing left is a
+  package skipped because **its own process was running**. Close the app and
+  run again; there is nothing to diagnose.
+
+**Why 3 exists, and why it is deliberately narrow.** A running skip is not a
+failure — this README said so while giving it a failure's exit code, and the
+cost landed on the first person to call `dotpkg` from something rather than
+type it. Measured on 2026-08-12 while a real dotfiles repo replaced its
+hand-written scoop and winget modules with dotpkg: on a machine where `python`,
+`beckon` and `kanata` are running essentially all the time, a fully resolved
+lock with nothing whatever wrong reported `7 verified on disk, 0 failed, 1
+held.` and exited 1 — every run. That left an automated caller choosing between
+treating 1 as success, which loses every real failure, and failing nightly.
+
+So 3 requires **all** of: nothing failed, everything prepared, and *every*
+outstanding item is a running process. One package whose state could not be
+read, anywhere in the same run, makes the whole run 1 — closing a window does
+not fix a package dotpkg could not read, and 3 must never be able to hide one.
+A caller that treats any non-zero code as failure is still correct.
+
+`--prepare` uses the same three codes for the same reasons, so a scheduled
+health check and the run it predicts cannot disagree.
 
 ## `update`
 
@@ -414,6 +444,9 @@ fails, say) is reported as what really changed on disk versus what did not
 - [winget write-path measurements](docs/measurements-2026-08-10-winget-write-path.md)
   — the 27 write-verb invocations that design rests on, exit codes and stdout
   included.
+- [Phase 5 design](docs/specs/2026-08-11-phase5-guard-unmanaged-retry-design.md)
+  — the running-process fence and the `Unmanaged` collapse as designed, and why
+  a `[winget] ignore` list was rejected in favour of counting what is there.
 - [Phase 5 measurements](docs/measurements-2026-08-11-phase5-guard-unmanaged-retry.md)
   — the running-process fence, the `Unmanaged` flood, and whether winget has a
   transient failure at all.
@@ -426,17 +459,11 @@ fails, say) is reported as what really changed on disk versus what did not
   published artifact, plus an architecture that changed underneath a version and
   the first live firing of the unreadable-backend path.
 
-**Twenty documents are no longer in the tree — the narrative and the plans.**
-Removed 2026-08-12 in two waves totalling about 28,200 lines: six dogfood
-records and six phase notes, then all eight task-breakdown plans, which were
-`docs/`'s single largest thing at 19,482 lines. What is left is what gets read:
-the designs in `docs/specs/`, the raw commands and output in
-`docs/measurements-*`, and what is still open in
-[`docs/OPEN-ITEMS.md`](docs/OPEN-ITEMS.md). Nothing was lost — each wave names
-the commit it still exists at, `git show 07dd86b:docs/phase5-notes.md` and
-`git show 3bf1584:docs/plans/…`, and `OPEN-ITEMS.md` lists every file.
-Documents that cite them by name were left as written, because a
-sentence that was true about the tree it was written against stays true.
+**Twenty documents are no longer in the tree** — the narrative and the plans,
+about 28,200 lines removed 2026-08-12 in two waves. Nothing was lost, and this
+README does not repeat the recovery instructions:
+[`docs/OPEN-ITEMS.md`](docs/OPEN-ITEMS.md) names both waves, every file in
+each, and the commit the files still read at with `git show`.
 
 ## Build
 

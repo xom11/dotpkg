@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-Since `v0.1.0` (`7ab9413`). **Seven behaviour changes: one deletion, five bug
-fixes and a new exit code.** Five of them are ways dotpkg could silently lose
+Since `v0.1.0` (`7ab9413`). **Eight behaviour changes: one deletion, six bug
+fixes and a new exit code.** Six of them are ways dotpkg could silently lose
 or withhold something — an ownership record, a usable pin, a warning about a
 running application, or the truth about which version is installed — and
 losing any of them looked exactly like working correctly.
@@ -13,7 +13,7 @@ the first dotfiles repository to call dotpkg rather than be managed by hand.
 Being *called by* something is a different test surface from being run, and it
 found what this project's own review had not. The same report also produced the
 symlink warning below, and named `pkg.lock.bak`, which this tree had already
-removed; the other three fixes came from this project's own audit.
+removed; the other five fixes came from this project's own audit.
 
 ### The behaviour changes
 
@@ -108,6 +108,24 @@ removed; the other three fixes came from this project's own audit.
   cannot see either. Purely numeric pairs are still excluded, so the measured
   Chrome refusal stays silent; the verb is "change", because the direction is
   precisely what is not known.
+
+- **A winget row whose Name is not ASCII is cut at the column, not at the
+  byte.** `parse_list` took its column offsets from the header and applied them
+  to data rows as *byte* offsets. winget pads to **character** columns:
+  measured on `list-full.txt` line 67, whose two U+00AE make it 220 bytes
+  against 218 characters, the `Id` column's content begins at character 64 and
+  byte 66 while the header puts `Id` at 64. Every field on such a row was
+  therefore cut two bytes early. That row survives because its columns are wide
+  and `trim` eats the shift — but the narrow one-row table `winget list -e --id
+  <id>` prints has a single space of slack, and that is the table
+  `winget_verdict` parses to decide whether a mutation happened. A truncated
+  `Id` there reads as "not the package I asked about", so `apply` would report
+  a change that never occurred, and the winget path fence would be dark for the
+  same package. Offsets are now translated through each line's own
+  `char_indices`. `floor_char_boundary` is deleted: it existed to keep a
+  byte-offset cut from panicking mid-character, which was defending the wrong
+  thing — the byte offset was never the right place to cut. Its mutation record
+  in `docs/OPEN-ITEMS.md` §C is marked as describing a function that is gone.
 
 ### One thing documented rather than changed
 

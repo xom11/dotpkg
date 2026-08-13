@@ -89,67 +89,96 @@ fn a_not_found_message_is_not_a_table_and_is_not_silently_empty() {
 }
 
 #[test]
-fn a_column_boundary_landing_inside_a_multibyte_character_does_not_panic() {
+fn a_row_whose_name_is_not_ascii_is_cut_at_the_column_not_at_the_byte() {
     // **Why this is synthetic rather than a fixture.** Every file under
     // `tests/fixtures/winget/` is raw stdout that `winget.exe` actually wrote
-    // on a14 (`PROVENANCE.md`), and a14 is an en-US machine whose 141 captured
-    // rows are pure ASCII. Fabricating a fixture would put invented bytes in a
-    // directory whose whole value is that nothing there was invented. So the
-    // input is inline, exactly as
+    // on a14 (`PROVENANCE.md`), and a14 is an en-US machine. Fabricating a
+    // fixture would put invented bytes in a directory whose whole value is
+    // that nothing there was invented. So the input is inline, exactly as
     // `a_header_that_is_not_the_shape_this_parser_measured_is_refused` below
     // already does for a header nobody captured either.
     //
-    // **What it covers that 15 real captures cannot.** `parse_list` slices
-    // every field by BYTE offset taken from the header. `floor_char_boundary`
-    // exists so that an offset landing mid-character walks back to a boundary
-    // instead of panicking -- and with only ASCII fixtures, that loop had never
-    // executed once. Measured before this test: 7 of its 12 mutants survived,
-    // including `-=` becoming `+=`, because nothing reached the body at all.
-    // A non-ASCII package name is not exotic; it is what any non-en-US machine
-    // is one install away from.
+    // **The padding rule this encodes is measured, not assumed.**
+    // `list-full.txt` line 67 carries two U+00AE, making it 220 bytes against
+    // 218 characters, and its `Id` content begins at **character 64, byte
+    // 66**, while the header puts `Id` at 64. winget pads to character
+    // columns. Both rows below are therefore padded to the same character
+    // columns as the header, which is what a real winget table looks like --
+    // the earlier version of this test padded by BYTE, which no winget has
+    // ever printed, and so pinned the parser's mistake as if it were the
+    // format.
     //
-    // The layout, computed rather than eyeballed: `Id` starts at byte 8, and
-    // the three bytes of `日` occupy 6, 7 and 8 -- so the Id column's own
-    // offset is the LAST byte of that character, and is not a boundary.
+    // Line 67 survives byte-slicing only because its fields sit in very wide
+    // columns, so the two-byte shift lands in padding and `trim` eats it. The
+    // narrow one-row table `winget list -e --id <id>` prints has a single
+    // space of slack (`list-single.txt`), and that is the table
+    // `winget_verdict` parses to decide whether a mutation happened -- so a
+    // truncated `Id` there reads as "not the package I asked about" and
+    // `apply` reports a change that never occurred.
+    //
+    // **The row below is built to make the shift exceed the slack, and the
+    // arithmetic is worked rather than eyeballed**, because a first draft that
+    // used one accented character was passed by the byte-offset parser too:
+    // one extra byte against one space of slack takes only padding, and the
+    // test proved nothing. Two accented characters against one space is what
+    // reaches the content.
+    //
+    //   `Zöé` is 3 characters and 5 bytes, padded to character column 8.
+    //   `abcdefg` is 7 characters in the 8-wide `Id` column, so exactly one
+    //   space of slack follows it, and `Version` begins at character 16.
+    //   Byte-slicing at [8..16] returns `"abcdef"`: the `g` falls outside.
     let header = "Name    Id      Version";
-    let row = "Zoxide日       1.0.0";
+    let row = "Zöé     abcdefg 1.0.0";
     let table = format!("{header}\r\n{}\r\n{row}\r\n", "-".repeat(header.len()));
 
     let rows = parse_list(&table).expect("a multibyte name must parse, not refuse");
 
     assert_eq!(rows.len(), 1, "got {rows:?}");
-    // Flooring walks the split character to the FOLLOWING field rather than
-    // cutting it in half: `Name` ends before it, `Id` begins with it. Both
-    // halves are asserted because `-=` mutated to `+=` also avoids the panic --
-    // it walks UP to the next boundary instead -- and would put the character
-    // in `Name` while leaving `Id` empty, which drops the row entirely.
-    assert_eq!(rows[0].name, "Zoxide");
-    assert_eq!(rows[0].id, "日");
-    // The Version column's own offset is a clean boundary, so it must be
-    // untouched by any of this.
+    assert_eq!(rows[0].name, "Zöé");
+    // The assertion the byte-offset parser cannot satisfy.
+    assert_eq!(
+        rows[0].id, "abcdefg",
+        "the Id column must not lose its last character to the extra bytes in the name"
+    );
     assert_eq!(rows[0].version, "1.0.0");
 }
 
 #[test]
-fn the_same_layout_in_pure_ascii_splits_at_the_offset_itself() {
-    // The control for the test above. Same columns, same byte width, one
-    // character per byte -- so byte 8 IS a boundary and no walking back
-    // happens. If both tests agreed on the split, the one above would not be
-    // showing that `floor_char_boundary` did anything.
-    // Seven spaces, not six: `Zoxide日` and `Zoxideabc` are both 9 BYTES, so
-    // the padding has to match byte for byte or `Version` lands mid-number and
-    // the two tests stop being comparable. The first draft of this control had
-    // six and failed with `id == "c      1"`, which is the control doing its
-    // job on itself.
+fn the_same_layout_in_pure_ascii_reads_identically() {
+    // The control for the test above: the same table with the accent removed
+    // and the padding kept at the same character columns. In pure ASCII a
+    // character column and a byte offset are the same number, so this row read
+    // correctly before the fix and must read identically after it -- which is
+    // what shows the fix changed the non-ASCII case and nothing else.
     let header = "Name    Id      Version";
-    let row = "Zoxideabc       1.0.0";
+    let row = "Zoxide  abcdefg 1.0.0";
     let table = format!("{header}\r\n{}\r\n{row}\r\n", "-".repeat(header.len()));
 
     let rows = parse_list(&table).unwrap();
     assert_eq!(rows.len(), 1, "got {rows:?}");
-    assert_eq!(rows[0].name, "Zoxideab", "the cut falls at byte 8 exactly");
-    assert_eq!(rows[0].id, "c");
+    assert_eq!(rows[0].name, "Zoxide");
+    assert_eq!(rows[0].id, "abcdefg");
     assert_eq!(rows[0].version, "1.0.0");
+}
+
+#[test]
+fn the_one_non_ascii_row_in_the_captures_parses_to_its_real_id() {
+    // The measured half of the pair above, against real bytes rather than
+    // constructed ones: `list-full.txt` line 67 is the only non-ASCII row in
+    // any of the 29 files under `tests/fixtures/winget/`.
+    //
+    // This passed before the fix too, and that is the point of keeping it --
+    // it is the evidence for the claim that wide columns hide the shift. It
+    // pins the id so that a future change to the column arithmetic cannot
+    // quietly break the one real row that exercises it.
+    let rows = parse_list(&fixture("list-full.txt")).unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.name.contains('®'))
+        .expect("list-full.txt carries one row with a non-ASCII name");
+    assert_eq!(row.id, "Microsoft.OpenCLGLVulkanCompatibilityPack");
+    assert_eq!(row.version, "1.2606.3.0");
+    assert_eq!(row.source.as_deref(), Some("winget"));
 }
 
 #[test]

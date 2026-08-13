@@ -1455,3 +1455,161 @@ fn adopt_backend_winget_does_not_warn_when_the_typed_spelling_already_matches_th
         out.warnings
     );
 }
+
+// -- adopt --backend winget for a package declared `pin = "none"` -----------
+//
+// Design: `docs/specs/2026-08-13-winget-unpinned-design.md` §9. This path is
+// the ONLY way an already-installed unpinned package ever becomes prunable:
+// `apply` never installs a package that is already present, so it never comes
+// to own one, and `prune` can only reach what dotpkg owns. It therefore has to
+// work rather than refuse.
+//
+// `list-single.txt` is the same a14 capture the test above uses -- one
+// installed package, `ajeetdsouza.zoxide` at `0.10.0`.
+
+#[test]
+fn adopting_an_unpinned_package_records_ownership_and_writes_no_lock_entry() {
+    // One scripted response, not two: the scan, and nothing else. A second
+    // entry would let a stray `show -v` call pass unnoticed -- see the
+    // sibling test below, which turns that into a panic.
+    let winget = Winget::new(FakeWinget::script(vec![(
+        0,
+        winget_fixture("list-single.txt"),
+    )]));
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "# hand written\n[winget]\npackages = [\"ajeetdsouza.zoxide\"]\n\
+         [winget.opts]\n\"ajeetdsouza.zoxide\" = { pin = \"none\" }\n",
+    )
+    .unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+    assert_eq!(
+        out.adopted[0],
+        (Name::new("ajeetdsouza.zoxide"), Matched::Unpinned, None),
+        "a fourth rule, not one of the other three: nothing was confirmed \
+         because nothing is being pinned, and there is no previous pin to \
+         replace because none is ever written"
+    );
+    assert!(out.refused.is_empty(), "{out:?}");
+
+    // **The point of the whole path.** Ownership really is recorded, which is
+    // what lets a later `prune` reach this package at all.
+    let state = State::load_or_empty(&state_path).unwrap();
+    assert_eq!(
+        state.ownership(WINGET, &Name::new("ajeetdsouza.zoxide")),
+        Some(Ownership::Adopted)
+    );
+
+    // And no lock entry exists -- not an empty one, not a stub. `pkg.lock`
+    // records what a declaration resolved to, and an unpinned declaration
+    // resolves to nothing.
+    let lock = dotpkg::lock::load_or_empty(&lock_path).unwrap();
+    assert!(
+        lock.winget.is_empty(),
+        "an unpinned adopt must write no winget pin: {lock:?}"
+    );
+    assert!(
+        lock.scoop.is_empty(),
+        "and nothing on the other side either"
+    );
+
+    // pkg.toml is already correct -- the package is declared, with its opts
+    // entry -- so it must come back byte-identical, comments and all.
+    let cfg_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(cfg_text.contains("# hand written"), "{cfg_text}");
+    assert_eq!(
+        dotpkg::config::parse(&cfg_text).unwrap().winget.unpinned(),
+        std::collections::BTreeSet::from([Name::new("ajeetdsouza.zoxide")]),
+        "the opts entry must survive the adopt: losing it would silently turn \
+         the package back into a pinned one"
+    );
+}
+
+#[test]
+fn adopting_an_unpinned_package_asks_winget_nothing_beyond_the_scan() {
+    // There is no version to confirm, so `resolve_installed` -- one ~1 s
+    // `winget show -v` -- must not run at all. `FakeWinget::script` panics
+    // when a call has no scripted response, so the single entry below IS the
+    // assertion: a second spawn turns this test red rather than slow.
+    //
+    // The canonical id needs no lookup either. `inst.name` is `winget list`'s
+    // own `Id` column, canonical by construction, unlike a hand-typed
+    // `pkg.toml` spelling.
+    let fake = FakeWinget::script(vec![(0, winget_fixture("list-single.txt"))]);
+    let winget = Winget::new(fake.clone());
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pkg.toml");
+    let lock_path = dir.path().join("pkg.lock");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(
+        &config_path,
+        "[winget]\npackages = [\"ajeetdsouza.zoxide\"]\n\
+         [winget.opts]\n\"ajeetdsouza.zoxide\" = { pin = \"none\" }\n",
+    )
+    .unwrap();
+
+    let out = run_winget(
+        winget,
+        &[Name::new("ajeetdsouza.zoxide")],
+        &config_path,
+        &lock_path,
+        &state_path,
+    )
+    .unwrap();
+    assert_eq!(out.adopted.len(), 1, "{out:?}");
+
+    let calls = fake.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "exactly one winget invocation -- the scan. Got: {calls:?}"
+    );
+    assert_eq!(
+        calls[0][0], "list",
+        "and it is the scan, not a show: {calls:?}"
+    );
+
+    // The counterweight, in the same test so the two cannot drift: the PINNED
+    // adopt of the same package really does spawn a second call. Without this,
+    // a change that broke adoption entirely would leave the assertion above
+    // green for the wrong reason.
+    let fake2 = FakeWinget::script(vec![
+        (0, winget_fixture("list-single.txt")),
+        (0, winget_fixture("show-old-version.txt")),
+    ]);
+    let dir2 = tempfile::tempdir().unwrap();
+    let cfg2 = dir2.path().join("pkg.toml");
+    std::fs::write(&cfg2, "[winget]\npackages = [\"ajeetdsouza.zoxide\"]\n").unwrap();
+    let out2 = run_winget(
+        Winget::new(fake2.clone()),
+        &[Name::new("ajeetdsouza.zoxide")],
+        &cfg2,
+        &dir2.path().join("pkg.lock"),
+        &dir2.path().join("state.json"),
+    )
+    .unwrap();
+    assert_eq!(out2.adopted.len(), 1, "{out2:?}");
+    assert_eq!(
+        fake2.calls().len(),
+        2,
+        "a pinned adopt asks twice -- scan, then `show -v` to confirm the \
+         version it is about to pin: {:?}",
+        fake2.calls()
+    );
+}

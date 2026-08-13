@@ -754,6 +754,53 @@ mod tests {
         );
     }
 
+    /// An unpinned adopt writes no lock entry, so `write_in_order` must not
+    /// name `pkg.lock` among the files that changed.
+    ///
+    /// `write_in_order` pushed `"pkg.lock"` unconditionally once the lock
+    /// closure returned `Ok`, which for this path would name a file that never
+    /// changed -- in the one report whose entire job is to say which files did.
+    /// `WriteLock` gained `Result<bool>` for exactly the reason `WritePkgToml`
+    /// already had it.
+    ///
+    /// Through the seam rather than through a real filesystem failure, like its
+    /// two siblings above and for the same reason: this runs on Windows, where
+    /// `tests/adopt.rs`'s `#[cfg(unix)]` partial-write test cannot. It also
+    /// makes the LAST write fail, so `wrote` has somewhere to be wrong -- with
+    /// every write succeeding, an unconditional push would be invisible.
+    #[test]
+    fn write_in_order_does_not_name_pkg_lock_when_no_lock_was_written() {
+        let log: RefCell<Vec<&str>> = RefCell::new(Vec::new());
+        let result = write_in_order(
+            // `Ok(false)`: an unpinned adopt has no pin to write.
+            WriteLock(|| {
+                log.borrow_mut().push("lock (skipped)");
+                Ok(false)
+            }),
+            // Already declared, so its bytes would not change either.
+            WritePkgToml(|| {
+                log.borrow_mut().push("pkg.toml (skipped)");
+                Ok(false)
+            }),
+            WriteState(|| {
+                log.borrow_mut().push("state.json");
+                anyhow::bail!("state.json write failed")
+            }),
+        );
+
+        let failure = result.expect_err("the state write must fail");
+        assert_eq!(
+            failure.wrote,
+            Vec::<&'static str>::new(),
+            "nothing landed, so nothing may be named -- naming pkg.lock here              would send a user whose adopt died to check a file this run never              touched"
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec!["lock (skipped)", "pkg.toml (skipped)", "state.json"],
+            "all three closures still run in order; skipping a WRITE is not              skipping the step"
+        );
+    }
+
     /// A failure on the FIRST write must stop before the other two ever run
     /// -- the "all or nothing per package" promise, observed through the
     /// same seam rather than only through `Outcome`.

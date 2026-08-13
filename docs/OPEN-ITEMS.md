@@ -180,10 +180,31 @@ Nothing here is known to be wrong. Nothing here has been watched.
   ways: `cargo mutants -- --include-ignored` does not reach libtest (it needs the
   two-`--` form), and `cargo install cargo-mutants --locked` cannot build on a14
   at all — it pins `winapi` 0.3, which fails on `aarch64-pc-windows-msvc`.
+- **`floor_char_boundary` no longer exists, so 6 of the counts below describe a
+  function that is not in the tree.** Deleted 2026-08-13, and the reason is that
+  it was defending the wrong thing. It walked a byte offset back to a character
+  boundary so that slicing a data row at a *header byte offset* could not panic
+  mid-character — but winget pads to **character** columns, measured: on
+  `tests/fixtures/winget/list-full.txt` line 67 the `Id` column's content
+  begins at character 64 and **byte 66**, while the header puts `Id` at 64. The
+  byte offset was never the right place to cut, and flooring only chose which
+  wrong place. `parse_list` now maps the header's character columns through
+  each line's own `char_indices`, which cannot land mid-character, so there is
+  nothing left to floor.
+
+  What that does to the four kinds below: its **3 killed** and its **3
+  characterised as equivalent** are both retired rather than resolved, leaving
+  **9 genuinely open and unexamined** as the only figure still live. The
+  function still reads at `git show 2fdcc69:src/backend/winget.rs`. Neither
+  `docs/measurements-2026-08-12-phase10-mutation-debt.md` nor
+  `docs/measurements-2026-08-12-phase5-residuals.md` was touched: both are
+  frozen records and were true of the trees they were taken on.
 - **The 20 surviving mutants were sorted into four kinds on 2026-08-12 and are
   now 15**, plus one detected only by timeout. Full round in
   `docs/measurements-2026-08-12-phase10-mutation-debt.md`. Counting them as one
-  number was hiding that only two of the four kinds are debt at all.
+  number was hiding that only two of the four kinds are debt at all. **Read the
+  entry above first**: two of the four kinds no longer have a function to be
+  about.
 
   - **Accepted by design, 3 — not debt, and should stop being carried as it.**
     `RealWinget::run` (1) and `RealWingetMutator::run` (2) are the only

@@ -30,24 +30,20 @@ pub struct WingetRow {
 /// sourceless.
 const COLUMN_NAMES: [&str; 5] = ["Name", "Id", "Version", "Available", "Source"];
 
-/// Step back to the nearest UTF-8 char boundary at or before `idx`.
-///
-/// Column offsets come from `find`ing ASCII header labels, but the *data*
-/// rows below that header are not guaranteed ASCII (a package name can carry
-/// an accented character even under the en-US locale winget was measured
-/// in). Slicing a `str` on a non-boundary byte offset panics; this makes that
-/// impossible, at the cost of a field occasionally swallowing or exposing one
-/// extra byte of a multi-byte character it split through the middle of --
-/// better than aborting the whole scan over one package's name.
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    if idx > s.len() {
-        idx = s.len();
-    }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
+// `floor_char_boundary` stood here until 2026-08-13. It walked a byte offset
+// back to the nearest UTF-8 boundary so that slicing a data row at a header's
+// byte offset could not panic mid-character, "at the cost of a field
+// occasionally swallowing or exposing one extra byte" -- its own words.
+//
+// That cost was the bug, not the price of avoiding it. winget pads to
+// character columns, so the byte offset was never the right place to cut and
+// flooring only chose which wrong place. `parse_list` now translates the
+// header's character columns through each line's own `char_indices`, which
+// cannot land mid-character, so there is nothing left to floor.
+//
+// Its three killed mutants are recorded in `docs/OPEN-ITEMS.md` §C; that
+// record now describes a function this file no longer has. `git show
+// 2fdcc69:src/backend/winget.rs` is where it still reads.
 
 /// Parse the table `winget list` (with any filter/flag combination) prints to
 /// stdout.
@@ -86,6 +82,12 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
     // end of the *previous column's label text* -- never a hardcoded offset.
     // A name absent from this particular header (most commonly `Available`)
     // is simply absent from `layout`.
+    //
+    // Stored as a **character** position, not the byte position `find`
+    // returns. Every captured header is ASCII, so the two are equal here and
+    // this conversion changes nothing about the header -- it is the data rows
+    // that need the distinction, and keeping one unit end to end is what stops
+    // the two from being confused at the point of use. See `field`.
     let mut layout: Vec<(&'static str, usize)> = Vec::new();
     let mut cursor = 0usize;
     for &name in COLUMN_NAMES.iter() {
@@ -95,7 +97,7 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
         if let Some(rel) = header[cursor..].find(name) {
             let start = cursor + rel;
             cursor = start + name.len();
-            layout.push((name, start));
+            layout.push((name, header[..start].chars().count()));
         }
     }
 
@@ -113,21 +115,43 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
     let has_available = layout.iter().any(|&(name, _)| name == "Available");
     let has_source = layout.iter().any(|&(name, _)| name == "Source");
 
-    // `line[start..next_start]`, trimmed; empty when the line does not reach
-    // `start` at all (the common case for a sourceless row: winget pads the
-    // header but not every data line out to the last column).
-    let field = |line: &str, name: &str| -> String {
+    // The field between this column's character position and the next one's,
+    // trimmed; empty when the line does not reach `start` at all (the common
+    // case for a sourceless row: winget pads the header but not every data
+    // line out to the last column).
+    //
+    // **`byte_at` translates character columns into byte offsets for this
+    // one line, and that translation is the whole point.** winget pads to
+    // character columns, not byte counts. Measured on `list-full.txt`'s single
+    // non-ASCII row -- two U+00AE, so 220 bytes against 218 characters -- the
+    // `Id` column's content begins at **character 64 and byte 66**, while the
+    // header puts `Id` at 64. Slicing that row at byte 64 therefore cuts every
+    // field two bytes early relative to where the column really is.
+    //
+    // On that row it happens to survive, because the shift is smaller than the
+    // padding around each field and `trim` eats the difference. It stops
+    // surviving as soon as the shift reaches the padding -- and the narrow
+    // one-row table `winget list -e --id <id>` prints has a single space of
+    // slack (`list-single.txt`), which is the table `winget_verdict` and
+    // `installed_at_user_scope` parse to decide whether a mutation happened.
+    // A truncated `Id` there reads as "not the package I asked about", so
+    // `apply` reports a change that did not happen.
+    let field = |line: &str, byte_at: &[usize], name: &str| -> String {
         let idx = layout
             .iter()
             .position(|&(n, _)| n == name)
             .expect("caller checks the column is present before asking for it");
-        let start = layout[idx].1;
-        if start >= line.len() {
+        // Past the end of a short line, both bounds clamp to its length and
+        // the field is empty -- the sourceless-row case above.
+        let at = |col: usize| *byte_at.get(col).unwrap_or(&line.len());
+        let start = at(layout[idx].1);
+        let end = layout
+            .get(idx + 1)
+            .map(|&(_, s)| at(s))
+            .unwrap_or(line.len());
+        if start >= end {
             return String::new();
         }
-        let end = layout.get(idx + 1).map(|&(_, s)| s).unwrap_or(line.len());
-        let end = floor_char_boundary(line, end.min(line.len()));
-        let start = floor_char_boundary(line, start);
         line[start..end].trim().to_string()
     };
 
@@ -144,9 +168,20 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
             continue;
         }
 
-        let name = field(line, "Name");
-        let id = field(line, "Id");
-        let version = field(line, "Version");
+        // Built once per line rather than once per field: `char_indices` is a
+        // walk of the whole line, and there are up to five fields on it.
+        // The trailing `line.len()` is the position one past the last
+        // character, so a column that starts exactly at the end of the line
+        // resolves rather than falling into the `unwrap_or` clamp.
+        let byte_at: Vec<usize> = line
+            .char_indices()
+            .map(|(b, _)| b)
+            .chain(std::iter::once(line.len()))
+            .collect();
+
+        let name = field(line, &byte_at, "Name");
+        let id = field(line, &byte_at, "Id");
+        let version = field(line, &byte_at, "Version");
         if name.is_empty() || id.is_empty() || version.is_empty() {
             // Not a table row. `list-upgrade-available.txt` prints
             // "9 upgrades available." after its first table, then a second
@@ -159,10 +194,10 @@ pub fn parse_list(stdout: &str) -> Result<Vec<WingetRow>> {
         }
 
         let available = has_available
-            .then(|| field(line, "Available"))
+            .then(|| field(line, &byte_at, "Available"))
             .filter(|s| !s.is_empty());
         let source = has_source
-            .then(|| field(line, "Source"))
+            .then(|| field(line, &byte_at, "Source"))
             .filter(|s| !s.is_empty());
 
         rows.push(WingetRow {

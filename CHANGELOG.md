@@ -17,6 +17,15 @@ tighten its handling of exit 1, until a machine can be *known* to carry the new
 binary. That is what the version number is for, and leaving it at `0.1.0` made
 every fix below unusable downstream however correct it was.
 
+**The published artifact was checked on the machine a caller will gate on**, not
+merely built: downloaded from the release on `zenbook-a14`, sha256
+`23cbf520…` matching the `SHA256SUMS` the release ships, answering
+`dotpkg 0.2.0`, parsing a `pin = "none"` config and exiting 0 — while the
+v0.1.0 binary already installed on that machine still answers `dotpkg 0.1.0`.
+The two are distinguishable, which is the whole point of the bump. **What that
+does not cover:** the published binary performed no winget mutation here, only
+`status`; `docs/OPEN-ITEMS.md` item 29 says so.
+
 **The headline for a caller: `[winget.opts] pin = "none"`, and exit 3.** Between
 them they remove the two reasons a nightly `dotpkg apply` had to be treated as
 "any non-zero means broken": a self-updating application no longer has to be

@@ -425,6 +425,12 @@ This is the section the README's "Verified on" table is the summary of.
   ran from a binary built on the machine, not from a published artifact, and no
   CI job performs a winget mutation at all. That is the shape item 23 closed for
   scoop and nothing has closed for winget.
+
+  **The v0.2.0 artifact itself has been run on a14** — downloaded, sha256
+  matched against the release's own `SHA256SUMS`, answering `dotpkg 0.2.0` and
+  parsing a `pin = "none"` config at exit 0 — but it ran **`status` only**,
+  which mutates nothing. So "the published binary has performed a winget
+  mutation" remains false, and the sentence above is unchanged by it.
 - **One machine, one architecture, one winget version, one scoop layout, and one
   elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
   observed `apply` from an ordinary non-elevated session.

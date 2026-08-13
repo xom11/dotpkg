@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-Nothing yet.
+- **dotpkg can be installed by scoop.** `xom11/scoop-bucket` carries
+  `bucket/dotpkg.json`, so `scoop bucket add xom11 …` then `scoop install
+  dotpkg` works, with scoop performing its own download and its own hash check.
+  Verified by installing on `zenbook-a14` rather than by reading the manifest:
+  scoop resolved the arm64 asset, checked its hash, made the shim, and
+  `dotpkg --version` answered `dotpkg 0.2.0` with the installed file's sha256
+  equal to the published one; uninstalling left no shim and no app directory.
+  README gained the section that had never existed — the tool had no documented
+  way to install it at all. `docs/OPEN-ITEMS.md` item 26 is half closed:
+  **there is still no winget package**, and publishing one is a pull request to
+  `microsoft/winget-pkgs` that nobody has opened.
 
 ## 0.2.0 — 2026-08-13
 

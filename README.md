@@ -29,6 +29,55 @@ ways nothing here has observed.
 is developed, and the code is portable enough to compile and be tested there.
 It manages winget and scoop; on a machine with neither, it has nothing to do.
 
+## Installing it
+
+**scoop, from the bucket that carries it:**
+
+```console
+scoop bucket add xom11 https://github.com/xom11/scoop-bucket
+scoop install dotpkg
+dotpkg --version        # dotpkg 0.2.0
+```
+
+scoop performs its own download and its own hash check against the manifest —
+dotpkg never verifies its own bytes here, which is the same rule the tool
+applies to everything else it installs.
+
+**By hand, if you would rather not add a bucket.** The release publishes one
+`.exe` per architecture plus a `SHA256SUMS` covering both. Download the one that
+matches, check it, rename it to `dotpkg.exe`, and put it somewhere on `PATH`:
+
+```powershell
+$ver   = 'v0.2.0'
+$arch  = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+$asset = "dotpkg-$arch-pc-windows-msvc.exe"
+$base  = "https://github.com/xom11/dotpkg/releases/download/$ver"
+$dest  = "$env:USERPROFILE\.local\bin"
+
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Invoke-WebRequest "$base/$asset"     -OutFile "$dest\dotpkg.exe"
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
+
+$got  = (Get-FileHash "$dest\dotpkg.exe" -Algorithm SHA256).Hash.ToLower()
+$want = ((Get-Content "$env:TEMP\SHA256SUMS" | Select-String $asset) -split '\s+')[0]
+if ($got -ne $want) { Remove-Item "$dest\dotpkg.exe"; throw 'checksum mismatch' }
+```
+
+`$env:USERPROFILE\.local\bin` has to be on `PATH` already; nothing here adds it.
+
+**There is no winget package.** dotpkg manages winget and is not distributed by
+it: publishing to the winget community repository is a pull request to
+`microsoft/winget-pkgs`, reviewed by Microsoft, and nobody has opened one. The
+scoop half of that asymmetry closed on 2026-08-13 and is recorded in
+`docs/OPEN-ITEMS.md` item 26; the winget half has not.
+
+**Verified, not assumed.** `scoop install dotpkg` was run on `zenbook-a14`
+(ARM64) on 2026-08-13: scoop resolved the arm64 asset, checked its hash, created
+the shim, and `dotpkg --version` answered `dotpkg 0.2.0` — with the installed
+file's sha256 equal to the one the release publishes. Uninstalling left no shim
+and no app directory. **The x86_64 asset has never been run on real hardware**
+(`docs/OPEN-ITEMS.md` item 22).
+
 ## `status`
 
 `dotpkg status` prints the plan it would execute and changes nothing — no

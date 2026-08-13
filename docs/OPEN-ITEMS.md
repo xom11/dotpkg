@@ -498,10 +498,32 @@ This is the section the README's "Verified on" table is the summary of.
   job now installs, changes a version and removes, and it asserts the plan
   presented the middle one as a version change rather than as an install. What
   that run measured is under item 29.
-- **26. `dotpkg` cannot install itself.** The design's phase 5 said release
-  *"through the existing scoop bucket"*. The release is GitHub binaries plus
-  `SHA256SUMS`; there is no scoop manifest, so the tool is not distributed by the
-  mechanism it advocates.
+- ~~**26. `dotpkg` cannot install itself.**~~ — **the scoop half closed
+  2026-08-13; the winget half is untouched.** The design's phase 5 said release
+  *"through the existing scoop bucket"*, and for a year the release was GitHub
+  binaries plus `SHA256SUMS` with no manifest anywhere, so the tool was not
+  distributed by the mechanism it advocates.
+
+  **Closed for scoop.** `xom11/scoop-bucket` carries `bucket/dotpkg.json` at
+  0.2.0, and it was verified by installing rather than by reading: on a14,
+  `scoop install dotpkg` resolved the **arm64** asset, ran **its own** hash
+  check (`Checking hash of dotpkg-aarch64-pc-windows-msvc.exe ... ok.`), created
+  the shim, and `dotpkg --version` answered `dotpkg 0.2.0` — the installed
+  file's sha256 equal to the release's published one. `scoop uninstall` left no
+  shim and no app directory.
+
+  The manifest differs from the bucket's other entry in three ways, because
+  dotpkg ships a bare `.exe` per architecture rather than a zip: no
+  `extract_dir`, a `#/dotpkg.exe` URL fragment so `bin` can be a plain string,
+  and a per-architecture `autoupdate.hash` block reading the single combined
+  `SHA256SUMS`. **That autoupdate block is unverified** — it cannot run until a
+  0.2.1 exists — and its regex names the asset literally rather than using
+  `$basename`, because the URL carries a rename fragment and it was not worth
+  guessing which name `$basename` resolves to.
+
+  **Still open for winget.** Publishing there is a pull request to
+  `microsoft/winget-pkgs`, reviewed by Microsoft, and none has been opened. A
+  tool that manages winget still cannot be installed by it.
 
 ## F. Found on real hardware 2026-08-12, not looked for
 

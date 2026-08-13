@@ -148,8 +148,13 @@ removed; the other five fixes came from this project's own audit.
 
 - **A winget id that matches a *different* id is refused instead of pinned.**
   `winget show` runs without `--exact` on purpose — that is what folds case on
-  the way in — which also leaves `--id` a substring filter, so a declared
-  `OhMyPosh` matches `JanDeDobbeleer.OhMyPosh`. `update` wrote the lock under
+  the way in. **This entry originally went on to say that omitting `--exact`
+  also "leaves `--id` a substring filter, so a declared `OhMyPosh` matches
+  `JanDeDobbeleer.OhMyPosh`", and that was measured false on 2026-08-13** —
+  `show --id OhMyPosh` returns `NO_APPLICATIONS_FOUND` on a machine where
+  `JanDeDobbeleer.OhMyPosh` is installed. `--id` requires the whole id. The
+  fix below is unchanged and still correct; only its stated cause was wrong.
+  See `docs/OPEN-ITEMS.md` item 30. `update` wrote the lock under
   the canonical id while `plan` looks the pin up under the declared name, so
   the two never met: `apply` refused the whole run at exit 2 with
   `Skip { NotLocked }`, and `update` rewrote the identical unusable lock every

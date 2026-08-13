@@ -335,9 +335,15 @@ fn run_winget<C: WingetCmd>(
                 // **A different id, not a different spelling of the same
                 // one.** `Name`'s `Eq` folds case, so this is false for the
                 // `git.git` -> `Git.Git` case the warning below exists for,
-                // and true only when winget matched something else: `show`
-                // runs without `--exact` (see `Winget::resolve_latest`), which
-                // leaves `--id` a substring filter.
+                // and true only when winget matched something else.
+                //
+                // This comment used to explain HOW, by saying `show` running
+                // without `--exact` "leaves `--id` a substring filter". That
+                // was measured false on 2026-08-13: `show --id OhMyPosh`
+                // returns `NO_APPLICATIONS_FOUND` on a machine where
+                // `JanDeDobbeleer.OhMyPosh` is installed. `--id` requires the
+                // whole id. The refusal stays as defence against an
+                // unobserved shape -- see `docs/OPEN-ITEMS.md` item 30.
                 //
                 // Refused rather than warned about, because the write is
                 // asymmetric and silently unusable: `pkg.lock` and

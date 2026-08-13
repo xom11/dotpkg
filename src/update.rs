@@ -536,11 +536,23 @@ pub fn run<C: WingetCmd>(
             // **A different id, not a different spelling of the same one.**
             // `Name`'s `Eq` folds case, so this is false for the `git.git` ->
             // `Git.Git` case the warning below exists for, and true only when
-            // winget matched something else entirely. It can: `resolve_latest`
-            // deliberately omits `--exact` (see its own doc comment -- that is
-            // what folds case on the way in), which leaves `--id` a substring
-            // filter, so a declared `OhMyPosh` matches
-            // `JanDeDobbeleer.OhMyPosh`.
+            // winget matched something else entirely.
+            //
+            // **How it could match something else is no longer claimed here,
+            // because the claim that used to sit in this comment was measured
+            // false.** It read: `--exact` being omitted "leaves `--id` a
+            // substring filter, so a declared `OhMyPosh` matches
+            // `JanDeDobbeleer.OhMyPosh`" -- and on 2026-08-13, on a machine
+            // with `JanDeDobbeleer.OhMyPosh` installed, `show --id OhMyPosh`
+            // returned `NO_APPLICATIONS_FOUND`. `--id` requires the whole id;
+            // `--exact` only controls case. See `docs/OPEN-ITEMS.md` item 30
+            // and `docs/measurements-2026-08-13-phase14b-winget-mutation.md`.
+            //
+            // The refusal below **stays**, and is now defence against a shape
+            // that has not been observed rather than one that has: one machine
+            // and one winget version is not grounds for deleting a guard, and
+            // a refusal that never fires costs nothing where a missing one
+            // costs a lock keyed by an id `plan` never looks up.
             //
             // Recording it was worse than refusing it. `fold_backend` keys
             // `pkg.lock` by the canonical id while `plan` looks the pin up by

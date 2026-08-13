@@ -177,10 +177,12 @@ Nothing here is known to be wrong. Nothing here has been watched.
   `--id` case-sensitive, and an unpinned package has no lock entry holding the
   canonical spelling.
 
-  **What stays open** is the prose: `CHANGELOG.md`, `update::run` and
-  `adopt::run_winget` each still carry the refuted sentence as their stated
-  reason. They are left as written for now rather than edited in place, and this
-  item is where a reader who follows one of them lands.
+  **The prose was corrected 2026-08-13, at all three live sites.**
+  `CHANGELOG.md`, `update::run` and `adopt::run_winget` each stated the refuted
+  sentence as the *reason* for a refusal. Each now says what was measured
+  instead, and each points here. The refusals themselves are untouched.
+  Commit `c3517e7`'s message still carries the original claim and cannot be
+  edited; this item is where a reader who follows it lands.
 - **3. `--location`, `--all-versions`, and side-by-side versions of one id.** All
   three unmeasured.
 - **4. Removing a machine-scope package while elevated.** Unmeasured. The

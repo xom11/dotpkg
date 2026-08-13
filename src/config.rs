@@ -1,7 +1,7 @@
 use crate::model::{fold_map, fold_names, Name};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -75,9 +75,65 @@ fn parse_buckets(raw: Vec<String>) -> Result<Vec<BucketDecl>> {
     Ok(out)
 }
 
+/// How dotpkg manages a declared winget package's version.
+///
+/// A closed set for the reason [`Arch`] is one, in that type's own words:
+/// `arch = "arm"` used to parse and mean "installed wrong, forever".
+/// `pin = "latest"` would parse and mean "pinned after all" -- the same failure
+/// pointing the other way, where the user asks for one behaviour, gets its
+/// opposite, and nothing anywhere says so.
+///
+/// `Version` is spellable rather than only being the default, so a `pkg.toml`
+/// that mixes the two can be read without knowing which way the default falls.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Pinning {
+    /// `pkg.lock` records a version and `apply` holds the package to it.
+    #[default]
+    Version,
+    /// Install if absent; never manage the version afterwards. No `pkg.lock`
+    /// entry is ever written -- `docs/specs/2026-08-13-winget-unpinned-design.md`
+    /// for why that is the feature rather than an omission.
+    ///
+    /// Spelled `Unpinned` in Rust and `"none"` in TOML deliberately.
+    /// `Pinning::None` sitting beside `Option::None` in the same `match` is a
+    /// name collision in the one place this crate cannot afford one: an arm
+    /// that reads as the wrong thing to a human still compiles.
+    #[serde(rename = "none")]
+    Unpinned,
+}
+
+/// `[winget.opts]`. **Deliberately not [`PkgOpts`]**, which carries `arch` and
+/// `bucket`.
+///
+/// Both of those are scoop concepts, and reusing that struct would make three
+/// things spellable that must not be. `[winget.opts] "X" = { arch = "arm64" }`
+/// would parse and do **nothing** -- winget exposes no architecture at all, so
+/// `backend::winget::rows_to_scan` leaves `Installed::arch` `None` for every
+/// winget row and `plan_backend`'s arch block has nothing to compare -- which
+/// is `arch = "arm"` exactly. `bucket` would name a scoop bucket for a package
+/// that has none. And `[scoop.opts] fzf = { pin = "none" }` would parse, while
+/// scoop's pin is a bucket *commit* rather than a version: "unpinned" for scoop
+/// would have to mean *install from whatever commit is at the tip that day and
+/// never look again*, a different feature with a different failure mode.
+/// Making it spellable before it is designed is how a value acquires a meaning
+/// by accident.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WingetOpts {
+    #[serde(default)]
+    pub pin: Pinning,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct WingetSection {
     pub packages: Vec<Name>,
+    /// `[winget.opts]`, one entry per declared id that wants something other
+    /// than the default. Every key is guaranteed to appear in `packages`:
+    /// `parse` refuses an entry for a package that is not declared, because a
+    /// typo in `packages` spelled correctly here yields a *pinned* package
+    /// where the user asked for an unpinned one, silently.
+    pub opts: BTreeMap<Name, WingetOpts>,
     /// Process names the user says belong to a winget package, because winget
     /// exposes no way for dotpkg to find them out.
     ///
@@ -92,6 +148,22 @@ pub struct WingetSection {
     /// Values are normalised by `sys::normalize` at parse time, so they are
     /// directly comparable against `Running`'s `names`.
     pub guard: BTreeMap<Name, Vec<String>>,
+}
+
+impl WingetSection {
+    /// Every declared id that says `pin = "none"`.
+    ///
+    /// The one place this set is derived, so the planner, `update`, `adopt` and
+    /// `apply` cannot disagree about which packages are unpinned -- four
+    /// readers each recomputing `opts.get(..).map(|o| o.pin) == Unpinned` is
+    /// four chances to write it once with the comparison inverted.
+    pub fn unpinned(&self) -> BTreeSet<Name> {
+        self.opts
+            .iter()
+            .filter(|(_, o)| o.pin == Pinning::Unpinned)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 /// The architectures scoop names in install.json, plus the opt-out.
@@ -163,6 +235,8 @@ struct RawWingetSection {
     #[serde(default)]
     packages: Vec<String>,
     #[serde(default)]
+    opts: BTreeMap<String, WingetOpts>,
+    #[serde(default)]
     guard: BTreeMap<String, Vec<String>>,
 }
 
@@ -176,6 +250,7 @@ pub fn parse(text: &str) -> Result<Config> {
         },
         winget: WingetSection {
             packages: fold_names(raw.winget.packages, "[winget]")?,
+            opts: fold_map(raw.winget.opts, "[winget.opts]")?,
             guard: fold_map(raw.winget.guard, "[winget.guard]")?
                 .into_iter()
                 .map(|(id, raw_names)| {
@@ -198,6 +273,27 @@ pub fn parse(text: &str) -> Result<Config> {
                 .collect::<Result<BTreeMap<Name, Vec<String>>>>()?,
         },
     };
+    // A `[winget.opts]` entry for a package `[winget] packages` does not
+    // declare is refused rather than ignored, and the reason is the whole
+    // point of `pin`: a user who mistypes the id in `packages` and spells it
+    // correctly here gets a **pinned** package where they asked for an
+    // unpinned one, and the only symptom is the refused-downgrade line the
+    // opts entry was added to remove. That is the `arch = "arm"` class --
+    // parses, means the opposite of what was written, forever.
+    //
+    // `[scoop.opts]` deliberately does NOT have this rule, and this is not the
+    // change that gives it one: its entries are inert in the same way, and
+    // that asymmetry is recorded in `docs/OPEN-ITEMS.md` rather than resolved
+    // by widening a winget decision over a different backend's file.
+    for name in cfg.winget.opts.keys() {
+        anyhow::ensure!(
+            cfg.winget.packages.contains(name),
+            "pkg.toml [winget.opts] {name}: no such package is declared. Add {name:?} to \
+             [winget] packages, or remove this entry -- an opts entry for an undeclared \
+             package is read by nothing, and a typo in one of the two spellings would \
+             silently pin a package you asked not to pin."
+        );
+    }
     // `fold_map` does not look inside values, so the bucket opt -- which
     // becomes `$SCOOP/buckets/<it>` and a git argument -- is validated here,
     // explicitly, with the same check `[scoop] buckets` uses.
@@ -547,6 +643,152 @@ guards = { }
             msg.contains("Tailscale.Tailscale") && msg.contains("tailscale.tailscale"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn pin_none_parses_and_an_absent_pin_means_version() {
+        let cfg = parse(
+            r#"
+[winget]
+packages = ["Brave.Brave", "Vivaldi.Vivaldi", "BurntSushi.ripgrep.MSVC"]
+
+[winget.opts]
+"Brave.Brave"     = { pin = "none" }
+"Vivaldi.Vivaldi" = { pin = "version" }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.winget.opts[&Name::new("Brave.Brave")].pin,
+            Pinning::Unpinned
+        );
+        // `version` is spellable, not merely the default, so a mixed file can
+        // be read without knowing which way the default falls.
+        assert_eq!(
+            cfg.winget.opts[&Name::new("Vivaldi.Vivaldi")].pin,
+            Pinning::Version
+        );
+        // No entry at all is the default, and the default is `Version`.
+        assert!(!cfg
+            .winget
+            .opts
+            .contains_key(&Name::new("BurntSushi.ripgrep.MSVC")));
+
+        // `unpinned()` is the one derivation every other module reads, so it
+        // is asserted here rather than left to be inferred from `opts`. It
+        // must contain the `none` entry and NEITHER of the other two -- an
+        // inverted comparison would swap exactly these.
+        let unpinned = cfg.winget.unpinned();
+        assert_eq!(unpinned.len(), 1, "got {unpinned:?}");
+        assert!(unpinned.contains(&Name::new("Brave.Brave")));
+        assert!(!unpinned.contains(&Name::new("Vivaldi.Vivaldi")));
+        assert!(!unpinned.contains(&Name::new("BurntSushi.ripgrep.MSVC")));
+    }
+
+    #[test]
+    fn a_misspelled_pin_value_is_an_error_that_lists_the_real_ones() {
+        // The twin of `a_misspelled_architecture_is_an_error_not_a_permanent_drift`,
+        // and for the identical reason: a closed set exists so a value that
+        // means the opposite of what was written cannot parse. `pin = "latest"`
+        // reads like "track latest" and would mean "pinned after all".
+        let err = parse(
+            "[winget]\npackages = [\"Brave.Brave\"]\n\
+             [winget.opts]\n\"Brave.Brave\" = { pin = \"latest\" }\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("none"), "the error must list the real values: {msg}");
+        assert!(msg.contains("version"), "both of them: {msg}");
+    }
+
+    #[test]
+    fn winget_opts_and_scoop_opts_do_not_accept_each_others_fields() {
+        // `deny_unknown_fields` on two separate structs is what holds this.
+        // Reusing `PkgOpts` for winget would make the first of these parse and
+        // do nothing -- winget exposes no architecture, so the declaration
+        // would be inert forever, which is `arch = "arm"` exactly.
+        let err = parse(
+            "[winget]\npackages = [\"Brave.Brave\"]\n\
+             [winget.opts]\n\"Brave.Brave\" = { arch = \"arm64\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("arch"),
+            "got: {err:#}"
+        );
+
+        // And the reverse: scoop's pin is a bucket commit, not a version, so
+        // `pin = "none"` there would need a meaning nobody has designed.
+        let err = parse("[scoop]\npackages = [\"fzf\"]\n[scoop.opts]\nfzf = { pin = \"none\" }\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("pin"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_winget_opts_entry_for_an_undeclared_package_is_refused() {
+        // The silent failure this exists for: `packages` carries a typo and
+        // `opts` carries the correct id, so the package dotpkg actually acts
+        // on is PINNED while the user believes they asked for unpinned.
+        let err = parse(
+            "[winget]\npackages = [\"Brave.Brav\"]\n\
+             [winget.opts]\n\"Brave.Brave\" = { pin = \"none\" }\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("[winget.opts]"), "name the section: {msg}");
+        assert!(msg.contains("Brave.Brave"), "name the entry: {msg}");
+
+        // The counterweight: a correctly declared package must still parse, or
+        // this guard would be satisfied by refusing everything.
+        let cfg = parse(
+            "[winget]\npackages = [\"Brave.Brave\"]\n\
+             [winget.opts]\n\"Brave.Brave\" = { pin = \"none\" }\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.winget.unpinned().len(), 1);
+
+        // Case alone is not a mismatch: `Name` folds it everywhere else and
+        // must fold it here, or a user who wrote one spelling in each place is
+        // refused for a difference that is not one.
+        let cfg = parse(
+            "[winget]\npackages = [\"Brave.Brave\"]\n\
+             [winget.opts]\n\"brave.brave\" = { pin = \"none\" }\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.winget.unpinned().len(), 1);
+    }
+
+    #[test]
+    fn two_winget_opts_keys_differing_only_in_case_are_rejected() {
+        // The `fold_map` twin of the `[winget.guard]` and `[scoop.opts]`
+        // collision tests: TOML cannot express a literal duplicate key, so the
+        // collision is created by `Name`'s folding, and the measured result of
+        // not refusing it is one entry keeping the FIRST key and the LAST
+        // value -- here, silently deciding whether a package is pinned.
+        let err = parse(
+            r#"
+[winget]
+packages = ["Brave.Brave"]
+
+[winget.opts]
+"Brave.Brave" = { pin = "none" }
+"brave.brave" = { pin = "version" }
+"#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Brave.Brave") && msg.contains("brave.brave"),
+            "name both spellings: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_absent_winget_opts_table_is_an_empty_map_not_a_failure() {
+        let cfg = parse("[winget]\npackages = [\"Git.Git\"]\n").unwrap();
+        assert!(cfg.winget.opts.is_empty());
+        assert!(cfg.winget.unpinned().is_empty());
     }
 
     #[test]

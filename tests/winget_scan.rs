@@ -254,7 +254,7 @@ fn duplicate_ids_that_disagree_on_a_version_are_opaque_rather_than_guessed() {
 #[test]
 fn a_greater_than_version_is_opaque_because_it_is_not_a_version() {
     // Left in `installed`, `cur.version == want` is false forever and
-    // is_older() picks Downgrade, so status prints a false down-arrow on
+    // version_order() picks Downgrade, so status prints a false down-arrow on
     // every run and apply --yes acts on it.
     let scan = rows_to_scan(parse_list(&fixture("list-greater-prefix.txt")).unwrap());
     assert!(scan.installed.is_empty());

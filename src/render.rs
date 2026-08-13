@@ -68,13 +68,13 @@ pub fn render(plan: &Plan, show_unmanaged: bool) -> String {
             //
             // **Decided here, at the render, and NOT at the planner.** The
             // planner keeps emitting whichever of `Upgrade`/`Downgrade`
-            // `plan::is_older` picks, and the step is still built and still
+            // `plan::version_order` picks, and the step is still built and still
             // fired: winget's own measured refusal is the gate, which is what
-            // keeps `is_older` cosmetic. Its own doc comment warns that whoever
+            // keeps `version_order` cosmetic. Its own doc comment warns that whoever
             // gates on it "owes it a real version comparison", and winget
             // versions include `v0.2026.07.15.08.55.stable_01`.
             //
-            // **The residual, stated rather than hidden:** because `is_older`
+            // **The residual, stated rather than hidden:** because `version_order`
             // is cosmetic, it can pick `Downgrade` for a suffixed version pair
             // where the machine is really *behind* its pin -- and then this line
             // predicts a refusal that does not happen, and the package is
@@ -1803,7 +1803,7 @@ mod tests {
         // this branch and the decision it rested on was never made.
         //
         // Fixed at the render and the count, never at the planner: gating on
-        // `plan::is_older` would promote a function whose own doc comment says
+        // `plan::version_order` would promote a function whose own doc comment says
         // it is cosmetic, and winget versions include
         // `v0.2026.07.15.08.55.stable_01`.
         let plan = Plan {

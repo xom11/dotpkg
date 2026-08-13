@@ -27,32 +27,49 @@ lines: `dogfood-2026-08-08.md`, `dogfood-phase2a-2026-08-08.md`,
 `phase4b-notes.md`, `phase5-notes.md`.
 
 **Wave 2, at `3bf1584`** — all eight task-breakdown plans, **19,482 lines**, the
-single largest thing in `docs/` and 63% of it: everything under `docs/plans/`
-and `docs/superpowers/plans/`. They were the step lists the phases were built
-from, every phase they belong to is closed, and what they established that is
-still true is either in `docs/specs/` (the decisions), in `docs/measurements-*`
-(the numbers), or in this file (what is still open). A plan is the most
-perishable document a project produces: it is a description of work not yet
-done, and it stops being read the day the work lands.
+single largest thing in `docs/` and 63% of it, being everything that was under
+`docs/plans/` and `docs/superpowers/plans/`; both directories are now gone
+entirely: `plans/2026-08-08-phase1-status-scoop.md`,
+`plans/2026-08-08-phase2a-truthful-plan.md`,
+`plans/2026-08-08-phase2b1-prepare.md`,
+`plans/2026-08-08-phase2b2-executor.md`,
+`plans/2026-08-09-phase3-update-adopt.md`,
+`plans/2026-08-09-phase4-backend-winget.md`,
+`superpowers/plans/2026-08-10-phase4b-winget-executor.md`,
+`superpowers/plans/2026-08-11-phase5-guard-unmanaged-retry.md`. They were the
+step lists the phases were built from, every phase they belong to is closed, and
+what they established that is still true is either in `docs/specs/` (the
+decisions), in `docs/measurements-*` (the numbers), or in this file (what is
+still open). A plan is the most perishable document a project produces: it is a
+description of work not yet done, and it stops being read the day the work lands.
 
-**What survives, and why those and not these.** `docs/specs/` holds the designs —
-why a lock file, why the two backends pin different things, what dotpkg refuses
-to do — and they are cited by the README and by the code. `docs/measurements-*`
-holds the raw commands and output that every claim rests on. Both are read; the
-plans were not.
+**What survived, and why those and not these.** Two directories: all of
+`docs/specs/`, which holds the designs — why a lock file, why the two backends
+pin different things, what dotpkg refuses to do — and every
+`docs/measurements-*` document, which holds the raw commands and output that
+every claim rests on. Both are what the README and the code cite as evidence;
+the plans were cited by nothing. The phase notes were the narrative around the
+measurements, and this file is the part of that narrative that is still live.
 
-**What was deliberately not done:** the surviving `docs/specs/`, `docs/plans/`
-and `docs/measurements-*` documents still name those files in their prose, and
-those mentions were **left exactly as written**. They are frozen records; a
-sentence that was true about the tree it was written against stays true, and
-re-pointing it would falsify it. This section is how such a mention resolves.
-The only reference that was rewritten is one `file:line` citation that would
-otherwise have failed `scripts/check-citations.py`, and it is marked at its site.
+**What was deliberately not done:** the surviving `docs/specs/` and
+`docs/measurements-*` documents still name those files in their prose, and those
+mentions were **left exactly as written**. They are frozen records; a sentence
+that was true about the tree it was written against stays true, and re-pointing
+it would falsify it. This section is how such a mention resolves. The only
+reference that was rewritten is one `file:line` citation that would otherwise
+have failed `scripts/check-citations.py`, and it is marked at its site.
 
-**What survived the removal:** every `docs/measurements-*` document, all of
-`docs/specs/`, all of `docs/plans/`. The measurement documents are what the
-README and the code cite as evidence; the phase notes were the narrative around
-them, and this file is the part of that narrative that is still live.
+**The same rule covers a symbol that was renamed: `plan::is_older` is now
+`plan::version_order`.** Seven mentions across four frozen documents —
+`docs/measurements-2026-08-09-winget.md` and three designs under `docs/specs/` —
+name it under the old name, and they were left as written. The rename came with
+the change that matters: it returns `std::cmp::Ordering` rather than `bool`, and
+a `bool` has no way to answer *the same version, spelt differently*, so a
+trailing-zero version — `30.6.4.0` against a pin of `30.6.4` — had to come back
+as a downgrade. `Ordering::Equal` is what closed that case, and it deliberately
+leaves the prerelease case open: `1.0.0-rc1` against a pin of `1.0.0` still
+answers `Greater`. A frozen sentence about `is_older` returning `true` resolves
+to `version_order` returning `Less`.
 
 ---
 
@@ -70,10 +87,24 @@ Recorded so they are not reopened as if nobody had looked.
 - **8. `add`, architecture drift, same-version re-pin, locking against two
   concurrent dotpkg runs, Chocolatey.** All unbuilt. `add` composes today from
   `pkg.toml` + `dotpkg update <pkg>` + `dotpkg apply`.
-- **2 (the rejected fix).** A hardcoded `WINGET_HELPERS` list was rejected
-  explicitly: it would *exclude* dependency-installed packages from `Unmanaged`
-  rather than count them, which is less honest than collapsing a line. What
-  remains open about item 2 is below.
+
+  **Architecture drift has since cost somebody something, and the cost is
+  recorded here for prioritisation — not as a request, and not as a promise to
+  build it.** Moving a real dotfiles repository (`github.com/xom11/nix`) onto
+  dotpkg 0.1.0 on zenbook-a14 on 2026-08-12 **lost that repository the ability
+  to fix drift**. The hand-written PowerShell dotpkg replaced did fix it: that
+  is what cleaned **17 emulated x64 packages** off that ARM64 machine on
+  2026-08-03. dotpkg is the better tool on every other axis in that repository
+  and is strictly worse on this one, which is the first time an unbuilt item on
+  this list has been paid for by a user rather than argued about.
+- **2 (the rejected fixes, both of them).** A hardcoded `WINGET_HELPERS` list was
+  rejected explicitly: it would *exclude* dependency-installed packages from
+  `Unmanaged` rather than count them, which is less honest than collapsing a
+  line. **`[winget] ignore` was rejected in the same breath and for a different
+  reason** — it makes the user maintain 36 entries to silence noise dotpkg
+  created. Both refusals live only in
+  `docs/specs/2026-08-11-phase5-guard-unmanaged-retry-design.md` §B3, which
+  names them together. What remains open about item 2 is below.
 - **10 (the rejected oracle).** winget's `installed.db` was opened and priced
   rather than adopted: SQLite, 262144 bytes, a populated `commands` table that
   would raise fence coverage from 4 to 10 of 41 — while disagreeing with
@@ -127,10 +158,20 @@ Nothing here is known to be wrong. Nothing here has been watched.
 - **13. Inherited from Phase 4, none of it in a later phase's scope:**
   `plan_backend`'s unconditional `Arch::as_scoop()`; the design's "a new backend
   slots in without touching the planner" promise being half true (see item 24);
-  `verify.rs`'s `NotFound`-idiom guard; `floor_char_boundary` and the
-  missing-`Version` refusal branch being untested defensive code; no fixture
-  pairing a plain `show` with `show --versions` for the same package;
-  `resolve_installed`'s `fell_back_to_tip` warning path being untested.
+  `verify.rs`'s `NotFound`-idiom guard; `parse_list`'s missing-`Version` refusal
+  branch being untested defensive code — the one test of that refusal feeds a
+  French header, which trips the `Name` arm of the same loop first, so neither
+  the `Id` arm nor the `Version` arm has ever been reached; no fixture pairing a
+  plain `show` with `show --versions` for the same package; `resolve_installed`'s
+  `fell_back_to_tip` warning path being untested.
+
+  **One entry left that list on 2026-08-12 and the rest of it stands.**
+  `floor_char_boundary` was carried here as untested defensive code beside the
+  missing-`Version` branch, and it is not untested any more: it has its own test
+  and its own control, and 3 of its mutants are killed — the four-kinds
+  breakdown further down *Coverage and mutation debt* is where that is recorded,
+  along with the 3 survivors it characterises as equivalent. The branch it was
+  paired with is still open, which is why the item is still here.
 - **`src/sys.rs` needs three mutation runs, not one.** macOS, elevated Windows,
   and ordinary Windows — because each platform is blind to the other's `cfg`
   arm, and **no two of them together kill all six mutants**. A Windows-only run
@@ -157,12 +198,27 @@ Nothing here is known to be wrong. Nothing here has been watched.
     `is_char_boundary(0)` is always true. *Equivalent under current callers* is
     weaker than *equivalent* and is stated that way on purpose: a future caller
     passing an unclamped index would make one of them wrong.
-  - **Killed, 4.** Three in `floor_char_boundary` — its loop had never executed
-    once, because all 15 fixtures are from an en-US machine and are pure ASCII —
-    and one in `Scoop::scan`, which was the dangerous one: with its `NotFound`
-    guard replaced by `true`, every read failure reads as "no scoop packages
-    installed", and an empty scan is the one input that turns every owned
-    package into a prune candidate.
+  - **Killed, 4.** Three in `floor_char_boundary`, whose loop had never executed
+    once, and one in `Scoop::scan`, which was the dangerous one: with its
+    `NotFound` guard replaced by `true`, every read failure reads as "no scoop
+    packages installed", and an empty scan is the one input that turns every
+    owned package into a prune candidate.
+
+    **The reason given for that dead loop was wrong, and correcting it moves no
+    count.** It was recorded as *"all 15 fixtures are from an en-US machine and
+    are pure ASCII"*, and they are not:
+    `tests/fixtures/winget/list-full.txt` line 67 carries two `®` (U+00AE) in a
+    package name, which are the only non-ASCII bytes in any captured fixture.
+    What actually kept the loop dead is narrower — **no column offset in any
+    fixture lands inside a multi-byte character.** Those two `®` occupy bytes
+    16–17 and 30–31, well inside the `Name` field, while the offsets `parse_list`
+    slices at on that table are 0, 64, 152, 182 and 212, every one of them an
+    ASCII byte, so `is_char_boundary` answered true at each and the body never
+    ran. Pure ASCII was sufficient for the loop to be unreachable and never
+    necessary, and the fixture that separates the two was already in the tree
+    when the claim was written.
+    `docs/measurements-2026-08-12-phase10-mutation-debt.md` states it the old way
+    and is left as written, as a frozen record.
   - **Genuinely open and unexamined, 9:** `parse_list` 7, `parse_versions` 1,
     and one in `src/main.rs` (`replace > with <`, distinct from the accepted
     equivalent mutant on the `outstanding_skips` check). The `parse_list` block
@@ -199,21 +255,6 @@ This is the section the README's "Verified on" table is the summary of.
 - **22. No x86_64 Windows machine has ever run dotpkg.** The published x64 binary
   has never been started on real hardware; a *different* build of it answered
   `--version` on a CI runner, and that is the whole of it.
-- ~~**23. `apply` has never been exercised from a release binary.**~~ —
-  **closed 2026-08-12** (`docs/measurements-2026-08-12-phase8-release-apply.md`).
-  The published artifact, sha256 `9daeae0c…` and no rebuild of it, installed and
-  then pruned a real package on a14 and verified both on disk: `jq` absent
-  before, present at the pinned 1.8.2 after, `jq --version` answering
-  `jq-1.8.2`, ownership written and then released to `{ "scoop": {} }`, and the
-  other 31 packages untouched. The mass-prune guard was proved to be in the way
-  by a counterweight run first — same command with the flags withheld refused at
-  exit 2 and left the package installed.
-
-  **What that does not buy, and the difference matters:** only `Install` and
-  `Remove` were exercised. **A scoop `Replace` — the uninstall-then-install
-  window, the most dangerous path this tool has — still has no evidence from a
-  release binary**, and neither does any winget mutation. Both are now numbered
-  as item 29 rather than folded into a closed item.
 - **29. The version-change path.** Split out of 23 on 2026-08-12 so that closing
   23 would not read as covering it. **Half closed the same day, and the halves
   are not interchangeable.**
@@ -310,9 +351,14 @@ This is the section the README's "Verified on" table is the summary of.
   ci-payload 1.0.0 (dropped, no longer declared)` → `(prune, owned)` → `done …
   verified on disk`.
 
-  **What it still does not cover:** a version change. The job installs and
+  ~~**What it still does not cover:** a version change. The job installs and
   removes; a scoop `Replace` needs a second manifest in the bucket and is the
-  obvious next step for it. See item 29.
+  obvious next step for it.~~ — **closed 2026-08-12.**
+  `.github/workflows/ci.yml` gained the step that was called obvious here:
+  *publish 1.0.1 into the bucket, so a version change has somewhere to go*. The
+  job now installs, changes a version and removes, and it asserts the plan
+  presented the middle one as a version change rather than as an install. What
+  that run measured is under item 29.
 - **26. `dotpkg` cannot install itself.** The design's phase 5 said release
   *"through the existing scoop bucket"*. The release is GitHub binaries plus
   `SHA256SUMS`; there is no scoop manifest, so the tool is not distributed by the
@@ -320,53 +366,9 @@ This is the section the README's "Verified on" table is the summary of.
 
 ## F. Found on real hardware 2026-08-12, not looked for
 
-All three from `docs/measurements-2026-08-12-phase8-release-apply.md` §7.
+All three came from `docs/measurements-2026-08-12-phase8-release-apply.md` §7.
+The third of them, item 27, closed the same day and is in the table below.
 
-- ~~**27. `update` and `apply` leave `.bak` files beside what they rewrite, and
-  nothing says so.**~~ — **decided and closed 2026-08-12: one of the three
-  stays, two go, and the README now says which.** `state.json.bak` is kept;
-  `lock::save` and `config_edit::save` no longer write one. Both tests that
-  asserted a `.bak` were inverted rather than deleted, and both were confirmed
-  able to fail — restoring either copy turns exactly its own test red and
-  nothing else. The reasoning that survives is one line: **a `.bak` is for a
-  file nothing else can recover**, which here is `state.json` alone. The
-  measured original follows, kept because the wrong version of it is the
-  evidence for the rule.
-
-  Measured: after one round, `pkg.lock.bak` held the previous lock and
-  `state.json.bak` the previous state.
-
-  ~~a user running these commands in their dotfiles repository **accumulates**
-  them next to files they do commit~~ — **wrong, and corrected on 2026-08-12 by
-  reading the code rather than the artefacts.** The path is fixed
-  (`with_extension("toml.bak")`), so there is at most **one** `.bak` per managed
-  file and it is overwritten in place. Three files, ever. Nothing accumulates.
-
-  **What is actually true, and it is asymmetric by location.** Production writes
-  a `.bak` in three places — `State::save`, `lock`'s writer and
-  `config_edit::save` — and **reads one in none**: the only three reads in the
-  crate sit after the `#[cfg(test)]` boundary in their files, and they assert
-  that the write happened. That is deliberate rather than dead, and the comment
-  at the site says so: the displaced file is *"still readable **by hand**"*. It
-  is an artefact for a human, not an input to the program.
-
-  The decision is therefore not "feature or debris" but **which of the three**:
-
-  - `state.json.bak` lives in `%LOCALAPPDATA%`, is invisible to the user's
-    version control, and backs up **the one file that is not recoverable any
-    other way** — `state.json` is deliberately not committed. Keep.
-  - `pkg.lock.bak` and `pkg.toml.bak` land in the user's dotfiles repository,
-    beside two files the design says are **committed**. Git is a strictly better
-    backup than a `.bak` of a file already under version control, and the cost is
-    a permanently dirty `git status` that every user must diagnose
-    independently. These two are the ones to drop, with a README line saying
-    recovery is `git checkout`.
-
-  One technical note against dropping all three: the write is tmp → `sync_all` →
-  `rename`, and a failed `rename` leaves the original untouched, so the `.bak`
-  guards a window that barely exists — on POSIX. Windows is the only platform
-  this tool runs on, and its rename-over-existing has more variants, so the
-  argument for keeping `state.json.bak` is real rather than ceremonial.
 - **28. Three installed scoop packages cannot be read at all on a14** —
   `actionlint`, `antigravity`, `zellij`, each `cannot read manifest.json: The
   path cannot be traversed because it contains an untrusted mount point. (os
@@ -395,6 +397,8 @@ Kept so a reference to one of these numbers finds its resolution.
 | 18 | `tests/prepare.rs` duplicated `common::git` | 2026-08-12: `common::init_repo` does the `git init` and both `config` calls together; the only `git init` in `tests/` is inside it |
 | 19 | Two `package_roots()` mutants surviving | 2026-08-12: one assertion tying `package_roots()` to the environment it reads; both die, on macOS and on Windows |
 | 21 | The winget path signal shipped live-unverified | 2026-08-12: observed firing on `BurntSushi.ripgrep.MSVC` with both name signals measured dark, plus a counterweight run with scoop's `rg` that correctly did **not** skip |
+| 23 | `apply` had never been exercised from a release binary | 2026-08-12: the published artifact, sha256 `9daeae0c…` and no rebuild of it, installed and then pruned a real package on a14, verified both on disk, and left the other 31 untouched — preceded by a counterweight run that refused at exit 2 with the flags withheld. `Install` and `Remove` only; the version change is item 29. Full round in `docs/measurements-2026-08-12-phase8-release-apply.md` |
+| 27 | `update` and `apply` left a `.bak` beside what they rewrote, and nothing said so | 2026-08-12: **a `.bak` is for a file nothing else can recover.** `state.json.bak` stays — `state.json` is deliberately not committed; `lock::save` and `config_edit::save` no longer write one, because `pkg.lock` and `pkg.toml` are committed and `git checkout` recovers strictly more than a copy of the last version. Two corrections outlive the decision: **nothing ever accumulated** — each path is fixed (`with_extension("toml.bak")`), so there was at most one `.bak` per file and it was overwritten in place, and the original accumulation claim was wrong; and production **wrote** a `.bak` in three places and **read** one in none, every read in the crate sitting behind the `#[cfg(test)]` boundary — the displaced file was an artefact for a human, never an input to the program |
 | 9 (second half) | dotpkg could not tell you which `[winget.guard]` entry was missing | 2026-08-12 fence-coverage round: 27 of 30 pending changes warn; the 3 silent ones are exactly the `portable` ids the path signal already covers |
 | 2 (the flood) | An undeclared package appearing after an install produced a wall of `?` lines | Collapsed to one line per backend, with `--show-unmanaged` to expand |
 

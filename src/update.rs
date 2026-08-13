@@ -447,6 +447,34 @@ pub fn run<C: WingetCmd>(
         if let Some(c) = canonical_sink.borrow_mut().take() {
             let declared_spelling = name.to_string();
             let matched_spelling = c.to_string();
+            // **A different id, not a different spelling of the same one.**
+            // `Name`'s `Eq` folds case, so this is false for the `git.git` ->
+            // `Git.Git` case the warning below exists for, and true only when
+            // winget matched something else entirely. It can: `resolve_latest`
+            // deliberately omits `--exact` (see its own doc comment -- that is
+            // what folds case on the way in), which leaves `--id` a substring
+            // filter, so a declared `OhMyPosh` matches
+            // `JanDeDobbeleer.OhMyPosh`.
+            //
+            // Recording it was worse than refusing it. `fold_backend` keys
+            // `pkg.lock` by the canonical id while `plan` looks the pin up by
+            // the *declared* name, and those two never meet -- so `apply` got
+            // `Skip { NotLocked }` and refused the whole run at exit 2, while
+            // `update` rewrote the identical unusable lock every time it was
+            // run to fix it. Failing the one package says the same thing in a
+            // form the user can act on, and leaves the rest of the run alone.
+            if c != *name {
+                winget_resolutions.insert(
+                    name.clone(),
+                    Resolution::Failed {
+                        why: format!(
+                            "winget matched {matched_spelling:?}, not the id pkg.toml declares \
+                             ({declared_spelling:?}) -- declare it as {matched_spelling:?}"
+                        ),
+                    },
+                );
+                continue;
+            }
             if matched_spelling != declared_spelling {
                 // The canonical-id rule, the mirror of Phase 3's scoop-bucket
                 // fix: `pkg.lock` records what winget actually matched, and a

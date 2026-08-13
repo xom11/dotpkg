@@ -312,12 +312,40 @@ fn run_winget<C: WingetCmd>(
                 // told the two differ at all. Compared by `Display`
                 // (`.to_string()`), not `Name`'s own `Eq`, which folds case
                 // and would never see a difference here.
+                // **A different id, not a different spelling of the same
+                // one.** `Name`'s `Eq` folds case, so this is false for the
+                // `git.git` -> `Git.Git` case the warning below exists for,
+                // and true only when winget matched something else: `show`
+                // runs without `--exact` (see `Winget::resolve_latest`), which
+                // leaves `--id` a substring filter.
+                //
+                // Refused rather than warned about, because the write is
+                // asymmetric and silently unusable: `pkg.lock` and
+                // `state.json` would be keyed by the canonical id while
+                // `pkg.toml` keeps what was typed, and `plan` looks the pin up
+                // by the declared name -- so the adopt "succeeds" and the next
+                // `apply` refuses the whole run at exit 2 with
+                // `Skip { NotLocked }`. `update` refuses the same shape for
+                // the same reason. Each named package is independent, so this
+                // costs the rest of the command nothing.
+                if canonical != *name {
+                    let typed = name.to_string();
+                    let matched = canonical.to_string();
+                    out.refused.push((
+                        name.clone(),
+                        format!(
+                            "winget matched {matched:?}, not the id you typed ({typed:?}) -- \
+                             adopt it as {matched:?}"
+                        ),
+                    ));
+                    continue;
+                }
                 if canonical.to_string() != name.to_string() {
                     let typed = name.to_string();
                     let matched = canonical.to_string();
                     out.warnings.push(format!(
-                        "{typed}: you typed this as {typed:?}, but winget's own listing spells \
-                         it {matched:?} -- pkg.lock and state.json record the canonical \
+                        "{typed}: you typed this as {typed:?}, but winget spells it \
+                         {matched:?} -- pkg.lock and state.json record the canonical \
                          spelling; pkg.toml keeps the spelling you typed."
                     ));
                 }

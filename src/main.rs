@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dotpkg::apply::Outstanding;
 use dotpkg::backend::winget_exec::RealWingetMutator;
 use dotpkg::backend::{
     scoop::Scoop,
@@ -150,13 +151,43 @@ fn refuse(err: anyhow::Error) -> ! {
 /// parameter to say. It was deleted rather than kept as an argument every
 /// caller passes `false` for.
 ///
-/// A floor, not an override: a non-zero code passes through untouched.
-fn floor_exit_code(code: i32, preparation_ok: bool, has_running_skips: bool) -> i32 {
-    if code == 0 && (!preparation_ok || has_running_skips) {
-        1
-    } else {
-        code
+/// **It was `floor_exit_code` until 2026-08-13, and the rename is the
+/// finding.** It only ever raised 0 to 1, so "floor" was exactly true. It now
+/// also answers 3 where it used to answer 1, which is not a floor in either
+/// direction, and a name that says "floor" for something that reclassifies is
+/// the kind of nearly-true word this codebase has removed before.
+///
+/// `code` still passes through untouched unless one of the two named
+/// reclassifications applies, so a genuine failure keeps its own code.
+///
+/// **Exit 3, and why a third code rather than advice.** A package skipped
+/// because its own process is running is, in the README's own words, "not a
+/// failure" -- and it was given a failure's exit code anyway. Measured by an
+/// integrator on 2026-08-12 (see `apply::Preparation::outstanding`): on a
+/// machine where `python`, `beckon` and `kanata` are running essentially all
+/// the time, a fully resolved lock with nothing wrong exited 1 on nearly every
+/// run, so a scheduled caller had to treat 1 as success and lose every real
+/// failure. 3 is reachable only when nothing failed, everything prepared, and
+/// every outstanding item is a running process -- so a caller that treats any
+/// non-zero code as failure is still correct, and one that wants to ignore
+/// held apps can now do so without also ignoring failures.
+fn apply_exit_code(
+    code: i32,
+    failed: usize,
+    preparation_ok: bool,
+    outstanding: Outstanding,
+) -> i32 {
+    if code == 0 && (!preparation_ok || outstanding != Outstanding::Nothing) {
+        return 1;
     }
+    // `failed` is asked for separately because `code` cannot answer it: 1 from
+    // `Execution::exit_code` means "failed OR held", and the held half is the
+    // very thing being reclassified here. Reading 1 as "held" without checking
+    // would turn a real failure into a 3 the moment one app was also open.
+    if code == 1 && failed == 0 && preparation_ok && outstanding == Outstanding::RunningOnly {
+        return 3;
+    }
+    code
 }
 
 /// How many `steps` are a version-change performed as uninstall-then-install
@@ -220,7 +251,7 @@ fn count_replaces_and_installs(steps: &[Step]) -> (usize, usize) {
 /// whether it came from an `Install`, an `Upgrade`, or a refused
 /// `Downgrade`). Only `Preparation` -- still in scope at the one call site
 /// that needs this -- still knows which. Lifted out for the same reason
-/// `floor_exit_code` and `unrouted_warning` were: `tests/cli.rs`'s `Fixture`
+/// `apply_exit_code` and `unrouted_warning` were: `tests/cli.rs`'s `Fixture`
 /// strips `winget` off `PATH` (`path_without_winget`'s own doc comment), so
 /// no real `--yes` run through the compiled binary can ever reach a winget
 /// liveness check, and this exact disagreement is otherwise unreachable from
@@ -235,7 +266,7 @@ fn installs_a_user_should_be_asked_about(
 /// The one line a user reads before saying yes.
 ///
 /// A function, not a `format!` in the `apply` arm, for the reason
-/// `unrouted_warning` and `floor_exit_code` are functions: this exact text has
+/// `unrouted_warning` and `apply_exit_code` are functions: this exact text has
 /// carried a false number twice before, and a sentence nothing can assert is a
 /// sentence nothing protects.
 ///
@@ -284,7 +315,7 @@ fn confirm_question(replacements: usize, installs: usize, removals: usize) -> St
 /// A warning, not a refusal: no real input can produce it today, and refusing a
 /// run over a can't-happen bug would be worse than reporting it.
 ///
-/// Lifted out of `main` for the same reason `floor_exit_code` was -- it is
+/// Lifted out of `main` for the same reason `apply_exit_code` was -- it is
 /// unreachable from `tests/cli.rs` by construction (the whole point is that no
 /// real plan produces it), so a function is the only way to pin the sentence at
 /// all. `saturating_sub`, not `-`: the `if` above it already makes underflow
@@ -446,6 +477,7 @@ fn present_after(scan: &Scan) -> Vec<Name> {
         .iter()
         .map(|i| i.name.clone())
         .chain(scan.opaque.iter().cloned())
+        .chain(scan.residual.iter().cloned())
         .collect()
 }
 
@@ -646,11 +678,21 @@ fn main() -> Result<()> {
                 // only content was one refused downgrade printed `ready`
                 // above and exited 0 -- a scheduled `--prepare` health check
                 // read clean for a package `apply` is guaranteed to fail on.
-                if !preparation.is_ok()
-                    || !preparation.outstanding_skips().is_empty()
-                    || preparation.refused_winget_downgrade_count() > 0
-                {
+                if !preparation.is_ok() || preparation.refused_winget_downgrade_count() > 0 {
                     std::process::exit(1);
+                }
+                // The same reclassification `apply_exit_code` performs below,
+                // written out rather than routed through it: nothing has run,
+                // so there is no `Execution` whose code could be passed in,
+                // and feeding it a synthetic 1 would let the refused-downgrade
+                // case above fall into the 3 arm. The reason is `apply`'s
+                // reason -- a scheduled `--prepare` that reads 1 because an
+                // editor is open cannot be told apart from one that reads 1
+                // because a package will not install.
+                match preparation.outstanding() {
+                    Outstanding::Nothing => {}
+                    Outstanding::RunningOnly => std::process::exit(3),
+                    Outstanding::NeedsAttention => std::process::exit(1),
                 }
                 return Ok(());
             }
@@ -837,8 +879,32 @@ fn main() -> Result<()> {
             // prepare-time scan above (`scan_or_warn`'s own doc comment).
             let winget = Winget::new(RealWinget);
             let winget_scan = dotpkg::backend::scan_or_warn(&winget);
-            ex.dropped_ghosts = reconcile_ghosts(&mut d.state, &d.scoop, &winget_scan)?;
+
+            // **Save first, reconcile second, save again.** These two lines
+            // used to run the other way round, with `reconcile_ghosts(..)?`
+            // ahead of the run's only `State::save` -- so the one `Err` the
+            // scoop rescan can return (`Scoop::scan`'s non-`NotFound`
+            // `read_dir($SCOOP/apps)` arm) returned from `main` with every
+            // package this run had just installed left unowned, and without
+            // printing the closing table either. The next run would then see
+            // its own installs as unmanaged, and a prune could never reach
+            // them because state.json is what says dotpkg owns them.
+            //
+            // The winget scan one line up was already non-fatal for the same
+            // class of reason; scoop's was not, and the asymmetry was not a
+            // decision anyone had made. Ghost reconciliation is a tidy-up:
+            // failing it must cost at most the tidy-up.
             d.state.save(&state_path)?;
+            match reconcile_ghosts(&mut d.state, &d.scoop, &winget_scan) {
+                Ok(dropped) => {
+                    ex.dropped_ghosts = dropped;
+                    d.state.save(&state_path)?;
+                }
+                Err(e) => eprintln!(
+                    "warning: scoop: {e:#} -- ownership records were saved, but \
+                     ghosts were not reconciled this run"
+                ),
+            }
 
             // A stale recover.cmd from an earlier, failed run is misleading
             // once a later run finishes with nothing outstanding: it would
@@ -871,7 +937,12 @@ fn main() -> Result<()> {
             // what `execute` happened to see, and 0 would tell a scheduled
             // task the machine is fine for as long as the editor stays open,
             // or for as long as a package's state could not be read.
-            let code = floor_exit_code(code, preparation.is_ok(), !outstanding_skips.is_empty());
+            let code = apply_exit_code(
+                code,
+                ex.failed(),
+                preparation.is_ok(),
+                preparation.outstanding(),
+            );
             if code != 0 {
                 std::process::exit(code);
             }
@@ -1032,26 +1103,170 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_runs_ownership_is_saved_before_ghost_reconciliation_can_fail() {
+        // A source guard, in the idiom of `the_planner_source_performs_no_io`,
+        // because the ordering it pins cannot be reached from a hermetic
+        // fixture: making `$SCOOP/apps` unreadable to force `Scoop::scan`'s
+        // `Err` arm would also fail the *pre*-run scan, and `apply` refuses
+        // there first, so the post-run window never opens.
+        //
+        // What it pins: `reconcile_ghosts` used to run ahead of the run's only
+        // `State::save`, with `?`, so one unreadable `$SCOOP/apps` at the end
+        // of an otherwise successful run discarded the ownership of everything
+        // that run had just installed. Ghost reconciliation is a tidy-up and
+        // must cost at most itself.
+        let src = include_str!("main.rs");
+        let body = src
+            .split_once("let winget_scan = dotpkg::backend::scan_or_warn(&winget);")
+            .expect("the apply arm's post-run winget scan must still be findable")
+            .1;
+        let save = body.find("d.state.save(&state_path)?;").expect("a save");
+        let reconcile = body
+            .find("reconcile_ghosts(&mut d.state")
+            .expect("a reconcile");
+        assert!(
+            save < reconcile,
+            "the run's ownership must be saved before ghost reconciliation is \
+             attempted, so that reconciliation failing cannot discard it"
+        );
+        assert!(
+            !body[..reconcile].contains("reconcile_ghosts(&mut d.state, &d.scoop, &winget_scan)?"),
+            "ghost reconciliation must not use `?`: its failure is a warning, \
+             not a reason to return from main without printing the closing table"
+        );
+    }
+
+    #[test]
     fn a_successful_run_with_nothing_outstanding_keeps_its_own_exit_code() {
         // The case tests/cli.rs cannot construct: no fixture may provide a fake
         // scoop binary, so a fully successful non-empty apply is unreachable there.
         // This is the only case that distinguishes `&&` from `||` and `!` from ``.
-        assert_eq!(floor_exit_code(0, true, false), 0);
+        assert_eq!(apply_exit_code(0, 0, true, Outstanding::Nothing), 0);
     }
 
     #[test]
     fn outstanding_work_floors_a_zero_to_one() {
         assert_eq!(
-            floor_exit_code(0, false, false),
+            apply_exit_code(0, 0, false, Outstanding::Nothing),
             1,
             "a package that failed to prepare"
         );
         assert_eq!(
-            floor_exit_code(0, true, true),
+            apply_exit_code(0, 0, true, Outstanding::NeedsAttention),
             1,
-            "a package skipped because it is running"
+            "a package whose state could not be read"
         );
-        assert_eq!(floor_exit_code(0, false, true), 1, "both");
+        assert_eq!(
+            apply_exit_code(0, 0, false, Outstanding::NeedsAttention),
+            1,
+            "both"
+        );
+    }
+
+    #[test]
+    fn a_run_held_only_by_a_running_process_is_three_and_every_neighbouring_case_is_not() {
+        // The whole point of the third code is that it is narrow. Each
+        // assertion below moves exactly one of the four inputs away from the
+        // 3 case and must land back on 1 -- otherwise 3 would be absorbing
+        // failures, which is the thing an integrator asked for it in order to
+        // stop doing.
+        assert_eq!(
+            apply_exit_code(1, 0, true, Outstanding::RunningOnly),
+            3,
+            "nothing failed, everything prepared, one app was open"
+        );
+        assert_eq!(
+            apply_exit_code(1, 1, true, Outstanding::RunningOnly),
+            1,
+            "a real failure alongside an open app is still a failure"
+        );
+        assert_eq!(
+            apply_exit_code(1, 0, false, Outstanding::RunningOnly),
+            1,
+            "a package that failed to prepare is not an open app"
+        );
+        assert_eq!(
+            apply_exit_code(1, 0, true, Outstanding::NeedsAttention),
+            1,
+            "an unreadable state is not something closing a window fixes"
+        );
+        assert_eq!(
+            apply_exit_code(1, 0, true, Outstanding::Nothing),
+            1,
+            "held with nothing outstanding is not the running case at all"
+        );
+        assert_eq!(
+            apply_exit_code(2, 0, true, Outstanding::RunningOnly),
+            2,
+            "a refusal is never reclassified"
+        );
+    }
+
+    #[test]
+    fn outstanding_reads_the_skip_reason_and_not_merely_the_count() {
+        // `outstanding_skips()` renders a `why` string and drops the
+        // `SkipReason`, so a count alone cannot tell 3 from 1. This pins that
+        // `outstanding()` reads the variant -- swap `Running` for `Opaque`
+        // below and the answer must change even though the count does not.
+        let skip = |reason| dotpkg::apply::Preparation {
+            prepared: vec![dotpkg::apply::Prepared {
+                action: dotpkg::plan::Action::Skip {
+                    backend: dotpkg::model::SCOOP.into(),
+                    name: dotpkg::model::Name::new("python"),
+                    reason,
+                },
+                outcome: dotpkg::apply::Outcome::Skipped {
+                    why: "its process is running".to_string(),
+                },
+            }],
+        };
+
+        let running = skip(dotpkg::plan::SkipReason::Running);
+        let opaque = skip(dotpkg::plan::SkipReason::Opaque);
+        assert_eq!(running.outstanding_skips().len(), 1);
+        assert_eq!(
+            opaque.outstanding_skips().len(),
+            1,
+            "same count -- so the count cannot be what decides"
+        );
+        assert_eq!(running.outstanding(), Outstanding::RunningOnly);
+        assert_eq!(opaque.outstanding(), Outstanding::NeedsAttention);
+        assert_eq!(
+            dotpkg::apply::Preparation::default().outstanding(),
+            Outstanding::Nothing
+        );
+    }
+
+    #[test]
+    fn one_unreadable_package_among_running_ones_takes_the_whole_run_to_needs_attention() {
+        // The mixed case, which is the one that decides whether 3 can hide a
+        // package dotpkg could not read: it must not.
+        let prep = dotpkg::apply::Preparation {
+            prepared: vec![
+                dotpkg::apply::Prepared {
+                    action: dotpkg::plan::Action::Skip {
+                        backend: dotpkg::model::SCOOP.into(),
+                        name: dotpkg::model::Name::new("python"),
+                        reason: dotpkg::plan::SkipReason::Running,
+                    },
+                    outcome: dotpkg::apply::Outcome::Skipped {
+                        why: "its process is running".to_string(),
+                    },
+                },
+                dotpkg::apply::Prepared {
+                    action: dotpkg::plan::Action::Skip {
+                        backend: dotpkg::model::SCOOP.into(),
+                        name: dotpkg::model::Name::new("zellij"),
+                        reason: dotpkg::plan::SkipReason::Opaque,
+                    },
+                    outcome: dotpkg::apply::Outcome::Skipped {
+                        why: "its state could not be read".to_string(),
+                    },
+                },
+            ],
+        };
+        assert_eq!(prep.outstanding(), Outstanding::NeedsAttention);
+        assert_eq!(apply_exit_code(1, 0, prep.is_ok(), prep.outstanding()), 1);
     }
 
     #[test]
@@ -1186,12 +1401,16 @@ mod tests {
     }
 
     #[test]
-    fn a_nonzero_code_is_never_lowered_or_raised() {
-        assert_eq!(floor_exit_code(2, true, false), 2);
+    fn a_refusal_passes_through_whatever_else_is_outstanding() {
+        // 2 means nothing was attempted, so no amount of outstanding work can
+        // reclassify it. Named for what it now guarantees: since 2026-08-13
+        // the function does reclassify one shape of 1, so "never lowered or
+        // raised" would no longer be true of the function as a whole.
+        assert_eq!(apply_exit_code(2, 0, true, Outstanding::Nothing), 2);
         assert_eq!(
-            floor_exit_code(2, false, true),
+            apply_exit_code(2, 0, false, Outstanding::NeedsAttention),
             2,
-            "the floor is a floor, not an override"
+            "a refusal outranks everything outstanding"
         );
     }
 
@@ -1201,7 +1420,7 @@ mod tests {
         // nor becomes a `Step`, so nothing about an otherwise "successful"
         // apply run notices it was never verified -- unless
         // `outstanding_skips()` counts it, which is exactly what this run's
-        // real call site (below) feeds into `floor_exit_code`'s third
+        // real call site (below) feeds into `apply_exit_code`'s fourth
         // argument.
         let prep = dotpkg::apply::Preparation {
             prepared: vec![dotpkg::apply::Prepared {
@@ -1225,19 +1444,25 @@ mod tests {
             "an opaque skip is outstanding work"
         );
         assert_eq!(
-            floor_exit_code(0, prep.is_ok(), !prep.outstanding_skips().is_empty()),
+            apply_exit_code(0, 0, prep.is_ok(), prep.outstanding()),
             1,
             "an otherwise-clean run with only an opaque package must not report success"
+        );
+        assert_eq!(
+            apply_exit_code(1, 0, prep.is_ok(), prep.outstanding()),
+            1,
+            "and it must not be reclassified to 3 either: an unreadable state \
+             is not an app the user can close"
         );
 
         // The counterweight: a preparation with nothing outstanding at all
         // must not be floored -- otherwise the assertion above would pass
-        // for a `floor_exit_code` that always returns 1 regardless of what
+        // for an `apply_exit_code` that always returns 1 regardless of what
         // `prep` actually contains.
         let clean = dotpkg::apply::Preparation::default();
         assert!(clean.outstanding_skips().is_empty());
         assert_eq!(
-            floor_exit_code(0, clean.is_ok(), !clean.outstanding_skips().is_empty()),
+            apply_exit_code(0, 0, clean.is_ok(), clean.outstanding()),
             0,
             "a preparation with nothing outstanding must keep its own exit code"
         );
@@ -1261,11 +1486,13 @@ mod tests {
         let scoop_scan = Scan {
             installed: vec![installed(dotpkg::model::SCOOP, "fzf")],
             opaque: vec![Name::new("zellij")],
+            residual: Vec::new(),
             warnings: vec!["zellij: manifest.json is not usable".to_string()],
         };
         let winget_scan = ScanOutcome::Scanned(Scan {
             installed: vec![installed(dotpkg::model::WINGET, "Git.Git")],
             opaque: vec![Name::new("7zip.7zip")],
+            residual: Vec::new(),
             warnings: vec!["7zip.7zip: installed at 2 disagreeing versions".to_string()],
         });
         let (merged_installed, merged_opaque, unscannable) =
@@ -1310,6 +1537,7 @@ mod tests {
         let scoop_scan = Scan {
             installed: vec![installed(dotpkg::model::SCOOP, "fzf")],
             opaque: vec![Name::new("zellij")],
+            residual: Vec::new(),
             warnings: Vec::new(),
         };
         let (merged_installed, merged_opaque, unscannable) = print_scan_warnings_and_merge(
@@ -1409,6 +1637,77 @@ mod tests {
     }
 
     #[test]
+    fn an_app_directory_with_no_manifest_keeps_its_ownership_record() {
+        // The shape a `Replace` leaves when its uninstall succeeded and its
+        // install failed: `apps/<name>/` still there, `current/manifest.json`
+        // gone. `Scoop::scan`'s `NotFound` arm used to `continue` past it, so
+        // the name was absent from the scan, `present_after` never mentioned
+        // it, and `State::reconcile` deleted the ownership record -- in the
+        // same run whose closing table said "FAILED ... half installed", and
+        // one line above `render_execution` announcing "ownership record
+        // dropped: nothing by that name is installed" about a package with a
+        // directory on disk.
+        //
+        // For an `Adopted` package that loss is permanent: a later reinstall
+        // records `Installed`, and nothing else remembers dotpkg was ever
+        // allowed to prune it.
+        let tmp = tempfile::tempdir().unwrap();
+        // A healthy package alongside it is not optional: `State::reconcile`
+        // refuses to drop everything when `present` comes back empty, so
+        // without `fzf` here this test would pass even if `residual` were
+        // never read at all.
+        scoop_root_with(tmp.path(), "fzf", "1.0.0");
+        std::fs::create_dir_all(tmp.path().join("apps").join("half").join("current")).unwrap();
+        let scoop = Scoop::new(tmp.path().to_path_buf());
+
+        let mut state = State::default();
+        state.set(
+            dotpkg::model::SCOOP,
+            &Name::new("fzf"),
+            dotpkg::state::Ownership::Installed,
+        );
+        state.set(
+            dotpkg::model::SCOOP,
+            &Name::new("half"),
+            dotpkg::state::Ownership::Adopted,
+        );
+
+        let winget_scan = ScanOutcome::Scanned(Scan::default());
+        let dropped = reconcile_ghosts(&mut state, &scoop, &winget_scan).unwrap();
+
+        assert!(
+            dropped.is_empty(),
+            "a directory on disk is not a ghost: {dropped:?}"
+        );
+        assert_eq!(
+            state.ownership(dotpkg::model::SCOOP, &Name::new("half")),
+            Some(dotpkg::state::Ownership::Adopted),
+            "and the ownership kind must survive intact -- `Adopted` is the \
+             one a reinstall cannot restore"
+        );
+
+        // The counterweight, and the reason `residual` is not `opaque`: the
+        // planner must still see this as something to install, because a
+        // half-finished install is exactly what `Install` is for. Routing it
+        // through `opaque` would have produced `Skip { Opaque }` forever for a
+        // declared package whose leftover directory nothing ever deletes.
+        let scan = <Scoop as dotpkg::backend::Backend>::scan(&scoop).unwrap();
+        assert!(
+            scan.residual.contains(&Name::new("half")),
+            "the scan must report it as on disk: {scan:?}"
+        );
+        assert!(
+            !scan.opaque.contains(&Name::new("half")),
+            "but not as opaque, or the planner stops offering to finish it"
+        );
+        assert!(
+            scan.warnings.is_empty(),
+            "and it says nothing: a half-finished install is not news: {:?}",
+            scan.warnings
+        );
+    }
+
+    #[test]
     fn reconcile_ghosts_drops_a_ghost_per_backend_while_each_backends_live_entry_survives() {
         // `State::reconcile` itself refuses to drop everything when
         // `present` comes back empty and the map is not (see its own doc
@@ -1447,6 +1746,7 @@ mod tests {
         let winget_scan = ScanOutcome::Scanned(Scan {
             installed: vec![installed(WINGET, "Git.Git")],
             opaque: Vec::new(),
+            residual: Vec::new(),
             warnings: Vec::new(),
         });
 
@@ -1546,6 +1846,7 @@ mod tests {
         let winget_scan = ScanOutcome::Scanned(Scan {
             installed: vec![installed(WINGET, "Git.Git")],
             opaque: vec![Name::new("Brave.Brave"), Name::new("Obsidian.Obsidian")],
+            residual: Vec::new(),
             warnings: Vec::new(),
         });
 

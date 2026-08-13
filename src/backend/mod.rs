@@ -32,6 +32,32 @@ pub struct Scan {
     /// One field rather than two: the *cause* differs per backend and belongs
     /// in `warnings`, but the *consequence* for the planner is identical.
     pub opaque: Vec<Name>,
+    /// On disk, but with nothing there to read a version from -- an app
+    /// directory whose `current/manifest.json` does not exist.
+    ///
+    /// **Distinct from `opaque`, and the difference is which question it
+    /// answers.** `opaque` means "installed, do not act on it", and `plan()`
+    /// reads it. This field means only "something by this name is on disk", it
+    /// is deliberately invisible to `plan()`, and the reason is that the
+    /// ordinary cause is a **half-finished install** -- `current` pointing at a
+    /// version directory scoop is still unpacking. `Install` is the right
+    /// action for that, and routing these through `opaque` would replace it
+    /// with `Skip { Opaque }` forever for a declared package with a leftover
+    /// directory nothing ever deletes.
+    ///
+    /// What it is read by is `present_after`, and that is the whole point.
+    /// Ownership reconciliation deletes the record of any owned name a fresh
+    /// scan does not mention, so before this field existed, a `Replace` whose
+    /// uninstall succeeded and whose install failed -- which leaves exactly
+    /// this shape on disk -- had its ownership dropped in the same output that
+    /// reported the failure. For an `Adopted` package that is unrecoverable:
+    /// a later reinstall records `Installed`, not `Adopted`, and nothing else
+    /// remembers dotpkg was ever allowed to prune it.
+    ///
+    /// Carries no warning, for the reason the `NotFound` arm in
+    /// `scoop::Scoop::scan` already gave: a half-finished install is not
+    /// something to tell the user about.
+    pub residual: Vec<Name>,
     /// One line per entry that was skipped for a reason the user should see.
     /// Expected-and-normal skips (a half-finished install with no manifest yet)
     /// do not appear here.

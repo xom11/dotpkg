@@ -17,6 +17,59 @@ removed; the other five fixes came from this project's own audit.
 
 ### The behaviour changes
 
+- **`[winget.opts] pin = "none"`: install it if absent, never manage its
+  version.** The other half of the decision `docs/OPEN-ITEMS.md` item 1
+  records. That item refuses to downgrade a winget package and the reasoning
+  holds — uninstall-then-reinstall would put a nightly loop on every
+  self-updating application — but nothing was ever built to say the thing a
+  user of such an application actually means. Measured on `zenbook-a14` (ARM64,
+  winget 1.29.280) on 2026-08-12: `Brave.Brave`, `Vivaldi.Vivaldi`,
+  `Google.Chrome`, `Discord.Discord` and `Warp.Warp` all had to be **removed
+  from the declaration entirely**, because each updates itself past its pin
+  within days and the correct refusal then failed the calling module on every
+  invocation. The hand-written PowerShell dotpkg replaced could express it; it
+  only ever ensured presence.
+
+  ```toml
+  [winget.opts]
+  "Brave.Brave" = { pin = "none" }
+  ```
+
+  **An unpinned package gets no `pkg.lock` entry.** That follows from item 7 —
+  *"two sources of truth about permitted versions is how a tool starts lying"* —
+  rather than being a shortcut: `pkg.lock` records what a declaration resolved
+  to, and an unpinned one resolves to nothing. Absent, it is installed at
+  whatever winget's index offers that day; present, it produces no line and no
+  count, in either direction, forever; undeclared and owned, it is pruned like
+  any other, since `Action::Prune` reads its version off the scan rather than
+  the lock. `dotpkg update` writes nothing for it and no longer rewrites
+  `pkg.lock` on account of it.
+
+  Three things are worth naming because each was a live bug in a draft.
+  `SkipReason::NotLocked` is untouched at all **81** of its reference sites: the
+  planner's unpinned branch returns before the lock lookup, so such a package
+  never reaches the rule that fails the whole run at exit 2, and the rule is not
+  weakened by one line for pinned packages. `Update::wrote_anything` counts a
+  dropped pin as a write and an unpinned steady state as not one — with neither
+  half, five declared browsers rewrite `pkg.lock` on every `update`; with both
+  halves excluded, a dropped pin is reported and never written, so the stale
+  entry survives forever. And an id that resolves to a **different** id is
+  refused rather than installed, which is correctness rather than tidiness:
+  accepted, a declared `OhMyPosh` installs `JanDeDobbeleer.OhMyPosh`, the next
+  run's scan misses the declared name, and the package is reinstalled on every
+  run forever.
+
+  `dotpkg adopt --backend winget` is the only way an already-installed unpinned
+  package becomes prunable, since `apply` never installs a package that is
+  present and so never comes to own one. It records ownership and nothing else,
+  spawning no `winget` call at all.
+
+  The install reuses the measured `set_argv` verbatim rather than inventing an
+  argv no measurement covers, resolving the canonical id first with the same
+  `show --id <declared>` call `update` already uses. Dropping `-e` was
+  considered and refused; see the new item in `docs/OPEN-ITEMS.md` for the
+  measurement conflict that decided it.
+
 - **`pkg.toml.bak` and `pkg.lock.bak` are no longer written.** Both files are
   **committed**, so the user's own history already holds every version of them
   and `git checkout` recovers strictly more than a copy of the last one ever

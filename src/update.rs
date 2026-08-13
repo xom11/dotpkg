@@ -656,6 +656,142 @@ mod tests {
             .collect()
     }
 
+    // -- `[winget.opts] pin = "none"` ------------------------------------
+    //
+    // Design: `docs/specs/2026-08-13-winget-unpinned-design.md`. An unpinned
+    // declaration resolves to nothing, so it stores nothing -- and the two
+    // halves of "stores nothing" fail in opposite directions, which is why
+    // each of the churn tests below is the other's control.
+
+    fn unpinned_set(ids: &[&str]) -> std::collections::BTreeSet<Name> {
+        ids.iter().map(|i| Name::new(*i)).collect()
+    }
+
+    fn winget_pin(v: &str) -> Pin {
+        Pin::WingetVersion { version: v.into() }
+    }
+
+    /// `fold_backend` over one declared winget id, with nothing resolved for it.
+    fn fold_unpinned(
+        old: &BTreeMap<Name, Pin>,
+        id: &str,
+        scope: &Scope,
+    ) -> (BTreeMap<Name, Pin>, Vec<Change>) {
+        let mut lock_map = BTreeMap::new();
+        let mut changes = Vec::new();
+        fold_backend(
+            crate::model::WINGET,
+            &mut lock_map,
+            old,
+            &[Name::new(id)],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &unpinned_set(&[id]),
+            scope,
+            &mut changes,
+        );
+        (lock_map, changes)
+    }
+
+    #[test]
+    fn an_unpinned_package_gets_no_lock_entry_at_all() {
+        let (lock_map, changes) = fold_unpinned(&BTreeMap::new(), "Brave.Brave", &Scope::WholeRun);
+        assert!(
+            lock_map.is_empty(),
+            "an unpinned declaration resolves to nothing, so it records nothing: {lock_map:?}"
+        );
+        assert_eq!(
+            changes,
+            vec![Change::Unpinned {
+                backend: crate::model::WINGET,
+                name: Name::new("Brave.Brave"),
+                previous: None,
+            }],
+            "a line rather than silence: `update` must not pass over a declared package"
+        );
+    }
+
+    #[test]
+    fn a_repeated_update_with_only_unpinned_packages_does_not_rewrite_the_lock() {
+        // The churn half. Without `wrote_anything` excluding
+        // `Unpinned { previous: None }`, five declared browsers make EVERY
+        // `dotpkg update` rewrite pkg.lock for a diff that is empty.
+        let (_, changes) = fold_unpinned(&BTreeMap::new(), "Brave.Brave", &Scope::WholeRun);
+        let u = Update {
+            lock: Lock::default(),
+            changes,
+        };
+        assert!(
+            !u.wrote_anything(),
+            "nothing changed, so nothing may be written: {:?}",
+            u.changes
+        );
+    }
+
+    #[test]
+    fn a_package_that_becomes_unpinned_has_its_pin_dropped_and_the_lock_is_rewritten() {
+        // The other half, and the control for the test above: if the exclusion
+        // were applied to BOTH forms, this run would report the removal and
+        // never write it -- so the stale entry would survive forever and no
+        // `update` could ever clear it.
+        let mut old = BTreeMap::new();
+        old.insert(Name::new("Brave.Brave"), winget_pin("151.1.93.134"));
+
+        let (lock_map, changes) = fold_unpinned(&old, "Brave.Brave", &Scope::WholeRun);
+        assert!(lock_map.is_empty(), "the stale pin is gone: {lock_map:?}");
+        assert_eq!(
+            changes,
+            vec![Change::Unpinned {
+                backend: crate::model::WINGET,
+                name: Name::new("Brave.Brave"),
+                previous: Some("151.1.93.134".into()),
+            }],
+            "and it says what it removed"
+        );
+
+        let u = Update {
+            lock: Lock::default(),
+            changes,
+        };
+        assert!(
+            u.wrote_anything(),
+            "a removed pin IS a write -- otherwise the drop is reported and never lands"
+        );
+    }
+
+    #[test]
+    fn a_named_update_of_an_unrelated_package_leaves_an_unpinned_packages_stale_pin_alone() {
+        // The scope-placement test. The unpinned branch sits BELOW
+        // `!scope.covers(name)`, so a `dotpkg update fzf` carries the old entry
+        // forward untouched rather than quietly dropping it -- the same rule
+        // the `fold_backend_keeps_the_canonical_key_*` tests hold one branch
+        // over. Moving the unpinned branch above the scope check drops it.
+        let mut old = BTreeMap::new();
+        old.insert(Name::new("Brave.Brave"), winget_pin("151.1.93.134"));
+
+        let (lock_map, changes) =
+            fold_unpinned(&old, "Brave.Brave", &Scope::Named(vec![Name::new("fzf")]));
+        assert_eq!(
+            lock_map.get(&Name::new("Brave.Brave")),
+            Some(&winget_pin("151.1.93.134")),
+            "a named update must not rewrite anything it was not asked about"
+        );
+        assert!(changes.is_empty(), "and says nothing about it: {changes:?}");
+
+        // The counterweight: naming it explicitly DOES drop it, or the test
+        // above would pass against a branch that never fires at all.
+        let (lock_map, changes) = fold_unpinned(
+            &old,
+            "Brave.Brave",
+            &Scope::Named(vec![Name::new("Brave.Brave")]),
+        );
+        assert!(
+            lock_map.is_empty(),
+            "asked about, so answered: {lock_map:?}"
+        );
+        assert_eq!(changes.len(), 1);
+    }
+
     #[test]
     fn a_package_with_no_previous_entry_is_added() {
         let u = resolve_into_lock(

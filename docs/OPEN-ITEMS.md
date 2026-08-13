@@ -82,11 +82,33 @@ Recorded so they are not reopened as if nobody had looked.
   install — would put a nightly uninstall-and-reinstall loop on every
   self-updating application. dotpkg prints the refusal and tells you to run
   `dotpkg update`.
+
+  **The refusal is unchanged; what closed 2026-08-13 is the other half of it,
+  which had never been built.** This item recorded a decision and left no way to
+  say the thing a user of a self-updating application actually means. Measured
+  on a14 on 2026-08-12, five GUI packages — `Brave.Brave`, `Vivaldi.Vivaldi`,
+  `Google.Chrome`, `Discord.Discord`, `Warp.Warp` — had to be deleted from a
+  real dotfiles repository's declaration outright, because each moves past its
+  pin within days and the correct refusal then floored that module to non-zero
+  on every invocation. `[winget.opts] pin = "none"` is the answer: install if
+  absent, never manage the version, no `pkg.lock` entry at all. Design in
+  `docs/specs/2026-08-13-winget-unpinned-design.md`.
+
+  **What that does not cover, stated so it is not read as wider than it is:** a
+  *pinned* package that has moved ahead still refuses, still exits non-zero, and
+  `dotpkg update` is still the fix. Nothing about the downgrade decision moved.
 - **7. `winget pin`.** Not used. Two sources of truth about permitted versions is
   how a tool starts lying.
 - **8. `add`, architecture drift, same-version re-pin, locking against two
   concurrent dotpkg runs, Chocolatey.** All unbuilt. `add` composes today from
   `pkg.toml` + `dotpkg update <pkg>` + `dotpkg apply`.
+
+  **Narrowed 2026-08-13, not closed.** For a package declared
+  `[winget.opts] pin = "none"`, `add` composes from `pkg.toml` + `dotpkg apply`
+  — with no `update` step at all, because there is nothing to resolve and
+  nothing to record. The two-step composition above is now the *pinned* case
+  specifically. Everything else in this item stands, and the architecture-drift
+  cost recorded below is untouched: this design does nothing about drift.
 
   **Architecture drift has since cost somebody something, and the cost is
   recorded here for prioritisation — not as a request, and not as a promise to
@@ -118,6 +140,32 @@ Recorded so they are not reopened as if nobody had looked.
 
 Nothing here is known to be wrong. Nothing here has been watched.
 
+- **30. `--id`'s substring behaviour is claimed two ways and measured one
+  way, on the same verb.** Found 2026-08-13 while designing `pin = "none"`,
+  putting two existing statements side by side for the first time.
+  `docs/measurements-2026-08-10-winget-write-path.md` §7 probed five bare-word
+  substrings of real installed ids — `show --id 7zip`, `Microsoft`, `ripgrep`,
+  `git`, `zoxide` — and every one returned `0x8A150014`, concluding **"`--id`
+  always requires the whole id; `--exact` only controls case."**
+  `winget_exec::list_one_argv`'s doc comment cites that to argue dropping `-e`
+  costs nothing. Against it, `CHANGELOG.md` and the same sentence in
+  `update::run` and `adopt::run_winget` state that a declared `OhMyPosh` matched
+  `JanDeDobbeleer.OhMyPosh` — **also `winget show --id` without `--exact`** —
+  and a refusal was built on the strength of it. **That second claim carries no
+  measurement**: it is in three source comments, the changelog and a commit
+  message, and in no `docs/measurements-*` document.
+
+  Nothing is currently wrong either way, because both refusals built on the
+  second claim refuse rather than act. What is open is that the flag every
+  winget resolution depends on is described two contradictory ways in this tree,
+  with one measurement supporting only one of them. Closing it needs a probe of
+  `show --id <a dotted segment of a real id>` — §7's five probes were all bare
+  words, and `OhMyPosh` is a trailing dotted segment, which is the one shape
+  nothing has tried.
+
+  This is why the unpinned install resolves a canonical id first rather than
+  dropping `-e` from a write verb: a mutating call is not where the question
+  gets settled.
 - **3. `--location`, `--all-versions`, and side-by-side versions of one id.** All
   three unmeasured.
 - **4. Removing a machine-scope package while elevated.** Unmeasured. The
@@ -152,6 +200,18 @@ Nothing here is known to be wrong. Nothing here has been watched.
   a14: byte-identical, 0 differing at all.** First evidence either way; still not
   a guarantee about the next package. Stays open as *measured, no difference
   observed*.
+
+- **31. `[winget.opts]` refuses an entry for an undeclared package;
+  `[scoop.opts]` accepts one and ignores it.** Deliberate asymmetry, 2026-08-13.
+  A `[winget.opts]` entry naming a package `[winget] packages` does not declare
+  is a parse error, because the failure it prevents is silent and expensive: a
+  typo in `packages` spelled correctly in `opts` yields a **pinned** package
+  where the user asked for an unpinned one, and the only symptom is the
+  refused-downgrade line the entry was added to remove. `[scoop.opts]` has the
+  same inertness — a bogus name there silently loses an `arch` pin — and was
+  deliberately left alone rather than have a winget decision widened over
+  another backend's file in the same change. Whether scoop should gain the same
+  rule is unexamined.
 
 ## C. Coverage and mutation debt
 

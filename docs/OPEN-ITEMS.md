@@ -247,6 +247,16 @@ Nothing here is known to be wrong. Nothing here has been watched.
   breakdown further down *Coverage and mutation debt* is where that is recorded,
   along with the 3 survivors it characterises as equivalent. The branch it was
   paired with is still open, which is why the item is still here.
+- **A fourth de-elevation route from the a14 ssh session works, where three
+  recorded ones do not.** `scripts/nonelevated-mutants.ps1` names `runas
+  /trustlevel:0x20000`, `schtasks /RL LIMITED` and `Shell.Application` as
+  measured failures. `gsudo -i Medium` (gsudo 2.6.1) succeeds — measured
+  2026-08-13, used to perform a user-scope `winget uninstall` that the elevated
+  session could not. The command must sit in a **`.cmd` file**: passed as gsudo
+  arguments it is routed through PowerShell, which parses `uninstall` as an
+  expression and fails before winget is reached. This is the route that can
+  close item 29's removal half, and it may also be what `src/sys.rs`'s
+  ordinary-Windows mutation run needs.
 - **`src/sys.rs` needs three mutation runs, not one.** macOS, elevated Windows,
   and ordinary Windows — because each platform is blind to the other's `cfg`
   arm, and **no two of them together kill all six mutants**. A Windows-only run
@@ -382,12 +392,33 @@ This is the section the README's "Verified on" table is the summary of.
   between rounds — the unmanaged count dropped to scoop's 24 and the winget
   backend was reported unreadable rather than empty.
 
-  **Still open: no winget mutation has run anywhere** outside the Phase 4b
-  rounds and their own trees. A round was planned for the same sitting and
-  **deliberately not attempted**: dotpkg cannot currently reach winget on a14,
-  and nothing else in that session can either — so the tool would have both
-  performed and reported the mutation, which `src/execute.rs`'s own module doc
-  names as proving only self-consistency.
+  ~~**Still open: no winget mutation has run anywhere** outside the Phase 4b
+  rounds and their own trees.~~ — **the install half closed 2026-08-13; the
+  removal half did not, and the two are not interchangeable.**
+
+  **Closed for install.** `dotpkg apply --yes` performed a real winget install
+  on a14 — `ducaale.xh` 0.26.2, declared `pin = "none"`, `done winget
+  ducaale.xh verified on disk`, confirmed present by a fresh scan afterwards,
+  with **no `pkg.lock` file written at all** and ownership recorded in
+  `state.json`. Idle gate `VERDICT: IDLE` (3.06% machine-wide) recorded before
+  it, as the standing rule requires. Full round in
+  `docs/measurements-2026-08-13-phase14b-winget-mutation.md`.
+
+  **Still open for removal, and refused rather than skipped.** The prune was
+  planned and prepared and then refused at exit 2 by
+  `refuse_elevated_winget_removal`: the ssh session is elevated and the package
+  is user-scope, both measured directly. `WingetStep::Remove` has therefore
+  still never run outside Phase 4b. The refusal was **vindicated in the same
+  round**: winget itself, asked to perform that uninstall from that session,
+  returned `0x8A15007D` and *"The package installed for user scope cannot be
+  uninstalled when running with administrator privileges."* — the exact code
+  `winget_exec::CANNOT_UNINSTALL_ELEVATED` names. The pre-check and the
+  behaviour it predicts were observed agreeing.
+
+  **How to close the remaining half:** run `dotpkg apply --yes --allow-prune`
+  under `gsudo -i Medium`, which §4 of that round measured to de-elevate
+  successfully where `scripts/nonelevated-mutants.ps1`'s three recorded routes
+  do not. The elevation pre-check will not fire there.
 - **One machine, one architecture, one winget version, one scoop layout, and one
   elevated session.** `zenbook-a14`, aarch64, winget v1.29.280. Nothing has
   observed `apply` from an ordinary non-elevated session.

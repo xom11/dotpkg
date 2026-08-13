@@ -235,10 +235,16 @@ removed; the other five fixes came from this project's own audit.
   surviving the window in which the package is absent. That window — scoop's
   uninstall-then-install gap, the most dangerous path this tool has — had never
   been watched by anything before.
-- **What that still does not cover is stated rather than left to be assumed:**
-  **no winget mutation has run anywhere** outside the Phase 4b rounds and their
-  own trees. It has no release-binary evidence and no CI evidence. See
-  `docs/OPEN-ITEMS.md` item 29.
+- **A winget mutation has now run outside Phase 4b, and only half of one.**
+  On 2026-08-13 `dotpkg apply --yes` installed `ducaale.xh` 0.26.2 on a14 as an
+  unpinned package — `done winget ducaale.xh verified on disk`, confirmed by a
+  fresh scan, with no `pkg.lock` file written at all and ownership recorded.
+  The matching **removal was refused at exit 2** by the elevation pre-check, the
+  session being elevated and the package user-scope; winget itself then returned
+  `0x8A15007D` for that same uninstall, so the refusal was right. `WingetStep::
+  Remove` still has no evidence outside Phase 4b, and neither half has
+  release-binary or CI evidence. See `docs/OPEN-ITEMS.md` item 29 and
+  `docs/measurements-2026-08-13-phase14b-winget-mutation.md`.
 
 ### Code
 

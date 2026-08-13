@@ -553,6 +553,12 @@ fn main() -> Result<()> {
             ) {
                 eprintln!("warning: {w}");
             }
+            // Beside the fence warnings and for the same reason: a fact about
+            // this run that belongs on stderr rather than in the table Phase 5
+            // spent itself shortening. See `stale_unpinned_lock_entries`.
+            for w in &dotpkg::apply::stale_unpinned_lock_entries(&declared, &locked) {
+                eprintln!("warning: {w}");
+            }
             print!("{}", dotpkg::render::render(&plan, show_unmanaged));
         }
         Command::Apply {
@@ -614,6 +620,12 @@ fn main() -> Result<()> {
                 &d.declared.winget.guard,
                 &installed,
             ) {
+                eprintln!("warning: {w}");
+            }
+            // Beside the fence warnings and for the same reason: a fact about
+            // this run that belongs on stderr rather than in the table Phase 5
+            // spent itself shortening. See `stale_unpinned_lock_entries`.
+            for w in &dotpkg::apply::stale_unpinned_lock_entries(&d.declared, &d.locked) {
                 eprintln!("warning: {w}");
             }
             print!("{}", dotpkg::render::render(&plan, show_unmanaged));

@@ -1034,51 +1034,7 @@ impl<C: WingetCmd> Backend for Winget<C> {
     /// Task 15's `update` writes into `pkg.lock`'s key, not the spelling this
     /// method was asked with.
     fn resolve_latest(&self, name: &Name, ctx: &ResolveCtx) -> Resolution {
-        let id = name.to_string();
-        let out = match self
-            .cmd
-            .run(&["show", "--id", &id, "--disable-interactivity"])
-        {
-            Ok(out) => out,
-            Err(e) => {
-                return Resolution::Failed {
-                    why: format!("winget show could not be run: {e:#}"),
-                }
-            }
-        };
-        if out.code == NO_APPLICATIONS_FOUND {
-            // The package itself is gone -- not "no longer at this version",
-            // which is `NO_VERSION_FOUND`'s fact, not this one's.
-            return Resolution::Failed {
-                why: format!(
-                    "{name}: no longer in the winget index ({})",
-                    out.stdout.lines().next().unwrap_or("(no output)")
-                ),
-            };
-        }
-        // Deliberately NOT given `version_liveness`'s `INTERNAL_ERROR` arm
-        // (Task 7, measurements-2026-08-11 §5). That arm's message rests on
-        // 105 reader-side calls that split exactly two ways: 85 of
-        // `version_liveness`'s own `show --id <id> -v <ver> …` and 20 of
-        // `list -e --id <id> …` (`list_one_argv`'s shape, no `--scope` --
-        // the post-mutation verify rescan `winget_exec.rs` runs, not the
-        // elevation pre-check's `--scope user` call). Neither is this
-        // method's flagless `show --id <id> …` -- that argv has MEASURABLY
-        // zero calls in that population, not merely an unconfirmed one.
-        // Copying the same wording here would attribute those 105 calls to a
-        // call that was not part of them. Closing this gap correctly needs
-        // its own probe of this exact argv under contention, not a copy of
-        // someone else's.
-        if out.code != 0 {
-            return Resolution::Failed {
-                why: format!(
-                    "winget show {name} exited {}: {}",
-                    out.code,
-                    out.stdout.lines().next().unwrap_or("(no output)")
-                ),
-            };
-        }
-        match parse_show(&out.stdout) {
+        match index_latest(&self.cmd, name) {
             Ok(found) => {
                 *ctx.canonical.borrow_mut() = Some(Name::new(found.id));
                 Resolution::Resolved {
@@ -1087,9 +1043,7 @@ impl<C: WingetCmd> Backend for Winget<C> {
                     },
                 }
             }
-            Err(e) => Resolution::Failed {
-                why: format!("{e:#}"),
-            },
+            Err(why) => Resolution::Failed { why },
         }
     }
 
@@ -1135,6 +1089,61 @@ impl<C: WingetCmd> Backend for Winget<C> {
             Err(why) => Resolution::Failed { why },
         }
     }
+}
+
+/// What does winget's index currently say `id` is called, and what version does
+/// it offer?
+///
+/// Shared body of the two questions that ask it, for the reason
+/// `version_liveness` below is shared by its own two callers: the argv and every
+/// error sentence get decided once rather than drifting between near-copies.
+/// `Winget::resolve_latest` calls it to build a pin; `apply::resolve_for_ensure`
+/// calls it for a package that will never have one, needing only the canonical
+/// id and a version to install at. A free function over `&dyn WingetCmd` rather
+/// than a `Winget<C>` method because `prepare` holds the seam, not a backend --
+/// the same shape, and the same reason, as `version_liveness`.
+///
+/// `["show", "--id", <id>, "--disable-interactivity"]` — **no `--exact`**, which
+/// is the whole point of the call. `--exact` is what makes `--id`
+/// case-sensitive, so omitting it folds case on the way in and lets winget hand
+/// the canonical spelling back out in the self-verifying `Found <name> [<Id>]`
+/// line `parse_show` reads. That spelling is the only one a mutating `-e --id`
+/// may ever carry.
+///
+/// **Deliberately NOT given `version_liveness`'s `INTERNAL_ERROR` arm**
+/// (Task 7, measurements-2026-08-11 §5), carried over from `resolve_latest`
+/// unchanged when this was split out of it. That arm's message rests on 105
+/// reader-side calls that split exactly two ways: 85 of `version_liveness`'s own
+/// `show --id <id> -v <ver> …` and 20 of `list -e --id <id> …`
+/// (`list_one_argv`'s shape, no `--scope` — the post-mutation verify rescan
+/// `winget_exec.rs` runs, not the elevation pre-check's `--scope user` call).
+/// Neither is this function's flagless `show --id <id> …` — that argv has
+/// MEASURABLY zero calls in that population, not merely an unconfirmed one.
+/// Copying the wording here would attribute those 105 calls to a call that was
+/// not part of them. Closing the gap correctly needs its own probe of this exact
+/// argv under contention, not a copy of someone else's.
+pub(crate) fn index_latest(cmd: &dyn WingetCmd, id: &Name) -> Result<Found, String> {
+    let id_arg = id.to_string();
+    let out = match cmd.run(&["show", "--id", &id_arg, "--disable-interactivity"]) {
+        Ok(out) => out,
+        Err(e) => return Err(format!("winget show could not be run: {e:#}")),
+    };
+    if out.code == NO_APPLICATIONS_FOUND {
+        // The package itself is gone -- not "no longer at this version",
+        // which is `NO_VERSION_FOUND`'s fact, not this one's.
+        return Err(format!(
+            "{id}: no longer in the winget index ({})",
+            out.stdout.lines().next().unwrap_or("(no output)")
+        ));
+    }
+    if out.code != 0 {
+        return Err(format!(
+            "winget show {id} exited {}: {}",
+            out.code,
+            out.stdout.lines().next().unwrap_or("(no output)")
+        ));
+    }
+    parse_show(&out.stdout).map_err(|e| format!("{e:#}"))
 }
 
 /// Is `version` of `id` still in winget's index?

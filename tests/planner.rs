@@ -849,6 +849,7 @@ fn actions_are_ordered_installs_then_prunes_then_reports() {
             Action::Install { .. } => "install",
             Action::Upgrade { .. } => "upgrade",
             Action::Downgrade { .. } => "downgrade",
+            Action::Ensure { .. } => "ensure",
             Action::Prune { .. } => "prune",
             Action::Skip { .. } => "skip",
             Action::Unmanaged { .. } => "unmanaged",
@@ -1564,5 +1565,266 @@ fn an_unscannable_backend_does_not_silence_the_other_one() {
             .any(|a| matches!(a, Action::Install { backend, .. } if backend == SCOOP)),
         "scoop must still be planned: {:?}",
         p.actions
+    );
+}
+
+// -- `[winget.opts] pin = "none"` --------------------------------------------
+//
+// Design: `docs/specs/2026-08-13-winget-unpinned-design.md`. The promise is
+// presence, not a version: install when absent, never look at the version
+// again, and never write a `pkg.lock` entry.
+
+/// One unpinned winget package, declared and opted out of pinning.
+const DECLARED_BRAVE_UNPINNED: &str = "[winget]\npackages = [\"Brave.Brave\"]\n\
+     [winget.opts]\n\"Brave.Brave\" = { pin = \"none\" }\n";
+
+#[test]
+fn an_unpinned_package_that_is_absent_is_an_ensure_and_not_an_install() {
+    // `Ensure` carries no version, which is the whole distinction from
+    // `Install`: at plan time nothing has asked winget anything, so there is no
+    // version to name and naming one would be a claim dotpkg cannot make.
+    let p = plan(
+        &config::parse(DECLARED_BRAVE_UNPINNED).unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Ensure {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+        }]
+    );
+}
+
+#[test]
+fn an_unpinned_package_that_is_installed_produces_no_action_at_any_version() {
+    // Two versions far apart, in both directions, so a mutant that compares
+    // the installed version against ANYTHING is killed: there is no version
+    // for it to compare against, and there must never be one.
+    for version in ["1.0.0", "999.999.999"] {
+        let p = plan(
+            &config::parse(DECLARED_BRAVE_UNPINNED).unwrap(),
+            &lock::Lock::default(),
+            &[installed_winget("Brave.Brave", version)],
+            &[],
+            &State::default(),
+            &Running::default(),
+            &[],
+        );
+        assert_eq!(
+            p.actions,
+            vec![],
+            "installed at {version}: an unpinned package that is present is \
+             converged, exactly as a pinned one sitting at its lock is"
+        );
+    }
+}
+
+#[test]
+fn an_unpinned_package_with_no_lock_entry_is_not_notlocked() {
+    // **The load-bearing test of this whole feature.** A declared winget
+    // package with no lock entry is `Skip { NotLocked }`, which fails the whole
+    // run at exit 2 -- and must go on doing so for pinned packages. An unpinned
+    // one has no pin to be missing, so it must never reach that branch.
+    //
+    // Its negative control is moving the planner's unpinned branch BELOW the
+    // lock lookup; this then goes red naming `NotLocked`.
+    let p = plan(
+        &config::parse(DECLARED_BRAVE_UNPINNED).unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[],
+    );
+    assert!(
+        !p.actions.iter().any(|a| matches!(
+            a,
+            Action::Skip {
+                reason: SkipReason::NotLocked,
+                ..
+            }
+        )),
+        "an unpinned package has no pin to be missing: {:?}",
+        p.actions
+    );
+
+    // The counterweight, in the same test so the two cannot drift apart: a
+    // PINNED package with no lock entry must still be `NotLocked`. Without
+    // this, deleting the whole `NotLocked` branch would leave the assertion
+    // above green.
+    let pinned = plan(
+        &config::parse("[winget]\npackages = [\"Brave.Brave\"]\n").unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(
+        pinned.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::NotLocked,
+        }],
+        "the rule is untouched for a pinned package"
+    );
+}
+
+#[test]
+fn an_unpinned_package_that_is_opaque_is_still_skipped_as_opaque() {
+    // The ordering control for the branch placement, pointing the other way
+    // from the `NotLocked` test: an opaque package's state could not be read,
+    // so "is it installed?" has no answer, and installing over a state dotpkg
+    // could not establish is the mistake `Opaque` exists to prevent. Moving the
+    // unpinned branch ABOVE the opaque check turns this into an `Ensure`.
+    let p = plan(
+        &config::parse(DECLARED_BRAVE_UNPINNED).unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &[Name::new("Brave.Brave")],
+        &State::default(),
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::Opaque,
+        }]
+    );
+}
+
+#[test]
+fn an_unscannable_backend_still_skips_an_unpinned_package() {
+    // `installed` is empty for an unscannable backend by construction, so
+    // without the early return every unpinned package would be fabricated into
+    // an `Ensure` against a machine nothing could read.
+    let p = plan(
+        &config::parse(DECLARED_BRAVE_UNPINNED).unwrap(),
+        &lock::Lock::default(),
+        &[],
+        &[],
+        &State::default(),
+        &Running::default(),
+        &[WINGET],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::Unscannable,
+        }]
+    );
+}
+
+#[test]
+fn an_owned_unpinned_package_that_stops_being_declared_is_pruned_at_the_scanned_version() {
+    // Prune needs no lock entry at all: the version comes from the SCAN, which
+    // is what makes `--version` on the removal argv just as strong a guard for
+    // an unpinned package as for a pinned one. The package is undeclared here
+    // (an empty `[winget]`), which is the state that makes it a prune.
+    let mut state = State::default();
+    state.set(WINGET, &Name::new("Brave.Brave"), Ownership::Installed);
+    let p = plan(
+        &config::parse("[winget]\npackages = []\n").unwrap(),
+        &lock::Lock::default(),
+        &[installed_winget("Brave.Brave", "151.1.93.134")],
+        &[],
+        &state,
+        &Running::default(),
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Prune {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            version: "151.1.93.134".into(),
+        }]
+    );
+}
+
+#[test]
+fn a_running_owned_unpinned_package_is_skipped_rather_than_pruned() {
+    // The fence still reaches an unpinned package on the one path where it can
+    // hurt. An unpinned package is never replaced -- that is the feature -- so
+    // the plan-time `running.covers` check in the declared loop is never
+    // reached for one; the undeclared loop's is, and this is it.
+    let mut state = State::default();
+    state.set(WINGET, &Name::new("Brave.Brave"), Ownership::Installed);
+    let running = Running::new(BTreeSet::from(["brave".to_string()]), BTreeSet::new());
+    let mut inst = installed_winget("Brave.Brave", "151.1.93.134");
+    inst.bins = vec!["brave".to_string()];
+    let p = plan(
+        &config::parse("[winget]\npackages = []\n").unwrap(),
+        &lock::Lock::default(),
+        &[inst],
+        &[],
+        &state,
+        &running,
+        &[],
+    );
+    assert_eq!(
+        p.actions,
+        vec![Action::Skip {
+            backend: WINGET.into(),
+            name: "Brave.Brave".into(),
+            reason: SkipReason::Running,
+        }]
+    );
+}
+
+#[test]
+fn change_count_counts_an_ensure_and_is_not_a_fixed_number() {
+    // Zero, one and two, for the lesson
+    // `refused_downgrade_count_is_the_number_of_winget_downgrades_not_a_fixed_one`
+    // records: a one-item fixture cannot kill a `body -> 1` mutant.
+    use dotpkg::plan::Plan;
+    let ensure = |id: &str| Action::Ensure {
+        backend: WINGET.into(),
+        name: id.into(),
+    };
+    assert_eq!(Plan { actions: vec![] }.change_count(), 0);
+    assert_eq!(
+        Plan {
+            actions: vec![ensure("Brave.Brave")]
+        }
+        .change_count(),
+        1
+    );
+    assert_eq!(
+        Plan {
+            actions: vec![ensure("Brave.Brave"), ensure("Vivaldi.Vivaldi")]
+        }
+        .change_count(),
+        2,
+        "every Ensure is a real install, not just the first"
+    );
+    // And it must not count everything: a Skip beside them stays excluded.
+    assert_eq!(
+        Plan {
+            actions: vec![
+                ensure("Brave.Brave"),
+                Action::Skip {
+                    backend: WINGET.into(),
+                    name: "Vivaldi.Vivaldi".into(),
+                    reason: SkipReason::Running,
+                }
+            ]
+        }
+        .change_count(),
+        1
     );
 }

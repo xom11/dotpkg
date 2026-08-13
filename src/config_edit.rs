@@ -204,17 +204,25 @@ pub fn add_winget_package(text: &str, name: &Name) -> Result<String> {
 ///
 /// **`[winget]` cannot be compared wholesale here, because `packages` is what
 /// this function changes -- so every OTHER field of `WingetSection` has to be
-/// named on the `ensure!` line, and today that is exactly `guard`.** It was
-/// named nowhere until now, which meant a winget edit that dropped
-/// `[winget.guard]` passed this guard silently. Adding a third field to
+/// named on the `ensure!` line, and today that is exactly `guard` and `opts`.**
+/// `guard` was named nowhere until Phase 5, which meant a winget edit that
+/// dropped `[winget.guard]` passed this guard silently. Adding a field to
 /// `WingetSection` without adding it here reopens that hole; the sibling
 /// `verify_round_trip` does not have this obligation because it can and does
 /// compare the section as a whole.
+///
+/// **`opts` is the third field that obligation warned about, and it arrived.**
+/// Dropping `[winget.opts]` is silent in a way dropping `guard` is not: every
+/// `pin = "none"` entry vanishing turns those packages back into *pinned* ones,
+/// so the next `apply` starts refusing downgrades for applications the user
+/// deliberately unpinned, with nothing anywhere saying the file changed.
 fn verify_round_trip_winget(before: &crate::config::Config, name: &Name, out: &str) -> Result<()> {
     let after = crate::config::parse(out)
         .context("the edit produced a pkg.toml that no longer parses; refusing to write it")?;
     anyhow::ensure!(
-        after.scoop == before.scoop && after.winget.guard == before.winget.guard,
+        after.scoop == before.scoop
+            && after.winget.guard == before.winget.guard
+            && after.winget.opts == before.winget.opts,
         "the edit changed something other than [winget] packages; refusing to write it"
     );
     let mut want = before.winget.packages.clone();
@@ -573,6 +581,60 @@ python = { arch = "64bit" }   # force an architecture
         assert!(
             format!("{:#}", r.unwrap_err()).contains("changed something other than"),
             "must say what kind of disagreement it is"
+        );
+    }
+
+    #[test]
+    fn the_round_trip_guard_rejects_a_winget_edit_that_drops_the_opts_table() {
+        // `verify_round_trip_winget`'s own doc comment named this obligation
+        // before `opts` existed: "Adding a third field to `WingetSection`
+        // without adding it here reopens that hole." This is that field.
+        //
+        // Dropping `[winget.opts]` is silent in a way dropping `guard` is not:
+        // every `pin = "none"` entry vanishing turns those packages back into
+        // PINNED ones, so the next `apply` starts refusing downgrades for
+        // applications the user deliberately unpinned, with nothing anywhere
+        // saying the file changed.
+        let with_opts = "[winget]\n\
+             packages = [\"Brave.Brave\"]\n\
+             \n\
+             [winget.opts]\n\
+             \"Brave.Brave\" = { pin = \"none\" }\n";
+        let before = crate::config::parse(with_opts).unwrap();
+        assert_eq!(
+            before.winget.unpinned().len(),
+            1,
+            "the fixture must actually carry an unpinned entry"
+        );
+
+        // The positive control first: without it, a guard that refuses
+        // everything would look like it was working.
+        let clean = add_winget_package(with_opts, &Name::new("Vivaldi.Vivaldi")).unwrap();
+        assert!(
+            verify_round_trip_winget(&before, &Name::new("Vivaldi.Vivaldi"), &clean).is_ok(),
+            "a legitimate edit must pass: {clean}"
+        );
+        assert_eq!(
+            crate::config::parse(&clean)
+                .unwrap()
+                .winget
+                .unpinned()
+                .len(),
+            1,
+            "and must carry the opts table through"
+        );
+
+        // Now the edit that drops the table. Written by hand rather than
+        // produced by `add_winget_package`, because the guard exists for a
+        // producer that does not exist yet -- the same order the `guard`
+        // sibling below is written in, and the only order in which the guard
+        // can be shown to work at all.
+        let dropped = "[winget]\npackages = [\"Brave.Brave\", \"Vivaldi.Vivaldi\"]\n";
+        let err =
+            verify_round_trip_winget(&before, &Name::new("Vivaldi.Vivaldi"), dropped).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("changed something other than"),
+            "got: {err:#}"
         );
     }
 

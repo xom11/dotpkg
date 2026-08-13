@@ -159,6 +159,9 @@ winget holds the manifest, not dotpkg — so `--prepare` instead confirms with
   ! winget Brave.Brave    151.1.93.134 -> 151.1.93.132 (dotpkg will not downgrade a winget package -- run `dotpkg update`)
   ```
 
+  For an application that updates itself past its pin within days, that refusal
+  is the wrong shape of answer, and `pin = "none"` below is the right one.
+
 - **It refuses an elevated removal of a user-scope package before anything
   runs.** Measured: winget will not uninstall a user-scope package from an
   elevated process, and it says so with its own exit code. dotpkg checks
@@ -170,6 +173,77 @@ winget holds the manifest, not dotpkg — so `--prepare` instead confirms with
   all. Run `dotpkg update` first.
 - **`dotpkg add` still does not exist for either backend.** Declaring a winget
   package is `pkg.toml`, then `dotpkg update <pkg>`, then `dotpkg apply`.
+
+### winget: declaring a package without managing its version
+
+A browser updates itself. Pin it to a version and within days the machine is
+ahead of the pin, dotpkg correctly refuses the downgrade, and the run exits
+non-zero — every night, forever. Measured on `zenbook-a14` on 2026-08-12, that
+is what made `Brave.Brave`, `Vivaldi.Vivaldi`, `Google.Chrome`,
+`Discord.Discord` and `Warp.Warp` have to be **deleted from the declaration
+entirely** by the first dotfiles repository to call dotpkg.
+
+`pin = "none"` is how you say *this application belongs on this machine, and I
+am not managing its version*:
+
+```toml
+[winget]
+packages = ["Brave.Brave", "Vivaldi.Vivaldi", "BurntSushi.ripgrep.MSVC"]
+
+[winget.opts]
+"Brave.Brave"     = { pin = "none" }
+"Vivaldi.Vivaldi" = { pin = "none" }
+```
+
+`BurntSushi.ripgrep.MSVC` above is untouched by this: no `[winget.opts]` entry
+means `pin = "version"`, the default, and it is pinned exactly as before. The
+value is a closed set — `pin = "latest"` is a parse error that lists the real
+values, for the same reason `arch = "arm"` is one.
+
+**An unpinned package gets no `pkg.lock` entry, and that is the point rather
+than an omission.** `pkg.lock` records what a declaration resolved to, and an
+unpinned declaration resolves to nothing; writing a version there would be the
+second source of truth about permitted versions that `docs/OPEN-ITEMS.md` item
+7 rejects. What dotpkg does with such a package:
+
+- **Absent** → installs it, at whatever version winget's index offers that day,
+  and records nothing about which version that turned out to be.
+- **Present, at any version** → nothing at all. No line in `status`, no line in
+  `apply`, not counted as a change. The same silence a pinned package already
+  gets when it is sitting exactly where its lock says.
+- **No longer declared, and dotpkg owns it** → pruned, exactly as a pinned
+  package is. The removal's `--version` guard reads the version off the scan,
+  not the lock, so it is just as strong here.
+- **`dotpkg update`** → writes no entry for it, and does not rewrite `pkg.lock`
+  on account of it. If the package *used* to be pinned, the first whole-run
+  `update` after the change drops the stale entry and says so.
+
+The plan names it as an install whose version is not yet known, because at plan
+time nothing has asked winget anything:
+
+```console
+  + winget Brave.Brave    -                        (install, unpinned -- whatever winget's index has now)
+```
+
+`apply --prepare` asks, so its own table carries the version it found:
+
+```console
+  ready   winget Brave.Brave    151.1.93.134      (install, unpinned)
+```
+
+**If the application is already installed, run `dotpkg adopt --backend winget
+<id>` once.** `apply` never installs a package that is already there, so it
+never comes to own one, and `prune` can only ever reach a package dotpkg owns.
+The adopt writes ownership and nothing else — no lock entry, and no `winget`
+call at all, since there is no version to confirm.
+
+Two things this does **not** change. The running-process fence still applies
+wherever it can: an unpinned package is never replaced, so there is no upgrade
+for the fence to hold back, but an owned one that stops being declared is still
+skipped rather than pruned while its process is alive. And an id that matches a
+*different* package is refused rather than installed — a declared `OhMyPosh`
+resolving to `JanDeDobbeleer.OhMyPosh` would install one package while the plan
+names another, and reinstall it on every run forever.
 
 ### winget: naming the processes winget will not name
 

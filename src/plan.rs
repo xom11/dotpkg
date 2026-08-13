@@ -53,6 +53,23 @@ pub enum Action {
         to: String,
         arch: Option<String>,
     },
+    /// Declared with `pin = "none"` and **not installed**: put it on the
+    /// machine at whatever version winget's index offers when the install
+    /// runs, and record nothing about which version that turned out to be.
+    ///
+    /// **Carries no version, and that absence is the variant's whole content.**
+    /// It is not an `Install` whose version nobody filled in -- the two make
+    /// different promises, and `Pin`'s own doc comment already refuses to
+    /// flatten that same distinction one layer down: *"Flattening these into
+    /// one shape would let a reader believe a winget entry carries the same
+    /// guarantee as a scoop one."* An `Install` promises a version; this
+    /// promises presence.
+    ///
+    /// **Emitted only when the package is absent.** An unpinned package that is
+    /// installed produces no action at all, at any version, in either
+    /// direction, forever -- which is the same silence `plan_backend` already
+    /// produces for a pinned package sitting exactly where its lock says.
+    Ensure { backend: String, name: Name },
     Prune {
         backend: String,
         name: Name,
@@ -123,11 +140,21 @@ impl Plan {
     /// comparison: `plan::version_order` stays cosmetic, and the step is still built
     /// and still fired -- winget's refusal is the gate, not dotpkg's guess. See
     /// `render`'s own comment on this arm for the residual that leaves.
+    ///
+    /// **`Action::Ensure` is counted**, and by this method's own test: it
+    /// really installs software, so it belongs in the "N change(s)" a user says
+    /// yes to. That is the opposite of the winget `Downgrade` exclusion beside
+    /// it, and the two are decided by the same question rather than by taste --
+    /// a `Downgrade` is excluded because it is *measured never to happen*,
+    /// while an `Ensure` is exactly the case where something does.
     pub fn change_count(&self) -> usize {
         self.actions
             .iter()
             .filter(|a| match a {
-                Action::Install { .. } | Action::Upgrade { .. } | Action::Prune { .. } => true,
+                Action::Install { .. }
+                | Action::Upgrade { .. }
+                | Action::Ensure { .. }
+                | Action::Prune { .. } => true,
                 Action::Downgrade { backend, .. } => backend != WINGET,
                 _ => false,
             })
@@ -227,9 +254,19 @@ struct BackendView<'a> {
     backend: &'static str,
     declared: &'a [Name],
     lock: &'a BTreeMap<Name, Pin>,
-    /// `[scoop.opts]`. Empty for backends that have no per-package options --
-    /// winget's `WingetSection` declares none.
+    /// `[scoop.opts]`. Empty for backends that have no per-package options of
+    /// this shape -- winget's options live in `WingetOpts`, a separate struct,
+    /// and reach this view through `unpinned` below rather than through here.
     opts: &'a BTreeMap<Name, PkgOpts>,
+    /// Declared names this backend must only ever *ensure the presence of*:
+    /// install when absent, and otherwise never look at the version.
+    ///
+    /// **Empty for scoop because scoop has no such concept, not because
+    /// nobody wired it up.** A scoop pin is a bucket *commit*, so "unpinned"
+    /// there would have to mean "install from whatever commit is at the tip
+    /// that day and never look again" -- a different feature with a different
+    /// failure mode, and `config::WingetOpts` records why it is not spellable.
+    unpinned: &'a BTreeSet<Name>,
     /// Names this backend installs for itself and does not record. Empty for
     /// winget, whose equivalent is not a fixed list but the sourceless rows,
     /// which never reach `installed` at all.
@@ -367,6 +404,40 @@ fn plan_backend(
                 name: name.clone(),
                 reason: SkipReason::Opaque,
             });
+            continue;
+        }
+
+        // **Declared `pin = "none"`: presence is the whole promise.**
+        //
+        // Three placements, each load-bearing rather than incidental:
+        //
+        // - **After the `opaque` check above.** An opaque package's state could
+        //   not be read, so "is it installed?" has no answer here, and
+        //   installing over a state dotpkg could not establish is exactly the
+        //   mistake `SkipReason::Opaque` exists to prevent.
+        // - **After the whole-backend `Unscannable` early return**, which
+        //   already covers this: `installed` is empty for such a backend by
+        //   construction, so every unpinned package would otherwise be
+        //   fabricated into an `Ensure` against a machine nothing could read.
+        // - **Before the lock lookup below**, which is what keeps
+        //   `SkipReason::NotLocked` meaning exactly what it means today. An
+        //   unpinned package has no pin to be missing, so it must never reach
+        //   the branch that fails the whole run over one. Written as an
+        //   exemption inside that branch instead, the rule would have had to be
+        //   read correctly at all 81 of `NotLocked`'s reference sites; here it
+        //   is read correctly at one.
+        if view.unpinned.contains(name) {
+            match view.capability {
+                Capability::Acts => match current {
+                    // Installed, at any version. Not a change, not a skip, not
+                    // a report: there is nothing dotpkg has undertaken to do.
+                    Some(_) => {}
+                    None => actions.push(Action::Ensure {
+                        backend: view.backend.into(),
+                        name: name.clone(),
+                    }),
+                },
+            }
             continue;
         }
 
@@ -541,12 +612,19 @@ pub fn plan(
     // `[winget.opts]` does not exist, so `empty_opts` stands in for it --
     // `BackendView::opts` still needs *a* `BTreeMap` to borrow, not `None`.
     let empty_opts: BTreeMap<Name, PkgOpts> = BTreeMap::new();
+    // Derived once, by the one function that knows how (`WingetSection::
+    // unpinned`), rather than recomputed from `opts` here -- four readers each
+    // writing their own `pin == Unpinned` comparison is four chances to write
+    // one of them inverted.
+    let winget_unpinned = declared.winget.unpinned();
+    let no_unpinned: BTreeSet<Name> = BTreeSet::new();
     let backends = [
         BackendView {
             backend: SCOOP,
             declared: declared.scoop.packages.as_slice(),
             lock: &lock.scoop,
             opts: &declared.scoop.opts,
+            unpinned: &no_unpinned,
             helpers: SCOOP_HELPERS,
             capability: Capability::Acts,
         },
@@ -555,6 +633,7 @@ pub fn plan(
             declared: declared.winget.packages.as_slice(),
             lock: &lock.winget,
             opts: &empty_opts,
+            unpinned: &winget_unpinned,
             helpers: &[],
             capability: Capability::Acts,
         },

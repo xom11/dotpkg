@@ -206,6 +206,17 @@ pub enum Intent {
     /// confused them would ask `Scoop::stage` for a manifest that does not
     /// exist.
     NeedsLiveness,
+    /// Needs winget's index asked *what this id is called and what version it
+    /// currently offers* — the whole preparation for a package declared
+    /// `pin = "none"`.
+    ///
+    /// Distinct from `NeedsLiveness`, which confirms a version `pkg.lock`
+    /// already names is still installable. An unpinned package has no such
+    /// version, so there is no pin whose liveness could be checked; the
+    /// question is the other one, and its answer supplies **both** the
+    /// canonical id a mutating `-e --id` may carry and the version the install
+    /// will ask for.
+    NeedsIndexLookup,
     /// A removal: nothing to prepare, ready by definition.
     NoArtifactNeeded,
     /// Benign; does not fail the run.
@@ -240,6 +251,19 @@ pub fn classify(action: &Action) -> Intent {
                 Intent::NeedsArtifact
             }
         }
+        // Its own `Intent` rather than a second reading of `NeedsLiveness`, on
+        // `NeedsLiveness`'s own argument against reusing `NeedsArtifact`: the
+        // two do different work and produce different `Outcome`s. Here the
+        // confusion would be concrete rather than theoretical --
+        // `check_pin_is_live` reads a version off the action, an `Ensure` has
+        // none, so a confused caller lands in that function's `_` arm and
+        // reports "needs a liveness check but names no version" at a user who
+        // did nothing wrong.
+        //
+        // There is no pin, so pin liveness is not a question that can be asked.
+        // What is asked instead is *is this id in winget's index at all, and
+        // under what spelling* -- a different question with different failures.
+        Action::Ensure { .. } => Intent::NeedsIndexLookup,
         Action::Prune { .. } => Intent::NoArtifactNeeded,
         Action::Skip { reason, .. } => match reason {
             SkipReason::NotLocked => Intent::NotLocked,
@@ -322,6 +346,24 @@ pub enum Outcome {
     /// Splitting the two here rather than rewriting the action is deliberate:
     /// the plan the user reads, and `pkg.toml`, keep their own spelling.
     ReadyToSet { id: Name, version: String },
+    /// Ready, for a package declared `pin = "none"`: winget's index answered
+    /// with the canonical id and the version it currently offers, and
+    /// **neither will be recorded anywhere.**
+    ///
+    /// Split from `ReadyToSet` rather than reused, because that variant's own
+    /// doc comment makes a claim that would become false here: *"The pinned
+    /// version was confirmed still present in winget's index."* For an
+    /// unpinned package there is no pinned version and nothing was confirmed
+    /// against one — a version was **chosen** from the index. Widening that
+    /// sentence to cover both would leave it saying "some version, from
+    /// somewhere, is installable", which is the flattening this crate refuses
+    /// in `Pin`, in `Step`, and in `ReadyToFetch`/`ReadyToRemove`.
+    ///
+    /// Carries `id` for `ReadyToSet`'s exact reason, and it matters more here
+    /// rather than less: with no lock entry there is no other place the
+    /// canonical spelling exists at all, and `set_argv`'s `-e --id` may carry
+    /// only a spelling winget itself produced.
+    ReadyToEnsure { id: Name, version: String },
     /// A per-package failure. Reported; never stops the run.
     Failed { why: String },
     /// Benign: the user can fix this (usually by closing an app) and run
@@ -393,6 +435,7 @@ impl Preparation {
                     Outcome::ReadyToFetch { .. }
                         | Outcome::ReadyToRemove
                         | Outcome::ReadyToSet { .. }
+                        | Outcome::ReadyToEnsure { .. }
                 )
             })
             .count()
@@ -666,6 +709,7 @@ pub fn prepare(
                     stage_and_fetch(action, lock, scoop, mutator, staging_root, declared)
                 }
                 Intent::NeedsLiveness => check_pin_is_live(action, winget),
+                Intent::NeedsIndexLookup => resolve_for_ensure(action, winget),
                 Intent::NoArtifactNeeded => Outcome::ReadyToRemove,
                 Intent::Skip(why) => Outcome::Skipped { why },
                 Intent::NotLocked => Outcome::NotLocked,
@@ -759,6 +803,79 @@ fn check_pin_is_live(action: &Action, winget: &dyn WingetCmd) -> Outcome {
             id: Name::new(found.id),
             version: version.clone(),
         },
+        Err(why) => Outcome::Failed { why },
+    }
+}
+
+/// The `NeedsIndexLookup` half of `prepare`: an unpinned package's whole
+/// preparation.
+///
+/// **There is no pin, so `check_pin_is_live` has nothing to check.** What this
+/// asks instead is what winget's index calls this id and what version it
+/// currently offers — one `winget show --id <declared>` with no `--exact`, so
+/// winget folds case on the way in and hands the canonical spelling back in
+/// `Found <name> [<Id>]`. One call answers both halves, and both are needed:
+/// the id because `set_argv`'s `-e` may carry no other spelling, and the
+/// version because reusing `set_argv` verbatim is what keeps this path off any
+/// argv no measurement covers.
+///
+/// **The version this returns is not a pin and is recorded nowhere.** It is the
+/// version the install will happen at, made explicit on the wire so
+/// `run_winget_step`'s rescan has something to compare against. Nothing writes
+/// it to `pkg.lock`; that absence is the feature.
+///
+/// **A different id is refused, and that is required for correctness rather
+/// than only for consistency with `update` and `adopt`.** `--id` without
+/// `--exact` has been reported to match a declared `OhMyPosh` against
+/// `JanDeDobbeleer.OhMyPosh`. Were that accepted here, the install would put
+/// `JanDeDobbeleer.OhMyPosh` on the machine while `pkg.toml` declares
+/// `OhMyPosh`; the next run's scan reports the former, `plan_backend`'s
+/// `current` lookup misses, and an `Ensure` fires again — a reinstall on every
+/// run, forever, which is the shape `docs/OPEN-ITEMS.md` item 1 exists to have
+/// prevented once already. Compared through `Name`, which folds case, so this
+/// is false for the mere-case difference below.
+///
+/// **A case-only difference takes the canonical spelling and says nothing.**
+/// `update` warns about one because `pkg.lock` would then hold a spelling
+/// `pkg.toml` does not; here there is no lock entry for it to disagree with.
+/// The canonical spelling is used on the wire and recorded nowhere, which is
+/// what "no lock entry" costs and what it buys.
+///
+/// **Cost: one `winget show` per unpinned package that is ABSENT** — ~1.09 s
+/// measured on a14 (`docs/measurements-2026-08-09-winget.md`), the same call
+/// the pinned path already pays, on the same serial uncached loop
+/// `docs/OPEN-ITEMS.md` item 12 records as unmeasured. **On a converged machine
+/// it is zero:** an unpinned package that is present produces no `Action`, so
+/// it produces no `Prepared`, so nothing is spawned for it at all.
+fn resolve_for_ensure(action: &Action, winget: &dyn WingetCmd) -> Outcome {
+    let Action::Ensure { name, .. } = action else {
+        // `classify` returns `Intent::NeedsIndexLookup` only for `Ensure`.
+        // Kept as a `Failed` outcome rather than a panic, for the reason
+        // `check_pin_is_live` and `stage_and_fetch` both keep theirs: a future
+        // mismatch between the two functions must be a reported failure, not a
+        // crashed run.
+        return Outcome::Failed {
+            why: format!("{action:?} was classified as unpinned but is not an Ensure"),
+        };
+    };
+    match crate::backend::winget::index_latest(winget, name) {
+        Ok(found) => {
+            let id = Name::new(found.id);
+            if id != *name {
+                let declared = name.to_string();
+                let matched = id.to_string();
+                return Outcome::Failed {
+                    why: format!(
+                        "winget matched {matched:?}, not the id pkg.toml declares \
+                         ({declared:?}) -- declare it as {matched:?}"
+                    ),
+                };
+            }
+            Outcome::ReadyToEnsure {
+                id,
+                version: found.version,
+            }
+        }
         Err(why) => Outcome::Failed { why },
     }
 }
@@ -969,6 +1086,32 @@ pub fn plan_to_steps(
                 version: version.clone(),
                 guard: guard_for(name, installed),
             })),
+            // **The existing `WingetStep::Set`, not a variant of its own.** At
+            // the step level there is genuinely nothing left to distinguish:
+            // same argv, same `winget_verdict` rescan, same
+            // `At(v) if v == version` verdict, same `Ownership::Installed`
+            // claim. Where the version came from, and whether anything records
+            // it, is settled upstream and irrelevant once a step exists.
+            // Splitting here would produce two variants with byte-identical
+            // `run` bodies -- `Mutates`' own "flattening would lose a real
+            // difference or lie about it" bites only when there is a difference
+            // to lose. Reusing `Set` is also what leaves `order`,
+            // `write_recovery`, `gate_removals`,
+            // `refuse_elevated_winget_removal` and
+            // `count_replaces_and_installs` untouched by this whole feature.
+            //
+            // `id` comes from the outcome, never the action -- see
+            // `Outcome::ReadyToEnsure`. With no lock entry, the outcome is the
+            // ONLY place the canonical spelling exists.
+            (Action::Ensure { backend, name }, Outcome::ReadyToEnsure { id, version })
+                if backend == WINGET =>
+            {
+                steps.push(Step::Winget(WingetStep::Set {
+                    id: id.clone(),
+                    version: version.clone(),
+                    guard: guard_for(name, installed),
+                }))
+            }
             (
                 Action::Prune {
                     backend,
@@ -1007,7 +1150,8 @@ pub fn plan_to_steps(
             // this arm's text calls it.
             (a, Outcome::ReadyToFetch { .. })
             | (a, Outcome::ReadyToRemove)
-            | (a, Outcome::ReadyToSet { .. }) => unusable.push((
+            | (a, Outcome::ReadyToSet { .. })
+            | (a, Outcome::ReadyToEnsure { .. }) => unusable.push((
                 action_name(a),
                 format!(
                     "{}: prepared, but no executor claimed it -- this is a routing bug, \
@@ -1051,6 +1195,7 @@ fn action_name(action: &Action) -> Name {
         Action::Install { name, .. }
         | Action::Upgrade { name, .. }
         | Action::Downgrade { name, .. }
+        | Action::Ensure { name, .. }
         | Action::Prune { name, .. }
         | Action::Skip { name, .. }
         | Action::Unmanaged { name, .. }
@@ -1066,6 +1211,7 @@ fn action_backend(action: &Action) -> &str {
         Action::Install { backend, .. }
         | Action::Upgrade { backend, .. }
         | Action::Downgrade { backend, .. }
+        | Action::Ensure { backend, .. }
         | Action::Prune { backend, .. }
         | Action::Skip { backend, .. }
         | Action::Unmanaged { backend, .. }
@@ -1408,6 +1554,41 @@ pub fn unprotected_winget_changes_with_roots(
         ));
     }
     out
+}
+
+/// Lock entries for packages `pkg.toml` declares `pin = "none"`.
+///
+/// **Nothing reads such an entry.** `plan_backend`'s unpinned branch returns
+/// before the lock lookup, so the pin is inert -- and it is still worth one
+/// line, because a *user* reading `pkg.lock` has no way to know that. A
+/// committed file holding a version nothing enforces is precisely the shape
+/// `docs/OPEN-ITEMS.md` item 7 refuses `winget pin` over: *"two sources of
+/// truth about permitted versions is how a tool starts lying."* The entry is
+/// not a second source of truth to the program; it is one to the reader.
+///
+/// It is reported rather than refused, and rather than cleaned up here.
+/// `lock_coherence_guard` deliberately checks shape and not agreement with
+/// `pkg.toml`, for the deadlock its own doc comment records: a whole-run check
+/// against the config fails every later `apply`, *including the run that would
+/// clear the thing being complained about*. The next whole-run `dotpkg update`
+/// drops these entries; until then this says so.
+///
+/// Pure -- `Config` and `Lock`, no disk and no subprocess -- so it is testable
+/// without a machine, the same property `unprotected_winget_changes_with_roots`
+/// is split apart to get.
+pub fn stale_unpinned_lock_entries(declared: &Config, lock: &Lock) -> Vec<String> {
+    let unpinned = declared.winget.unpinned();
+    lock.winget
+        .iter()
+        .filter(|(name, _)| unpinned.contains(name))
+        .map(|(name, pin)| {
+            format!(
+                "pkg.lock still pins {name} at {}, but pkg.toml declares it pin = \"none\" -- \
+                 that entry is read by nothing. `dotpkg update` removes it.",
+                pin.version()
+            )
+        })
+        .collect()
 }
 
 pub fn load_everything(config: &Path, lock: &Path, state_path: &Path) -> Result<Driver> {
@@ -1759,6 +1940,18 @@ mod tests {
         fn absent() -> FakeWinget {
             FakeWinget {
                 out: std::cell::RefCell::new(vec![Err(())]),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        /// `show` says the package itself is not in the index --
+        /// `NO_APPLICATIONS_FOUND`, a different fact from `version_gone`'s
+        /// "this version is not", and it gets a different sentence.
+        fn gone() -> FakeWinget {
+            FakeWinget {
+                out: std::cell::RefCell::new(vec![Ok(crate::backend::winget::CmdOut {
+                    code: crate::backend::winget::NO_APPLICATIONS_FOUND,
+                    stdout: "No package found matching input criteria.\r\n".into(),
+                })]),
                 calls: std::cell::RefCell::new(Vec::new()),
             }
         }
@@ -2772,6 +2965,245 @@ mod tests {
         );
         assert!(!prep.is_ok(), "the run must refuse by default");
         assert_eq!(prep.ready_count(), 0);
+    }
+
+    // -- `[winget.opts] pin = "none"` ------------------------------------
+    //
+    // Design: `docs/specs/2026-08-13-winget-unpinned-design.md`.
+
+    /// The plan an unpinned, absent package produces.
+    fn ensure_plan(id: &str) -> Plan {
+        Plan {
+            actions: vec![Action::Ensure {
+                backend: WINGET.into(),
+                name: Name::new(id),
+            }],
+        }
+    }
+
+    /// `prepare` over a winget-only plan, with the scoop half inert.
+    fn prepare_winget(plan: &Plan, winget: &FakeWinget) -> Preparation {
+        let root = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let scoop = Scoop::new(root.path().to_path_buf());
+        prepare(
+            plan,
+            &Lock::default(),
+            &scoop,
+            &scoop,
+            winget,
+            stage_dir.path(),
+            &Config::default(),
+        )
+    }
+
+    #[test]
+    fn an_ensure_classifies_as_needs_index_lookup() {
+        // Its own `Intent`, not `NeedsLiveness`: `check_pin_is_live` reads a
+        // version off the action and an `Ensure` has none, so routing it there
+        // reports "needs a liveness check but names no version" at a user who
+        // did nothing wrong.
+        assert_eq!(
+            classify(&Action::Ensure {
+                backend: WINGET.into(),
+                name: Name::new("Brave.Brave"),
+            }),
+            Intent::NeedsIndexLookup
+        );
+    }
+
+    #[test]
+    fn an_unpinned_install_prepares_with_the_canonical_id_winget_echoed_back() {
+        // The landmine. `set_argv` puts `-e` beside `--id`, and `--exact` is
+        // what makes `--id` case-sensitive on the write verbs -- measured,
+        // `install -e --id SHARKDP.HYPERFINE` returns "no package found" for a
+        // package that exists. An unpinned package has NO lock entry, so the
+        // `Found <name> [<Id>]` line is the only place the canonical spelling
+        // exists at all.
+        let fake = FakeWinget::live_echoing("Brave.Brave", "151.1.93.134");
+        let prep = prepare_winget(&ensure_plan("brave.brave"), &fake);
+
+        match &prep.prepared[0].outcome {
+            Outcome::ReadyToEnsure { id, version } => {
+                assert_eq!(
+                    id.to_string(),
+                    "Brave.Brave",
+                    "the canonical spelling winget echoed back must reach the step"
+                );
+                assert_ne!(
+                    id.to_string(),
+                    "brave.brave",
+                    "the declared spelling must NOT: beside `-e` it means \"not found\" \
+                     for a package that is there, every run, forever"
+                );
+                assert_eq!(version, "151.1.93.134", "the version comes from the index");
+            }
+            other => panic!("expected ReadyToEnsure, got {other:?}"),
+        }
+        assert_eq!(prep.ready_count(), 1, "ReadyToEnsure is a ready shape");
+        assert!(prep.is_ok());
+
+        // The argv carries no `--exact`, which is what folds case on the way
+        // in and produces the `Found` line this whole test rests on.
+        let calls = fake.calls.borrow().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "one show per absent unpinned package: {calls:?}"
+        );
+        assert!(
+            !calls[0].iter().any(|a| a == "-e" || a == "--exact"),
+            "no --exact, or winget answers about the spelling it was asked with: {calls:?}"
+        );
+        assert!(
+            !calls[0].iter().any(|a| a == "-v" || a == "--version"),
+            "no version is asked about: there is no pin whose liveness could be \
+             checked: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_install_whose_id_matches_a_different_package_is_refused() {
+        // Required for correctness, not only for consistency with `update` and
+        // `adopt`. Accepted, the install would put `JanDeDobbeleer.OhMyPosh` on
+        // a machine whose pkg.toml declares `OhMyPosh`; the next run's scan
+        // reports the former, `plan_backend`'s `current` lookup misses, and an
+        // `Ensure` fires again -- a reinstall on every run, forever.
+        let fake = FakeWinget::live_echoing("JanDeDobbeleer.OhMyPosh", "30.6.4");
+        let prep = prepare_winget(&ensure_plan("OhMyPosh"), &fake);
+
+        match &prep.prepared[0].outcome {
+            Outcome::Failed { why } => {
+                assert!(
+                    why.contains("JanDeDobbeleer.OhMyPosh"),
+                    "name what matched: {why}"
+                );
+                assert!(why.contains("OhMyPosh"), "and what was declared: {why}");
+                assert!(
+                    why.contains("declare it as"),
+                    "say what to do about it, the way `update` does: {why}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            !prep.is_ok(),
+            "the run refuses rather than installing the wrong package"
+        );
+        assert_eq!(prep.ready_count(), 0);
+    }
+
+    #[test]
+    fn an_unpinned_install_that_is_not_in_the_index_fails_the_run() {
+        // Same fail-closed shape as a pinned package whose liveness check
+        // fails: `is_ok()` false, so by default nothing is attempted at all.
+        let prep = prepare_winget(&ensure_plan("Brave.Brave"), &FakeWinget::gone());
+        assert!(
+            matches!(prep.prepared[0].outcome, Outcome::Failed { .. }),
+            "got {:?}",
+            prep.prepared[0].outcome
+        );
+        assert!(!prep.is_ok());
+    }
+
+    #[test]
+    fn a_case_only_difference_is_absorbed_rather_than_refused() {
+        // The counterweight to the different-id refusal above: `Name` folds
+        // case, so `brave.brave` against `Brave.Brave` is one id spelled two
+        // ways and must NOT be refused. Without the fold, every user who typed
+        // a lowercase id would be refused for a difference that is not one.
+        let prep = prepare_winget(
+            &ensure_plan("BRAVE.BRAVE"),
+            &FakeWinget::live_echoing("Brave.Brave", "151.1.93.134"),
+        );
+        assert!(
+            matches!(prep.prepared[0].outcome, Outcome::ReadyToEnsure { .. }),
+            "a case difference is not a different id: {:?}",
+            prep.prepared[0].outcome
+        );
+    }
+
+    #[test]
+    fn an_ensure_becomes_a_winget_set_at_the_version_the_index_reported() {
+        // The routing arm. Its negative control is deleting it: the pair then
+        // falls to the routing-bug arm and `unusable` names it instead.
+        let prep = prepare_winget(
+            &ensure_plan("brave.brave"),
+            &FakeWinget::live_echoing("Brave.Brave", "151.1.93.134"),
+        );
+        let (steps, unusable) = plan_to_steps(&prep, &[]);
+        assert!(
+            unusable.is_empty(),
+            "nothing should be unroutable: {unusable:?}"
+        );
+        assert_eq!(
+            steps,
+            vec![Step::Winget(WingetStep::Set {
+                id: Name::new("Brave.Brave"),
+                version: "151.1.93.134".into(),
+                guard: crate::backend::winget::guard_names("brave.brave", "brave.brave"),
+            })],
+            "one `Set`, carrying the canonical id -- not a new step variant, \
+             because at this level there is nothing left to distinguish"
+        );
+        assert_eq!(
+            prep.ready_count(),
+            steps.len(),
+            "every ready outcome becomes exactly one step -- the invariant \
+             `main.rs` checks for a routing bug"
+        );
+    }
+
+    #[test]
+    fn a_stale_lock_entry_for_an_unpinned_package_is_named_and_a_pinned_one_is_not() {
+        // Nothing READS such an entry -- the planner returns before the lock
+        // lookup -- but a user reading `pkg.lock` has no way to know that, and
+        // a committed file holding a version nothing enforces is the shape
+        // item 7 refuses `winget pin` over.
+        let declared = crate::config::parse(
+            "[winget]\npackages = [\"Brave.Brave\", \"Git.Git\"]\n\
+             [winget.opts]\n\"Brave.Brave\" = { pin = \"none\" }\n",
+        )
+        .unwrap();
+        let mut lock = Lock::default();
+        lock.winget.insert(
+            Name::new("Brave.Brave"),
+            Pin::WingetVersion {
+                version: "151.1.93.134".into(),
+            },
+        );
+        lock.winget.insert(
+            Name::new("Git.Git"),
+            Pin::WingetVersion {
+                version: "2.55.0".into(),
+            },
+        );
+
+        let warnings = stale_unpinned_lock_entries(&declared, &lock);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one entry is stale, one is not: {warnings:?}"
+        );
+        assert!(warnings[0].contains("Brave.Brave"), "{:?}", warnings[0]);
+        assert!(
+            warnings[0].contains("151.1.93.134"),
+            "name the version: {:?}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("dotpkg update"),
+            "say what clears it: {:?}",
+            warnings[0]
+        );
+        assert!(
+            !warnings[0].contains("Git.Git"),
+            "a pinned package's entry is not stale: {:?}",
+            warnings[0]
+        );
+
+        // And the counterweight: no unpinned declaration, no warning at all.
+        assert!(stale_unpinned_lock_entries(&Config::default(), &lock).is_empty());
     }
 
     #[test]

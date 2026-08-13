@@ -155,17 +155,32 @@ Nothing here is known to be wrong. Nothing here has been watched.
   measurement**: it is in three source comments, the changelog and a commit
   message, and in no `docs/measurements-*` document.
 
-  Nothing is currently wrong either way, because both refusals built on the
-  second claim refuse rather than act. What is open is that the flag every
-  winget resolution depends on is described two contradictory ways in this tree,
-  with one measurement supporting only one of them. Closing it needs a probe of
-  `show --id <a dotted segment of a real id>` — §7's five probes were all bare
-  words, and `OhMyPosh` is a trailing dotted segment, which is the one shape
-  nothing has tried.
+  **Measured and settled the same day, against the unmeasured claim.** The probe
+  this item asked for — `show --id <a trailing dotted segment of a real id>` —
+  was run on a14 (winget 1.29.280) on 2026-08-13, through dotpkg's own spawn, on
+  a machine where `JanDeDobbeleer.OhMyPosh 30.6.4.0` is installed:
+  `show --id OhMyPosh` returns `NO_APPLICATIONS_FOUND`, *"No package found
+  matching input criteria."* **§7 holds, and the four unmeasured restatements of
+  the opposite are wrong.** Full round in
+  `docs/measurements-2026-08-13-phase14-winget-unpinned.md`.
 
-  This is why the unpinned install resolves a canonical id first rather than
-  dropping `-e` from a write verb: a mutating call is not where the question
-  gets settled.
+  **Two consequences, and neither is a code change.** The different-id refusals
+  in `update`, `adopt` and `apply::resolve_for_ensure` **stay**: one machine and
+  one winget version is not grounds for deleting defence at the point of use,
+  and a refusal that never fires costs nothing where a missing one costs a
+  package installed under a name the plan does not carry. They should be read as
+  defending a shape **not observed here** rather than one that was. And
+  **dropping `-e` from a write verb would probably have been safe** — the Phase
+  14 design refused that option on the strength of this disagreement, and the
+  disagreement resolved toward "it would have been fine". That design choice is
+  still correct for the argument that never depended on this one: `-e` makes
+  `--id` case-sensitive, and an unpinned package has no lock entry holding the
+  canonical spelling.
+
+  **What stays open** is the prose: `CHANGELOG.md`, `update::run` and
+  `adopt::run_winget` each still carry the refuted sentence as their stated
+  reason. They are left as written for now rather than edited in place, and this
+  item is where a reader who follows one of them lands.
 - **3. `--location`, `--all-versions`, and side-by-side versions of one id.** All
   three unmeasured.
 - **4. Removing a machine-scope package while elevated.** Unmeasured. The

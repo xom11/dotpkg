@@ -66,9 +66,27 @@ removed; the other five fixes came from this project's own audit.
 
   The install reuses the measured `set_argv` verbatim rather than inventing an
   argv no measurement covers, resolving the canonical id first with the same
-  `show --id <declared>` call `update` already uses. Dropping `-e` was
-  considered and refused; see the new item in `docs/OPEN-ITEMS.md` for the
-  measurement conflict that decided it.
+  `show --id <declared>` call `update` already uses.
+
+  **Verified on real hardware, and it refuted one of this changelog's own
+  sentences.** Built and run on `zenbook-a14` (ARM64, winget 1.29.280) on
+  2026-08-13 from `main` at `9c2f9e7`: an unpinned `Brave.Brave` already
+  installed produced no line and exit 0 against an empty `pkg.lock`, where the
+  same package pinned produced `NotLocked`; an absent `ducaale.xh` resolved to
+  `0.26.2` out of winget's own index; `update` wrote no entry and reported
+  `pkg.lock is already current -- not rewritten` on the second run; and a stale
+  pin warned and then cleared. Nothing was installed or removed — every run
+  stopped at `--prepare`, so **item 29's "no winget mutation has run anywhere"
+  is unchanged.** Round in
+  `docs/measurements-2026-08-13-phase14-winget-unpinned.md`.
+
+  The same round settled the conflict that decided the argv question, **against
+  the claim stated above under "A winget id that matches a *different* id"**.
+  `winget show --id OhMyPosh` returns "No package found matching input criteria"
+  on a machine where `JanDeDobbeleer.OhMyPosh` is installed, so `--id` requires
+  the whole id and that entry's "substring filter" reasoning is wrong — measured,
+  where it never was. The refusal it justifies is kept as defence rather than
+  removed, and `docs/OPEN-ITEMS.md` item 30 is where the correction lives.
 
 - **`pkg.toml.bak` and `pkg.lock.bak` are no longer written.** Both files are
   **committed**, so the user's own history already holds every version of them

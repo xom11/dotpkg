@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **scoop 0.6.0 no longer broke every download.** scoop's success line changed
+  from `Checking hash of X ... ok.` to `Checking hash of X... OK.`; the verdict
+  matched the old spelling literally, so every `scoop download` came back
+  `Unproven` and `apply` failed 18 of 19 changes while the hashes were fine.
+  Measured on `zenbook-a14` after scoop self-updated (2026-10-23). The marker is
+  now case-insensitive and tolerates the missing space; a failed hash and bare
+  dots are still refused.
 - **dotpkg can be installed by scoop.** `xom11/scoop-bucket` carries
   `bucket/dotpkg.json`, so `scoop bucket add xom11 …` then `scoop install
   dotpkg` works, with scoop performing its own download and its own hash check.

@@ -935,13 +935,26 @@ pub fn download_verdict(stdout: &str) -> FetchVerdict {
         return FetchVerdict::Unproven;
     }
     let verified = clean.lines().any(|l| {
-        l.trim_start().starts_with("Checking hash of ") && l.trim_end().ends_with("... ok.")
+        l.trim_start().starts_with("Checking hash of ") && hash_line_says_ok(l)
     });
     if verified {
         FetchVerdict::Verified
     } else {
         FetchVerdict::Unproven
     }
+}
+
+/// scoop 0.5.3 prints `Checking hash of X ... ok.`; 0.6.0 prints
+/// `Checking hash of X... OK.` -- measured on a14, 2026-10-23, after scoop
+/// self-updated. Matching the old spelling literally turned every download into
+/// `Unproven`, so the whole plan failed while the hashes were fine. Case and the
+/// space before the dots are not part of the promise; the trailing `ok.` after
+/// `...` is.
+fn hash_line_says_ok(line: &str) -> bool {
+    let t = line.trim_end().to_ascii_lowercase();
+    t.strip_suffix("ok.")
+        .map(|rest| rest.trim_end().ends_with("..."))
+        .unwrap_or(false)
 }
 
 /// The last few lines of scoop's stdout, for an error message.
@@ -1159,6 +1172,23 @@ ERROR URL https://github.com/xom11/definitely-not-a-real-repo-9f2a/releases/down
         assert!(OK_CACHED.contains("was downloaded successfully!"));
         assert_eq!(download_verdict(OK_CACHED), FetchVerdict::Verified);
         assert_eq!(download_verdict(BAD_HASH), FetchVerdict::HashFailed);
+    }
+
+    #[test]
+    fn scoop_0_6_0_spelling_of_the_success_marker_is_accepted() {
+        let v060 = "INFO  Downloading 'stylua' [64bit]\n\
+                    Loading stylua-windows-x86_64.zip from cache\n\
+                    Checking hash of stylua-windows-x86_64.zip... OK.\n\
+                    'stylua' (2.6.0) was downloaded successfully!\n";
+        assert_eq!(download_verdict(v060), FetchVerdict::Verified);
+        // The new spelling must not loosen the failure side.
+        let bad = "Checking hash of a.zip... ERROR Hash check failed!\n";
+        assert_eq!(download_verdict(bad), FetchVerdict::HashFailed);
+        // Dots without a verdict are still not a success.
+        assert_eq!(
+            download_verdict("Checking hash of a.zip...\n"),
+            FetchVerdict::Unproven
+        );
     }
 
     #[test]

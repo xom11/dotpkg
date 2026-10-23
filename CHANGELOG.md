@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-23
+
 - **scoop 0.6.0 no longer broke every download.** scoop's success line changed
   from `Checking hash of X ... ok.` to `Checking hash of X... OK.`; the verdict
   matched the old spelling literally, so every `scoop download` came back

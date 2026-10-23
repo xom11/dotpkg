@@ -252,7 +252,7 @@ impl Backend for Scoop {
             }
 
             let current = entry.path().join("current");
-            let manifest_path = current.join("manifest.json");
+            let manifest_path = current_file(&current, "manifest.json");
             let manifest_text = match std::fs::read_to_string(&manifest_path) {
                 Ok(t) => t,
                 // No manifest yet is the ordinary shape of a half-finished
@@ -301,7 +301,7 @@ impl Backend for Scoop {
             let bins = declared_executables(&manifest);
 
             // install.json is absent on apps installed by older scoop versions.
-            let install: Install = std::fs::read_to_string(current.join("install.json"))
+            let install: Install = std::fs::read_to_string(current_file(&current, "install.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or_default();
@@ -440,12 +440,13 @@ impl Backend for Scoop {
                 }
             };
 
-        let manifest_path = ctx
-            .scoop_root
-            .join("apps")
-            .join(inst.name.to_string())
-            .join("current")
-            .join("manifest.json");
+        let manifest_path = current_file(
+            &ctx.scoop_root
+                .join("apps")
+                .join(inst.name.to_string())
+                .join("current"),
+            "manifest.json",
+        );
         let installed_manifest = match std::fs::read(&manifest_path) {
             Ok(b) => b,
             Err(e) => {
@@ -801,6 +802,21 @@ impl Scoop {
     }
 }
 
+/// scoop 0.5.3 keeps `current/manifest.json` and `current/install.json`; 0.6.0
+/// renamed them `scoop-manifest.json` and `scoop-install.json` -- measured on
+/// a14, 2026-10-23, where a freshly installed app had only the new names, so a
+/// scan reading the old one saw nothing and every install "did not happen".
+/// Apps installed by the older scoop keep the old names until they are
+/// reinstalled, so both spellings are live on one machine. New name first.
+pub fn current_file(current: &Path, old_name: &str) -> PathBuf {
+    let new = current.join(format!("scoop-{old_name}"));
+    if new.exists() {
+        new
+    } else {
+        current.join(old_name)
+    }
+}
+
 /// Turn `scoop download`'s stdout into a result. Pure, so the whole of the
 /// prefetch promise is testable without a subprocess.
 ///
@@ -975,6 +991,41 @@ fn tail(stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_reads_the_scoop_0_6_0_file_names_and_still_reads_the_old_ones() {
+        // a14, 2026-10-23: scoop 0.6.0 writes `scoop-manifest.json` and
+        // `scoop-install.json`. Apps installed earlier keep the old names, so
+        // one machine holds both and the scan must see both.
+        let tmp = tempfile::tempdir().unwrap();
+        let apps = tmp.path().join("apps");
+        let new = apps.join("uv").join("current");
+        let old = apps.join("fzf").join("current");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(new.join("scoop-manifest.json"), r#"{"version":"0.13.5"}"#).unwrap();
+        std::fs::write(
+            new.join("scoop-install.json"),
+            r#"{"bucket":"main","architecture":"arm64"}"#,
+        )
+        .unwrap();
+        std::fs::write(old.join("manifest.json"), r#"{"version":"0.74.2"}"#).unwrap();
+
+        let scan = Scoop::new(tmp.path().to_path_buf()).scan().unwrap();
+        let mut seen: Vec<_> = scan
+            .installed
+            .iter()
+            .map(|i| (i.name.to_string(), i.version.clone()))
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("fzf".to_string(), "0.74.2".to_string()),
+                ("uv".to_string(), "0.13.5".to_string())
+            ]
+        );
+    }
 
     // This is the branch `resolve_root` hits on every real Windows machine,
     // aliased root or not -- `canonicalize` returns this extended-length form

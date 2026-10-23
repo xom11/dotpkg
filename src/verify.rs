@@ -140,7 +140,7 @@ pub fn verdict(root: &Path, app: &Name, want: &Expected) -> Result<(), Disagreem
             let Some(dir) = dir else {
                 return Err(Disagreement::NotInstalled);
             };
-            let observed = dir.join("current").join("manifest.json");
+            let observed = crate::backend::scoop::current_file(&dir.join("current"), "manifest.json");
             let got = match std::fs::read(&observed) {
                 Ok(b) => b,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -221,6 +221,38 @@ mod tests {
         fn empty_apps(&self) {
             std::fs::create_dir_all(self.root().join("apps")).unwrap();
         }
+    }
+
+    #[test]
+    fn scoop_0_6_0_names_the_installed_manifest_scoop_manifest_json() {
+        // Measured on a14, 2026-10-23: a fresh install under scoop 0.6.0 has
+        // `current/scoop-manifest.json` and no `manifest.json`, so reading the
+        // old name reported every successful install as half-installed.
+        let t = Tree::new();
+        let staged = t.stage("uv", "0.13.5", BODY_A);
+        let cur = t.root().join("apps").join("uv").join("current");
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::write(cur.join("scoop-manifest.json"), BODY_A).unwrap();
+        assert_eq!(
+            verdict(t.root(), &Name::new("uv"), &Expected::Present { staged }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_new_name_wins_when_both_spellings_exist() {
+        // An upgrade over an old install can leave the old file behind; the
+        // new one is what the running scoop wrote.
+        let t = Tree::new();
+        let staged = t.stage("uv", "0.13.5", BODY_A);
+        let cur = t.root().join("apps").join("uv").join("current");
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::write(cur.join("manifest.json"), BODY_B).unwrap();
+        std::fs::write(cur.join("scoop-manifest.json"), BODY_A).unwrap();
+        assert_eq!(
+            verdict(t.root(), &Name::new("uv"), &Expected::Present { staged }),
+            Ok(())
+        );
     }
 
     #[test]

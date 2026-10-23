@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-23
+
+- **scoop 0.6.0 renamed the files `dotpkg` reads.** `current/manifest.json` and
+  `current/install.json` are now `scoop-manifest.json` and `scoop-install.json`.
+  With 0.2.1 the downloads verified and the installs really happened, yet every
+  one was reported `install did not happen -- there is no current/manifest.json`
+  and `scan` could not see the new apps at all (measured on `zenbook-a14`,
+  2026-10-23: `uv` installed with `uv.exe` on disk, 0 of 18 verified). Both
+  spellings are read, new name first, because apps installed by the older scoop
+  keep the old names until reinstalled.
+
 ## 0.2.1 — 2026-10-23
 
 - **scoop 0.6.0 no longer broke every download.** scoop's success line changed
